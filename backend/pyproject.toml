@@ -8,12 +8,16 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
-    "sqlalchemy>=2.0.36",
+    "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30.0",
-    "redis>=5.2.0",
-    "celery>=5.4.0",
+    "alembic>=1.13.0",
+    "cryptography>=42.0.0",
     "httpx>=0.28.0",
+    "python-multipart>=0.0.12",
 ]
+
+[tool.setuptools.packages.find]
+include = ["core*", "api*", "services*", "ai*", "adapters*", "workers*", "migrations*"]
 
 [project.optional-dependencies]
 dev = [
@@ -22,8 +26,9 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.7.0",
     "mypy>=1.13.0",
-    "httpx>=0.28.0",
     "factory-boy>=3.3.0",
+    "psycopg2-binary>=2.9.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [tool.ruff]
@@ -32,6 +37,12 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "ARG"]
+ignore = ["B008", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/*" = ["E501"]
+"ai/client.py" = ["ARG002"]
+"ai/prompts.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -44,4 +55,4 @@ asyncio_mode = "auto"
 
 [build-system]
 requires = ["setuptools>=75.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
