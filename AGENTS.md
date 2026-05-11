@@ -6,7 +6,7 @@ Greenfield repo for an **AI Browser Workflow Runtime**: a browser extension + Py
 
 ## Current state
 
-No code yet. Only a PRD (`# PRD — AI Browser Workflow Runtime.md`) and `opencode.json`. All implementation work is scaffolding from the PRD spec.
+Greenfield with monorepo scaffolded. PRD at `# PRD — AI Browser Workflow Runtime.md`, design spec at `UI-UX-SPEC.md`. Extension and backend packages have project configs and directory structure but no implementation code yet.
 
 ## Planned architecture (from PRD)
 
@@ -61,6 +61,24 @@ All transitions must be explicit and logged.
 - `memory/conventions.md` — repo-specific conventions (use `opencode.json` instructions as source)
 - `memory/changes.md` — record of significant changes made
 
+## Custom slash commands
+
+| Command | Description |
+|---|---|
+| `/lint` | Run lint across backend + extension |
+| `/test` | Run full test suite (both packages) |
+| `/checkpoint` | lint → typecheck → test (ordered, stops on failure) |
+| `/docker-up` | Start all Docker services |
+| `/review` | Multi-lens code review (launches @code-reviewer + @qa in parallel) |
+
+## Agent skills (loaded on demand)
+
+| Skill | Description |
+|---|---|
+| `code-review` | Multi-lens review using architect, code-reviewer, and QA in parallel |
+| `pre-commit` | Full quality gate: lint → typecheck → test → review |
+| `scaffold-module` | Create a new module following repo conventions |
+
 ## OpenCode MCP tools configured
 
 - **playwright** — browser automation for testing
@@ -79,7 +97,7 @@ All transitions must be explicit and logged.
 
 - `UI-UX-SPEC.md` — full UI/UX design specification
 
-## Developer commands (once scaffolded)
+## Developer commands
 
 - `docker compose up` — start all services locally
 - Tests: run via Playwright (browser E2E) and pytest (unit/integration)

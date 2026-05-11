@@ -1,5 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md",
+    "UI-UX-SPEC.md",
+    "memory/decisions.md",
+    "memory/conventions.md"
+  ],
   "mcp": {
     "playwright": {
       "type": "local",
