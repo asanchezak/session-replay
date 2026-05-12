@@ -225,7 +225,31 @@ async def complete_run(
     except StateTransitionError as e:
         return _error("STATE_ERROR", str(e), status=409)
 
-    return {"id": str(run.id), "status": run.status}
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+    }
+
+
+@router.post("/{run_id}/advance_step")
+async def advance_step_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    try:
+        run = await svc.advance_step(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "current_step_index": run.current_step_index,
+    }
 
 
 @router.post("/interventions")

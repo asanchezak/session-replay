@@ -8,14 +8,6 @@ Browser extension + Python backend that records, replays, self-heals, and syncs 
 
 Fully implemented kernel (record→store→replay) with 49 backend tests (76% coverage), 13 extension tests. Backend and extension are functional. Frontend has stub pages + live Dashboard/Workflows/WorkflowDetail plus foundation components.
 
-## Key product principles
-
-1. **Deterministic first, AI second** — never invoke AI when a deterministic rule can handle it
-2. **Intention over selector** — every action stores intent, not just CSS selectors
-3. **Audit everything** — append-only, SHA-256 hash chain with nonce
-4. **Human control always** — pause on CAPTCHA/login/2FA/unexpected modal
-5. **Reusable by design** — Odoo is first adapter; generic `BaseAdapter` interface
-
 ## Workflow state machine
 
 `idle → recording → validated → queued → running → waiting_for_user → recovering → failed → completed → canceled`
