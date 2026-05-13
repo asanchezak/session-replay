@@ -106,6 +106,48 @@ class WorkflowService:
         )
         return result.scalar() or 0
 
+    async def update_workflow(
+        self,
+        workflow_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        prompt: str | None = None,
+        target_url: str | None = None,
+    ) -> Workflow:
+        workflow = await self.get(workflow_id)
+        if name is not None:
+            workflow.name = name
+        if description is not None:
+            workflow.description = description
+        if prompt is not None:
+            workflow.prompt = prompt
+        if target_url is not None:
+            workflow.target_url = target_url
+        await self.session.flush()
+        return workflow
+
+    async def update_step(
+        self,
+        workflow_id: str,
+        step_index: int,
+        selector_chain: list | None = None,
+        intent: str | None = None,
+        ai_hint: str | None = None,
+    ) -> WorkflowStep:
+        await self.get(workflow_id)
+        steps = await self.get_steps(workflow_id)
+        for step in steps:
+            if step.step_index == step_index:
+                if selector_chain is not None:
+                    step.selector_chain = selector_chain
+                if intent is not None:
+                    step.intent = intent
+                if ai_hint is not None:
+                    step.ai_hint = ai_hint
+                await self.session.flush()
+                return step
+        raise NotFoundError(f"Step {step_index} not found in workflow {workflow_id}")
+
     async def delete(self, workflow_id: str) -> None:
         workflow = await self.get(workflow_id)
         await self.session.delete(workflow)

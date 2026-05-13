@@ -20,5 +20,6 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     total_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

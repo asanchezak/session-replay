@@ -107,9 +107,10 @@ class OpenAIProvider(AIProvider):
         return data["data"][0]["embedding"]
 
 
-def get_ai_provider() -> AIProvider:
-    if settings.ai_provider == "openai" and settings.ai_api_key:
+def get_ai_provider(api_key_override: str | None = None) -> AIProvider:
+    effective_key = api_key_override or settings.ai_api_key
+    if settings.ai_provider == "openai" and effective_key:
         return OpenAIProvider(
-            api_key=settings.ai_api_key, model=settings.ai_model
+            api_key=effective_key, model=settings.ai_model
         )
     return MockProvider()

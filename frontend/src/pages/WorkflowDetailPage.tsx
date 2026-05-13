@@ -9,6 +9,8 @@ interface Step {
   step_index: number;
   action_type: string;
   intent?: string;
+  selector_chain?: Array<{ type: string; value: string }>;
+  value?: string;
 }
 
 interface WorkflowDetail {
@@ -36,9 +38,15 @@ export default function WorkflowDetailPage() {
     if (!workflowId) return;
     setRunning(true);
     try {
-      await fetchData("POST", `/workflows/${workflowId}/run`);
+      await fetch(`/v1/workflows/${workflowId}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": "dev-api-key-change-in-production",
+        },
+      });
     } catch {
-      // handled by fetchData
+      // handled silently
     }
     setRunning(false);
   };
@@ -98,8 +106,14 @@ export default function WorkflowDetailPage() {
                 className="flex items-center gap-3 py-2 px-3 rounded-md text-sm text-[#E8EAED] hover:bg-[#242836] transition-colors"
               >
                 <span className="text-[#6B7280] text-xs w-5">{step.step_index}.</span>
-                <span className="text-[#74B9FF] text-xs uppercase">{step.action_type}</span>
-                {step.intent && <span className="text-[#9AA0B0]">{step.intent}</span>}
+                <span className="text-[#74B9FF] text-xs uppercase font-medium">{step.action_type}</span>
+                {step.selector_chain && step.selector_chain[0] && (
+                  <span className="text-[#6B7280] text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
+                    {step.selector_chain[0].value}
+                  </span>
+                )}
+                {step.value && <span className="text-[#9AA0B0] text-xs">"{step.value.slice(0, 50)}"</span>}
+                {step.intent && <span className="text-[#9AA0B0] text-xs italic">{step.intent}</span>}
               </div>
             ))}
           </div>

@@ -61,22 +61,33 @@ function findElementByText(text: string): Element | null {
   return null;
 }
 
-function findElementByAccessibility(roleLabel: string): Element | null {
-  const [role, label] = roleLabel.split("|");
+function findElementByAccessibility(data: string): Element | null {
+  let role = "";
+  let label = "";
+
+  try {
+    const parsed = JSON.parse(data);
+    role = parsed[0] || "";
+    label = parsed[1] || "";
+  } catch {
+    const parts = data.split("|");
+    role = parts[0] || "";
+    label = parts[1] || "";
+  }
 
   if (label) {
-    const byLabel = document.querySelector<HTMLElement>(
-      `[aria-label="${label}"]`,
-    );
-    if (byLabel) return byLabel;
+    const elements = document.querySelectorAll<HTMLElement>("[aria-label]");
+    for (const el of elements) {
+      if (el.getAttribute("aria-label") === label) return el;
+    }
+  }
 
-    const byRole = document.querySelector<HTMLElement>(
-      `[role="${role}"]`,
-    );
+  if (role) {
+    const byRole = document.querySelector<HTMLElement>(`[role="${role.replace(/"/g, '\\"')}"]`);
     if (byRole) return byRole;
   }
 
-  return document.querySelector<HTMLElement>(`[role="${role}"]`);
+  return null;
 }
 
 function findElementByXPath(xpath: string): Element | null {
@@ -162,6 +173,79 @@ function simulateNavigate(value?: string): boolean {
   return false;
 }
 
+const FRAMEWORK_ATTR_PREFIXES = ["data-react", "data-v-", "data-svelte-", "data-ng-", "data-debug", "data-server-rendered"];
+
+const PII_PATTERNS = [
+  /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g,
+  /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
+  /\b\d{4}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{4}\b/g,
+  /\b\d{3}-\d{2}-\d{4}\b/g,
+];
+
+function isFrameworkAttr(name: string): boolean {
+  return FRAMEWORK_ATTR_PREFIXES.some((p) => name.startsWith(p));
+}
+
+function sanitizeNode(node: Node, depth: number = 0): string {
+  if (depth > 10) return "";
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent || "";
+    return text.length > 200 ? text.slice(0, 200) + "..." : text;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const el = node as Element;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "script" || tag === "style" || tag === "iframe") return "";
+
+  const attrs: string[] = [];
+  for (const attr of el.attributes) {
+    const n = attr.name;
+    if (n === "id" || n === "class" || n === "role" || n === "aria-label" ||
+        n === "data-testid" || n === "data-cy" || n === "data-qa" || n === "data-test" ||
+        n === "name" || n === "href" || n === "src" || n === "type" || n === "placeholder" ||
+        n.startsWith("aria-")) {
+      if (n === "value") continue;
+      if (n === "href" || n === "src") {
+        try {
+          const url = new URL(attr.value, window.location.href);
+          if (url.origin !== window.location.origin) continue;
+        } catch { continue; }
+      }
+      attrs.push(`${n}="${attr.value.replace(/"/g, "&quot;")}"`);
+    }
+  }
+  let html = `<${tag}` + (attrs.length > 0 ? " " + attrs.join(" ") : "") + ">";
+  for (const child of el.childNodes) {
+    html += sanitizeNode(child, depth + 1);
+  }
+  html += `</${tag}>`;
+  return html;
+}
+
+function redactPII(text: string): string {
+  let result = text;
+  for (const pattern of PII_PATTERNS) {
+    result = result.replace(pattern, "[REDACTED]");
+  }
+  return result;
+}
+
+export function captureDomSnippet(selectorPattern: string): { html: string; url: string; title: string } {
+  let target: Element | null = null;
+  try {
+    target = document.querySelector(selectorPattern);
+  } catch {
+    // Invalid selector, try body
+  }
+  const root = target || document.body;
+  const html = redactPII(sanitizeNode(root));
+  return {
+    html: html.slice(0, 4000),
+    url: window.location.href,
+    title: document.title,
+  };
+}
+
 export function executeStep(step: StepToExecute): StepResult {
   let element: Element | null = null;
 
@@ -178,13 +262,16 @@ export function executeStep(step: StepToExecute): StepResult {
   try {
     switch (step.action_type) {
       case "click":
-        simulateClick(element!);
+        if (!simulateClick(element!))
+          return { success: false, error: "Click was canceled by the page" };
         break;
       case "type":
-        simulateType(element!, step.value);
+        if (!simulateType(element!, step.value))
+          return { success: false, error: "Cannot type into this element" };
         break;
       case "select":
-        simulateSelect(element!, step.value);
+        if (!simulateSelect(element!, step.value))
+          return { success: false, error: "Cannot select on this element" };
         break;
       case "scroll":
         simulateScroll(element!);

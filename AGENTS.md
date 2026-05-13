@@ -6,7 +6,7 @@ Browser extension + Python backend that records, replays, self-heals, and syncs 
 
 ## Current state
 
-Fully implemented kernel (record→store→replay) with 49 backend tests (76% coverage), 13 extension tests. Backend and extension are functional. Frontend has stub pages + live Dashboard/Workflows/WorkflowDetail plus foundation components.
+Fully implemented kernel (record→store→replay) with 49 backend tests (76% coverage), 13 extension tests. Backend and extension are functional. Frontend has stub pages plus live Dashboard/Workflows/WorkflowDetail plus foundation components.
 
 ## Workflow state machine
 
@@ -14,16 +14,56 @@ Fully implemented kernel (record→store→replay) with 49 backend tests (76% co
 
 All transitions explicit and logged. State machine at `backend/core/state_machine.py`.
 
+## Extension build
+
+- `vite.config.ts` MUST have `base: "./"` — otherwise built HTML uses absolute paths (`/popup.js`) that break in Chrome extension context
+- HTML entry files must be at extension root (`popup.html`, `panel.html`) NOT in subdirectories — relative paths resolve from extension root
+- `manifest.json` references e.g. `dist/popup.html` (not `dist/popup/index.html`)
+- Icons (16/48/128) must exist at `extension/icons/` — Chrome rejects load without them
+
+## Quick start
+
+```bash
+make dev              # Starts backend + frontend (uses screen sessions)
+# or individually:
+make dev-backend      # Start just the backend (port 8081)
+make dev-frontend     # Start just the frontend (port 5173)
+```
+
+Port 8000 conflict: `easy-recruit-workflow` Docker project uses 8000. If `make dev` fails or routes show `/api/v1/job-requests`, stop it with `docker compose -p easy-recruit-workflow down` first.
+
+## Debugging the extension
+
+Extension logs are automatically sent to `POST /v1/debug/log` (no API key needed). View them:
+
+```bash
+# All recent logs
+curl -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v1/debug/logs
+
+# Filter by source
+curl -H "X-API-Key: dev-api-key-change-in-production" "http://localhost:8081/v1/debug/logs?source=service-worker"
+
+# Filter since a Unix timestamp
+curl -H "X-API-Key: dev-api-key-change-in-production" "http://localhost:8081/v1/debug/logs?since=$(date +%s)"
+
+# Tail logs (using jq)
+curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v1/debug/logs | python3 -m json.tool
+```
+
 ## Exact commands
 
 | Command | What it does |
 |---|---|
 | `make lint` | ruff (backend) + tsc --noEmit (extension + frontend) |
-| `make test` | pytest backend + vitest extension |
+| `make test` | pytest backend + vitest extension + playwright e2e |
+| `make test-e2e` | playwright e2e tests only (extension loaded in Chromium) |
 | `make coverage` | pytest with HTML coverage report |
-| `make check` | lint + typecheck + test (quality gate) |
+| `make coverage-e2e` | playwright with HTML report |
+| `make check` | lint + typecheck + test + build (quality gate) |
+| `make build` | tsc --noEmit + vite build (both extension + frontend) |
 | `cd backend && uv run pytest tests/path -v` | single test file |
-| `cd extension && npx vitest run` | extension tests |
+| `cd extension && npx vitest run` | extension unit tests |
+| `cd extension && npx playwright test` | extension e2e tests |
 | `cd backend && uv run ruff check --fix .` | auto-fix lint |
 | `cd extension && npx tsc --noEmit` | extension typecheck |
 
@@ -43,7 +83,9 @@ All transitions explicit and logged. State machine at `backend/core/state_machin
 - API key + base URL: stored in `chrome.storage.session` (NOT hardcoded)
 - Content script events: bubble phase, check `event.defaultPrevented`
 - Replay selector chain: css → text → accessibility → xpath
-- Event buffer: 2s flush interval, batch size 5, retry queue with exponential backoff
+- Event buffer: local in-memory queue persisted to `chrome.storage.session` (survives SW restart)
+- Recording state: stored in `chrome.storage.session`, content script uses `chrome.storage.onChanged` to react (no message race)
+- Shadow DOM replay panel: `mode: 'closed'` for full CSS isolation
 
 ## Frontend conventions
 
@@ -60,7 +102,9 @@ All transitions explicit and logged. State machine at `backend/core/state_machin
 - **created_at ordering**: All events for a run must have unique timestamps. The `server_default=func.now()` has only second precision in SQLite — always pass `created_at` explicitly.
 - **Test isolation**: Tests use shared session (no commit). Use `await session.flush()` to persist within a test, `session.rollback()` cleans up.
 - **FRONTEND**: Contains stub pages for Audit, Connectors, Settings, and Run/Replay views. These need full implementation following the `UI-UX-SPEC.md`. The component library foundation exists but needs expansion.
-- **E2E tests**: Directory exists but is empty. Playwright setup is a separate effort.
+- **E2E tests**: Playwright tests in `extension/e2e/` load the full extension in Chromium via `launchPersistentContext`. Use `make test-e2e` or `cd extension && npx playwright test`.
+- **SW state persistence**: Recording state is stored in `chrome.storage.session` with `setAccessLevel('TRUSTED_AND_UNTRUSTED_CONTEXTS')` so content scripts can read it directly. The `chrome.storage.onChanged` listener in the content script replaces the SET_RECORDING message as the primary mechanism.
+- **Shadow DOM**: The content script's replay panel uses Shadow DOM (`mode: 'closed'`) for full CSS isolation from the host page.
 
 ## Memory files
 

@@ -1,0 +1,145 @@
+import type { Page, BrowserContext } from "@playwright/test";
+
+const BACKEND = "http://localhost:8081";
+const API_KEY = "dev-api-key-change-in-production";
+
+export class PopupPage {
+  constructor(
+    public page: Page,
+    public extId: string,
+  ) {}
+
+  async open() {
+    await this.page.goto(`chrome-extension://${this.extId}/dist/popup.html`);
+    await this.page.waitForTimeout(1000);
+  }
+
+  async clickRecord() {
+    await this.page.click("text=Record Workflow");
+  }
+
+  async clickStop() {
+    await this.page.click("text=Stop Recording");
+  }
+
+  async isRecording() {
+    try {
+      await this.page.getByText("Recording...").first().waitFor({ timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async isIdle() {
+    try {
+      await this.page.getByText("Record Workflow").waitFor({ timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getStepCount(): Promise<number> {
+    // Get only the recording span, not the Stop button
+    const span = this.page.locator('span').filter({ hasText: /Recording/ }).first();
+    const text = await span.textContent();
+    const match = text?.match(/(\d+)/);
+    return match ? parseInt(match[1]) : 0;
+  }
+}
+
+export class DashboardPage {
+  constructor(public page: Page) {}
+
+  async goto() {
+    await this.page.goto("http://localhost:5173/dashboard");
+  }
+
+  async gotoWorkflows() {
+    await this.page.goto("http://localhost:5173/workflows");
+  }
+
+  async gotoWorkflowDetail(workflowId: string) {
+    await this.page.goto(`http://localhost:5173/workflows/${workflowId}`);
+  }
+
+  async clickWorkflowByName(name: string) {
+    await this.page.click(`text=${name}`);
+  }
+
+  async clickRun() {
+    await this.page.click("button:has-text('Run')");
+  }
+
+  async isWorkflowListed(name: string): Promise<boolean> {
+    try {
+      await this.page.getByText(name).first().waitFor({ timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+export class ExtensionHelper {
+  constructor(
+    private context: BrowserContext,
+    private extId: string,
+  ) {}
+
+  async openPopup(): Promise<PopupPage> {
+    const p = await this.context.newPage();
+    const popup = new PopupPage(p, this.extId);
+    await popup.open();
+    return popup;
+  }
+
+  async getServiceWorker() {
+    let sw = this.context.serviceWorkers()[0];
+    if (!sw) sw = await this.context.waitForEvent("serviceworker", { timeout: 15000 });
+    return sw;
+  }
+
+  async createWorkflowViaAPI(
+    name: string,
+    events: Array<{ event_type: string; payload: Record<string, unknown> }>,
+  ): Promise<string> {
+    const page = await this.context.newPage();
+    const resp = await page.request.post(`${BACKEND}/v1/workflows/record`, {
+      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
+      data: { name, events },
+    });
+    const body = await resp.json();
+    await page.close();
+    return body.id;
+  }
+
+  async runWorkflowViaAPI(workflowId: string): Promise<string> {
+    const page = await this.context.newPage();
+    const resp = await page.request.post(`${BACKEND}/v1/workflows/${workflowId}/run`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    const body = await resp.json();
+    await page.close();
+    return body.id;
+  }
+
+  async getRunStatus(runId: string): Promise<string> {
+    const page = await this.context.newPage();
+    const resp = await page.request.get(`${BACKEND}/v1/runs/${runId}`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    const body = await resp.json();
+    await page.close();
+    return body.status;
+  }
+
+  async advanceStep(runId: string): Promise<void> {
+    const page = await this.context.newPage();
+    await page.request.post(`${BACKEND}/v1/runs/${runId}/advance_step`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    await page.close();
+  }
+}

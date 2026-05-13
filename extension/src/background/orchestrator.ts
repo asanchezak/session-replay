@@ -1,112 +1,199 @@
 import type { ActionEvent, PopupState } from "../shared/types";
 import { apiClient } from "./api";
+import { createLogger } from "../shared/logger";
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
+const log = createLogger("orchestrator");
+const STORAGE_KEY = "recording_state";
+
+// Allow content scripts to read recording state directly from storage
+// This eliminates the race between SET_RECORDING message and SW restart
+chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }).catch(() => {});
+
+let _initPromise: Promise<void> | null = null;
+let _eventQueue: ActionEvent[] = [];
+let _drainTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function drainQueue(orchestrator: Orchestrator): void {
+  const batch = _eventQueue.splice(0);
+  if (batch.length === 0) return;
+  log.log(`Draining ${batch.length} queued events after SW restart`);
+
+  for (const ev of batch) {
+    orchestrator.eventBuffer.push(ev);
+  }
+  orchestrator.broadcastState();
+  orchestrator.persist();
+
+  if (_drainTimeout) {
+    clearTimeout(_drainTimeout);
+    _drainTimeout = null;
+  }
+}
 
 export class Orchestrator {
-  private eventBuffer: ActionEvent[] = [];
-  private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private popupState: PopupState = { type: "idle" };
-  private isRecording = false;
-  private retryQueue: ActionEvent[] = [];
+  eventBuffer: ActionEvent[] = [];
+  private _isRecording = false;
+  private _recordingName = "";
+  private _ready = false;
 
-  startRecording(): void {
-    this.isRecording = true;
-    this.eventBuffer = [];
-    this.retryQueue = [];
-    this.popupState = { type: "recording", step_count: 0 };
-    this.broadcastState();
-    this.flushTimer = setInterval(() => this.flush(), 2000);
+  get isRecording(): boolean {
+    return this._isRecording;
   }
 
-  async stopRecording(): Promise<ActionEvent[]> {
-    this.isRecording = false;
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
+  constructor() {
+    this._init();
+  }
+
+  private async _init(): Promise<void> {
+    if (_initPromise) return;
+    _initPromise = this._tryRestore();
+    await _initPromise;
+    this._ready = true;
+    drainQueue(this);
+  }
+
+  private async _tryRestore(): Promise<void> {
+    try {
+      const stored = await chrome.storage.session.get(STORAGE_KEY);
+      const data = stored[STORAGE_KEY] as
+        | { isRecording: true; events: ActionEvent[]; name: string }
+        | undefined;
+      if (data?.isRecording && Array.isArray(data.events)) {
+        this._isRecording = true;
+        this.eventBuffer = [...data.events];
+        this._recordingName = data.name || "";
+        log.log(`Restored recording session (${this.eventBuffer.length} buffered events)`);
+        this.broadcastState();
+      }
+    } catch {
+      // first run or storage unavailable
     }
-    await this.flush();
-    await this.flushRetryQueue();
+  }
+
+  async persist(): Promise<void> {
+    try {
+      await chrome.storage.session.set({
+        [STORAGE_KEY]: {
+          isRecording: this._isRecording,
+          events: this.eventBuffer,
+          name: this._recordingName,
+        },
+      });
+    } catch {
+      // storage write failed
+    }
+  }
+
+  private async _clearStorage(): Promise<void> {
+    try {
+      await chrome.storage.session.remove(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  startRecording(): void {
+    this._isRecording = true;
+    this.eventBuffer = [];
+    this._recordingName = "";
+    this.broadcastState();
+    this.persist();
+  }
+
+  async stopRecording(): Promise<{ id: string; name: string; step_count: number } | null> {
+    this._isRecording = false;
     const events = [...this.eventBuffer];
     this.eventBuffer = [];
-    this.popupState = { type: "idle" };
-    this.broadcastState();
-    return events;
+    await this._clearStorage();
+
+    if (events.length === 0) {
+      this.broadcastState();
+      return null;
+    }
+
+    const name = this._recordingName || `Recording ${new Date().toLocaleString()}`;
+    const targetUrl = events.find(e => e.page_url)?.page_url || null;
+
+    try {
+      const result = await apiClient.recordWorkflow(name, targetUrl, events);
+      log.log(`Workflow recorded: ${result.id} (${result.step_count} steps)`);
+      this.broadcastState();
+      return result;
+    } catch (err) {
+      log.error("Failed to save workflow recording:", err);
+      this.broadcastState();
+      return null;
+    }
   }
 
   async pushEvent(event: ActionEvent): Promise<void> {
-    if (!this.isRecording) return;
+    if (this._ready && !this._isRecording) {
+      return;
+    }
+    if (!this._ready) {
+      _eventQueue.push(event);
+      if (!_drainTimeout) {
+        _drainTimeout = setTimeout(() => drainQueue(this), 5000);
+      }
+      return;
+    }
 
     this.eventBuffer.push(event);
-    this.popupState = {
-      type: "recording",
-      step_count: this.eventBuffer.length,
-    };
     this.broadcastState();
-
-    if (this.eventBuffer.length >= 5) {
-      await this.flush();
-    }
+    await this.persist();
   }
 
-  private async flush(): Promise<void> {
-    if (this.eventBuffer.length === 0) return;
+  setRecordingName(name: string): void {
+    this._recordingName = name;
+  }
 
-    const batch = [...this.eventBuffer];
-    this.eventBuffer = [];
+  broadcastState(state?: PopupState): void {
+    const s = state || (this._isRecording
+      ? { type: "recording", step_count: this.eventBuffer.length }
+      : { type: "idle" });
+    chrome.runtime.sendMessage({ type: "STATE_UPDATE", state: s }).catch(() => {});
+  }
 
-    const results = await Promise.allSettled(
-      batch.map((event) => apiClient.recordEvent(event)),
-    );
-
-    const failures: ActionEvent[] = [];
-    results.forEach((r, i) => {
-      if (r.status === "rejected") {
-        failures.push(batch[i]);
-      }
+  notifyRunning(workflowName: string, currentStep: number, totalSteps: number, runId: string): void {
+    this.broadcastState({
+      type: "running",
+      workflow_name: workflowName,
+      current_step: currentStep,
+      total_steps: totalSteps,
+      run_id: runId,
     });
-
-    if (failures.length > 0) {
-      console.warn(`Failed to send ${failures.length}/${batch.length} events, queuing for retry`);
-      this.retryQueue.push(...failures);
-    }
   }
 
-  private async flushRetryQueue(): Promise<void> {
-    if (this.retryQueue.length === 0) return;
-
-    const batch = [...this.retryQueue];
-    this.retryQueue = [];
-
-    for (const event of batch) {
-      let success = false;
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          await apiClient.recordEvent(event);
-          success = true;
-          break;
-        } catch (err) {
-          console.warn(`Retry ${attempt}/${MAX_RETRIES} failed for event:`, err);
-          if (attempt < MAX_RETRIES) {
-            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * attempt));
-          }
-        }
-      }
-      if (!success) {
-        console.error(`Failed to send event after ${MAX_RETRIES} retries, discarding`);
-      }
-    }
-  }
-
-  private broadcastState(): void {
-    chrome.runtime.sendMessage({ type: "STATE_UPDATE", state: this.popupState }).catch(() => {
-      // Popup may not be open
+  notifyRecovering(workflowName: string, currentStep: number, totalSteps: number, runId: string, error: string): void {
+    this.broadcastState({
+      type: "recovering",
+      workflow_name: workflowName,
+      current_step: currentStep,
+      total_steps: totalSteps,
+      run_id: runId,
+      error,
     });
+  }
+
+  notifyFailed(workflowName: string, currentStep: number, totalSteps: number, runId: string, error: string): void {
+    this.broadcastState({
+      type: "failed",
+      workflow_name: workflowName,
+      current_step: currentStep,
+      total_steps: totalSteps,
+      run_id: runId,
+      error,
+    });
+  }
+
+  notifyIdle(): void {
+    this.broadcastState({ type: "idle" });
   }
 
   getState(): PopupState {
-    return this.popupState;
+    return this._isRecording
+      ? { type: "recording", step_count: this.eventBuffer.length }
+      : { type: "idle" };
   }
 }
 

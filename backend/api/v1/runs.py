@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +9,29 @@ from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
 from core.models.intervention import HumanIntervention
 from services.execution_service import ExecutionService
+from services.healing_service import HealingService
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+# In-memory heal overrides for testing (maps run_id → override dict, "__all__" for global)
+_HEAL_OVERRIDES: dict[str, dict] = {}
+
+
+class InjectHealOverrideRequest(BaseModel):
+    run_id: str = "__all__"
+    response: dict
+
+
+@router.post("/testing/inject-heal-override")
+async def inject_heal_override(req: InjectHealOverrideRequest):
+    _HEAL_OVERRIDES[req.run_id] = req.response
+    return {"injected": True}
+
+
+@router.post("/testing/clear-heal-overrides")
+async def clear_heal_overrides():
+    _HEAL_OVERRIDES.clear()
+    return {"cleared": True}
 
 
 class CreateRunRequest(BaseModel):
@@ -240,6 +261,212 @@ async def advance_step_run(
     svc = ExecutionService(db)
     try:
         run = await svc.advance_step(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "current_step_index": run.current_step_index,
+    }
+
+
+@router.post("/{run_id}/next-step")
+async def get_next_step(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    try:
+        run = await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    if run.status != "running":
+        return _error(
+            "STATE_ERROR",
+            f"Run is '{run.status}', must be 'running' to get next step",
+            status=409,
+        )
+
+    snapshot = run.workflow_snapshot or {}
+    steps = snapshot.get("steps", [])
+    idx = run.current_step_index
+    if idx >= len(steps):
+        return _error("STATE_ERROR", "All steps completed", status=409)
+
+    step = steps[idx]
+    return {
+        "run_id": run_id,
+        "step_index": idx,
+        "action_type": step.get("action_type"),
+        "intent": step.get("intent"),
+        "selector_chain": step.get("selector_chain"),
+        "value": step.get("value"),
+        "methods": step.get("methods"),
+    }
+
+
+class HealStepRequest(BaseModel):
+    step_index: int
+    dom_snippet: str
+    old_selectors: list[str]
+    intent: str | None = None
+    override_response: dict | None = None
+
+
+class HealResultRequest(BaseModel):
+    step_index: int
+    success: bool
+    error: str | None = None
+    new_selectors: list[dict] | None = None
+
+
+class StepResultRequest(BaseModel):
+    step_index: int
+    action_type: str | None = None
+    success: bool
+    error: str | None = None
+    screenshot_ref: str | None = None
+
+
+@router.post("/{run_id}/step-result")
+async def report_step_result(
+    run_id: str,
+    req: StepResultRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    from services.audit import AuditService
+    audit = AuditService(db)
+
+    try:
+        run = await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    if run.status not in ("running", "recovering"):
+        return _error(
+            "STATE_ERROR",
+            f"Run is '{run.status}', must be 'running' or 'recovering'",
+            status=409,
+        )
+
+    await audit.append(
+        event_type="step_executed",
+        payload={
+            "step_index": req.step_index,
+            "action_type": req.action_type,
+            "success": req.success,
+            "error": req.error,
+            "screenshot_ref": req.screenshot_ref,
+        },
+        run_id=run_id,
+    )
+
+    if req.step_index != run.current_step_index:
+        return _error(
+            "STEP_INDEX_MISMATCH",
+            f"Expected step {run.current_step_index}, got {req.step_index}",
+            status=409,
+        )
+
+    if req.success:
+        run.error_summary = None
+        run = await svc.advance_step(run_id)
+    else:
+        run = await svc.fail(run_id, req.error or "Step failed")
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "current_step_index": run.current_step_index,
+        "error_summary": run.error_summary,
+    }
+
+
+@router.post("/{run_id}/recover")
+async def recover_run(
+    run_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = HealingService(db)
+    try:
+        run = await svc.recover(
+            run_id,
+            step_index=body.get("step_index", 0),
+            error=body.get("error", "Step failed — attempting recovery"),
+        )
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "current_step_index": run.current_step_index,
+    }
+
+
+@router.post("/{run_id}/heal-step")
+async def heal_step(
+    run_id: str,
+    req: HealStepRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = HealingService(db)
+    try:
+        run = await svc.execution.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    ai_api_key = request.headers.get("X-AI-API-Key")
+    override = _HEAL_OVERRIDES.pop(run_id, None) or _HEAL_OVERRIDES.get("__all__")
+    if override:
+        result = {
+            "new_selectors": override.get("fallback_selectors", override.get("new_selectors", [])),
+            "confidence": override.get("confidence", 0.0),
+            "explanation": override.get("explanation", ""),
+        }
+    elif req.override_response:
+        result = req.override_response
+    else:
+        result = await svc.suggest_heal(
+            run=run,
+            step_index=req.step_index,
+            dom_snippet=req.dom_snippet,
+            old_selectors=req.old_selectors,
+            intent=req.intent,
+            ai_api_key=ai_api_key,
+        )
+    return {
+        "step_index": req.step_index,
+        "new_selectors": result["new_selectors"],
+        "confidence": result["confidence"],
+        "explanation": result["explanation"],
+    }
+
+
+@router.post("/{run_id}/heal-result")
+async def heal_result(
+    run_id: str,
+    req: HealResultRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = HealingService(db)
+    try:
+        if req.success:
+            run = await svc.heal_succeeded(
+                run_id, req.step_index, new_selectors=req.new_selectors
+            )
+        else:
+            run = await svc.heal_failed(
+                run_id, req.step_index, error=req.error or "Healing failed"
+            )
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
     except StateTransitionError as e:

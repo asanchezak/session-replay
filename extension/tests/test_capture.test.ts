@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Mock CSS.escape for JSDOM
+if (typeof CSS === "undefined") {
+  (globalThis as any).CSS = {};
+}
+(CSS as any).escape = (val: string) => val.replace(/[!"#$%&'()*+,./:;<=>?@[\]^`{|}~\\]/g, "\\$&");
+
 // Mock chrome API
 globalThis.chrome = {
   runtime: { sendMessage: vi.fn(), onMessage: { addListener: vi.fn(), removeListener: vi.fn() } },
@@ -13,22 +19,20 @@ describe("Capture utilities", () => {
     document.body.innerHTML = "";
   });
 
-  it("should build a selector from element ID", async () => {
-    const { buildSelector } = await import("../src/content/capture");
+  it("should build a CSS selector from element ID", async () => {
+    const { buildCssSelector } = await import("../src/content/selectors");
     const el = document.createElement("button");
     el.id = "submit-btn";
     document.body.appendChild(el);
-    expect(buildSelector(el as HTMLElement)).toBe("#submit-btn");
+    expect(buildCssSelector(el as HTMLElement)).toBe("#submit-btn");
   });
 
-  it("should build a selector from class and tag", async () => {
-    const { buildSelector } = await import("../src/content/capture");
+  it("should build a CSS selector with tag path when no stable attrs", async () => {
+    const { buildCssSelector } = await import("../src/content/selectors");
     const el = document.createElement("button");
-    el.className = "primary large";
     document.body.appendChild(el);
-    const selector = buildSelector(el as HTMLElement);
+    const selector = buildCssSelector(el as HTMLElement);
     expect(selector).toContain("button");
-    expect(selector).toContain("primary");
   });
 
   it("should capture click event metadata", async () => {
@@ -54,6 +58,11 @@ describe("Capture utilities", () => {
     expect(result.payload.client_x).toBe(100);
     expect(result.payload.client_y).toBe(200);
     expect(result.payload.target.selector).toContain("test-btn");
+    expect(result.payload.selector_chain).toBeDefined();
+    expect(Array.isArray(result.payload.selector_chain)).toBe(true);
+    expect(result.payload.selector_chain.length).toBeGreaterThanOrEqual(1);
+    expect(result.payload.selector_chain[0].type).toBe("css");
+    expect(result.payload.selector_chain[0].value).toContain("test-btn");
   });
 
   it("should capture input event metadata", async () => {
@@ -139,7 +148,7 @@ describe("Replay utilities", () => {
 
     const result = executeStep({
       action_type: "click",
-      selector_chain: [{ type: "accessibility", value: "button|Submit" }],
+      selector_chain: [{ type: "accessibility", value: JSON.stringify(["button", "Submit"]) }],
     });
 
     expect(result.success).toBe(true);

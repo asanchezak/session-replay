@@ -19,11 +19,19 @@ export type ActionType =
   | "paste"
   | "tab_change";
 
+export interface MethodDef {
+  action_type: ActionType;
+  selector_chain: SelectorSet[];
+  value?: string;
+}
+
 export interface RecordedStep {
   step_index: number;
   action_type: ActionType;
   intent?: string;
   selector_chain: SelectorSet[];
+  value?: string;
+  methods?: MethodDef[];
   accessibility_metadata?: Record<string, unknown>;
   text_anchors?: string[];
   dom_context?: Record<string, unknown>;
@@ -73,6 +81,8 @@ export type PopupState =
   | { type: "idle" }
   | { type: "recording"; step_count: number }
   | { type: "running"; workflow_name: string; current_step: number; total_steps: number; run_id: string }
+  | { type: "recovering"; workflow_name: string; current_step: number; total_steps: number; run_id: string; error: string }
+  | { type: "failed"; workflow_name: string; current_step: number; total_steps: number; run_id: string; error: string }
   | { type: "waiting_for_user"; reason: string; run_id: string }
   | { type: "error"; message: string };
 

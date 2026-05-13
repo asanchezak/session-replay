@@ -1,4 +1,5 @@
 import type { ActionEvent, ActionType } from "../shared/types";
+import { buildSelectors, buildCssSelector } from "./selectors";
 
 export interface CaptureResult {
   event_type: ActionType;
@@ -15,6 +16,7 @@ function getElementMetadata(target: EventTarget | null): Record<string, unknown>
   const rect = el.getBoundingClientRect();
   const tag = el.tagName.toLowerCase();
   const computedStyle = window.getComputedStyle(el);
+  const chain = buildSelectors(el);
 
   return {
     tag,
@@ -31,55 +33,100 @@ function getElementMetadata(target: EventTarget | null): Record<string, unknown>
     aria_role: el.getAttribute("role") || undefined,
     aria_label: el.getAttribute("aria-label") || undefined,
     data_attrs: getDataAttributes(el),
-    selector: buildSelector(el),
+    selector: buildCssSelector(el),
+    selector_chain: chain,
     z_index: parseInt(computedStyle.zIndex) || undefined,
+    type: (el as HTMLInputElement).type || undefined,
+    placeholder: (el as HTMLInputElement).placeholder || undefined,
+    name: (el as HTMLInputElement).name || undefined,
   };
+}
+
+function buildIntent(
+  actionType: string,
+  meta: Record<string, unknown>,
+  value?: string,
+  fieldName?: string,
+): string {
+  const text = (meta.text as string) || "";
+  const label = (meta.aria_label as string) || "";
+  const placeholder = (meta.placeholder as string) || "";
+  const name = (meta.name as string) || fieldName || "";
+  const tag = (meta.tag as string) || "";
+  const inputType = (meta.type as string) || "";
+  const href = (meta.href as string) || "";
+  const displayText = text || label || placeholder || value || "";
+  const labelHint = label ? ` (labeled "${label}")` : "";
+  const placeholderHint = placeholder ? ` (placeholder "${placeholder}")` : "";
+  const nameHint = name ? ` (field "${name}")` : "";
+
+  switch (actionType) {
+    case "click":
+      if (tag === "a" && href) {
+        return `Click the link "${displayText}" to navigate to ${href}`;
+      }
+      if (tag === "button" || tag === "input" && inputType === "submit" || tag === "input" && inputType === "button") {
+        return `Click the ${tag} "${displayText}"${labelHint}`;
+      }
+      if (displayText) {
+        return `Click on "${displayText}"${labelHint}`;
+      }
+      return `Click on ${tag} element${labelHint}${nameHint}`;
+
+    case "type": {
+      const val = value || "";
+      if (val && name) {
+        return `Type "${val.slice(0, 80)}" into ${name} field${placeholderHint}`;
+      }
+      if (val && placeholder) {
+        return `Type "${val.slice(0, 80)}" into "${placeholder}"${labelHint}`;
+      }
+      if (val) {
+        return `Type "${val.slice(0, 80)}" into ${tag}${labelHint}${placeholderHint}`;
+      }
+      return `Type into ${tag}${labelHint}${nameHint}${placeholderHint}`;
+    }
+
+    case "select": {
+      const val = value || "";
+      if (val && name) {
+        return `Select "${val}" from ${name} dropdown${labelHint}`;
+      }
+      if (val) {
+        return `Select "${val}" from ${tag}${labelHint}`;
+      }
+      return `Select an option from ${tag}${labelHint}${nameHint}`;
+    }
+
+    case "scroll":
+      return `Scroll down the page`;
+
+    case "hover":
+      if (displayText) {
+        return `Hover over "${displayText}"${labelHint}`;
+      }
+      return `Hover over ${tag} element${labelHint}`;
+
+    case "navigate":
+      return `Navigate to ${value || href || "the target URL"}`;
+
+    default:
+      return `${actionType} on ${tag}${labelHint}${nameHint}`;
+  }
 }
 
 export function getDataAttributes(el: HTMLElement): Record<string, string> | undefined {
   const attrs: Record<string, string> = {};
   for (const attr of el.attributes) {
     if (attr.name.startsWith("data-")) {
-      attrs[attr.name] = attr.value;
+      const isFramework = ["data-react", "data-v-", "data-svelte-", "data-ng-", "data-debug", "data-server-rendered"]
+        .some((p) => attr.name.startsWith(p));
+      if (!isFramework) {
+        attrs[attr.name] = attr.value;
+      }
     }
   }
   return Object.keys(attrs).length > 0 ? attrs : undefined;
-}
-
-export function buildSelector(el: HTMLElement): string {
-  if (el.id) return `#${el.id}`;
-
-  const parts: string[] = [];
-  let current: HTMLElement | null = el;
-
-  while (current && current !== document.body) {
-    let segment = current.tagName.toLowerCase();
-    if (current.id) {
-      segment = `#${current.id}`;
-      parts.unshift(segment);
-      break;
-    }
-    if (current.className && typeof current.className === "string") {
-      const classes = current.className.trim().split(/\s+/).slice(0, 2);
-      if (classes.length > 0 && classes[0]) {
-        segment += `.${classes.join(".")}`;
-      }
-    }
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children).filter(
-        (s) => s.tagName === current!.tagName,
-      );
-      if (siblings.length > 1) {
-        const index = siblings.indexOf(current) + 1;
-        segment += `:nth-of-type(${index})`;
-      }
-    }
-    parts.unshift(segment);
-    current = current.parentElement;
-  }
-
-  return parts.join(" > ");
 }
 
 function getPageContext(): { url: string; title: string } {
@@ -92,11 +139,14 @@ function getPageContext(): { url: string; title: string } {
 export function captureClick(event: MouseEvent): CaptureResult {
   const meta = getElementMetadata(event.target);
   const page = getPageContext();
+  const intent = buildIntent("click", meta);
 
   return {
     event_type: "click",
     payload: {
       target: meta,
+      intent,
+      selector_chain: meta.selector_chain,
       client_x: event.clientX,
       client_y: event.clientY,
       button: event.button,
@@ -109,19 +159,46 @@ export function captureClick(event: MouseEvent): CaptureResult {
 }
 
 export function captureInput(event: Event): CaptureResult {
-  const target = event.target as HTMLInputElement;
+  const target = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
   const meta = getElementMetadata(target);
   const page = getPageContext();
+
+  if (target instanceof HTMLSelectElement) {
+    const intent = buildIntent("select", meta, target.value, target.name);
+    return {
+      event_type: "select",
+      payload: {
+        target: meta,
+        intent,
+        selector_chain: meta.selector_chain,
+        value: target.value,
+        multiple_values: target.multiple
+          ? Array.from(target.selectedOptions).map((o) => o.value)
+          : undefined,
+        field_name: target.name || undefined,
+      },
+      page_url: page.url,
+      page_title: page.title,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   const value = target.value || target.textContent || "";
+  const name = (target as HTMLInputElement).name || "";
+  const placeholder = (target as HTMLInputElement).placeholder || "";
+  const intent = buildIntent("type", meta, value, name);
 
   return {
     event_type: "type",
     payload: {
       target: meta,
-      input_type: target.type || undefined,
+      intent,
+      selector_chain: meta.selector_chain,
+      value: value,
+      input_type: (target as HTMLInputElement).type || undefined,
       value_length: value.length,
-      field_name: target.name || undefined,
-      placeholder: target.placeholder || undefined,
+      field_name: name || undefined,
+      placeholder: placeholder || undefined,
     },
     page_url: page.url,
     page_title: page.title,

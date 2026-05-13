@@ -47,6 +47,8 @@ class ExecutionService:
                         "action_type": s.action_type,
                         "intent": s.intent,
                         "selector_chain": s.selector_chain,
+                        "value": s.value,
+                        "methods": s.methods,
                     }
                     for s in steps
                 ],

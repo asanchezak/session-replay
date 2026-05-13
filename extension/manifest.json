@@ -12,11 +12,11 @@
   ],
   "host_permissions": ["<all_urls>"],
   "action": {
-    "default_popup": "dist/popup/index.html",
+    "default_popup": "dist/popup.html",
     "default_title": "Session Replay"
   },
   "side_panel": {
-    "default_path": "dist/panel/index.html"
+    "default_path": "dist/panel.html"
   },
   "background": {
     "service_worker": "dist/background/service-worker.js",
