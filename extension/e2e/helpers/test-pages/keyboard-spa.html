@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head><title>Keyboard SPA (S08)</title></head>
+<body>
+  <input id="cmdk" placeholder="Press Cmd/Ctrl+K to focus me" />
+  <pre id="trace"></pre>
+  <script>
+    const trace = (msg) => { document.getElementById("trace").textContent += msg + "\n"; };
+    document.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        document.getElementById("cmdk").focus();
+        trace(`cmdk-focused`);
+      }
+      if (e.key === "Enter") trace(`enter pressed on ${e.target.id || e.target.tagName}`);
+      if (e.key === "Tab") trace(`tab pressed`);
+    });
+  </script>
+</body>
+</html>

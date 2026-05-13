@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
-import { useApiData } from "../hooks/useApi";
+import { useApi, useApiData } from "../hooks/useApi";
 import { Play, ArrowLeft, List, FileText } from "lucide-react";
 
 interface Step {
@@ -27,6 +27,7 @@ interface WorkflowDetail {
 export default function WorkflowDetailPage() {
   const { workflowId } = useParams<{ workflowId: string }>();
   const navigate = useNavigate();
+  const { request } = useApi();
   const { data, loading, error, fetchData } = useApiData<WorkflowDetail>();
   const [running, setRunning] = useState(false);
 
@@ -38,13 +39,7 @@ export default function WorkflowDetailPage() {
     if (!workflowId) return;
     setRunning(true);
     try {
-      await fetch(`/v1/workflows/${workflowId}/run`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-Key": "dev-api-key-change-in-production",
-        },
-      });
+      await request("POST", `/workflows/${workflowId}/run`);
     } catch {
       // handled silently
     }
@@ -52,14 +47,14 @@ export default function WorkflowDetailPage() {
   };
 
   if (loading) {
-    return <div className="text-[#9AA0B0] text-sm">Loading...</div>;
+    return <div className="text-text-secondary text-sm">Loading...</div>;
   }
 
   if (error || !data) {
     return (
       <div>
-        <div className="text-[#E17055] text-sm">Error: {error || "Workflow not found"}</div>
-        <button onClick={() => navigate("/workflows")} className="mt-4 text-[#6C5CE7] text-sm">← Back to Workflows</button>
+        <div className="text-error text-sm">Error: {error || "Workflow not found"}</div>
+        <button onClick={() => navigate("/workflows")} className="mt-4 text-accent text-sm">← Back to Workflows</button>
       </div>
     );
   }
@@ -68,18 +63,18 @@ export default function WorkflowDetailPage() {
     <div>
       <button
         onClick={() => navigate("/workflows")}
-        className="flex items-center gap-1 text-[#9AA0B0] text-sm mb-4 hover:text-[#E8EAED] transition-colors"
+        className="flex items-center gap-1 text-text-secondary text-sm mb-4 hover:text-text-primary transition-colors"
       >
         <ArrowLeft size={14} /> Back
       </button>
 
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold text-[#E8EAED] mb-1">{data.name}</h1>
+          <h1 className="text-xl font-semibold text-text-primary mb-1">{data.name}</h1>
           {data.description && (
-            <p className="text-[#9AA0B0] text-sm mb-2">{data.description}</p>
+            <p className="text-text-secondary text-sm mb-2">{data.description}</p>
           )}
-          <div className="flex items-center gap-4 text-xs text-[#9AA0B0]">
+          <div className="flex items-center gap-4 text-xs text-text-secondary">
             <StatusBadge status={data.status as any} size="sm" />
             <span>Version {data.version}</span>
             {data.target_url && <span>{data.target_url}</span>}
@@ -88,7 +83,7 @@ export default function WorkflowDetailPage() {
         <button
           onClick={handleRun}
           disabled={running}
-          className="flex items-center gap-2 px-4 py-2 bg-[#6C5CE7] text-white text-sm rounded-md hover:bg-[#7C6EF7] transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-4 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors disabled:opacity-50"
         >
           <Play size={14} /> {running ? "Starting..." : "Run"}
         </button>
@@ -96,24 +91,24 @@ export default function WorkflowDetailPage() {
 
       <div className="grid grid-cols-2 gap-6">
         <Card>
-          <h2 className="text-sm font-medium text-[#E8EAED] mb-3 flex items-center gap-2">
+          <h2 className="text-sm font-medium text-text-primary mb-3 flex items-center gap-2">
             <List size={14} /> Steps ({data.steps.length})
           </h2>
           <div className="space-y-1">
             {data.steps.map((step) => (
               <div
                 key={step.step_index}
-                className="flex items-center gap-3 py-2 px-3 rounded-md text-sm text-[#E8EAED] hover:bg-[#242836] transition-colors"
+                className="flex items-center gap-3 py-2 px-3 rounded-md text-sm text-text-primary hover:bg-bg-elevated transition-colors"
               >
-                <span className="text-[#6B7280] text-xs w-5">{step.step_index}.</span>
-                <span className="text-[#74B9FF] text-xs uppercase font-medium">{step.action_type}</span>
+                <span className="text-text-gray text-xs w-5">{step.step_index}.</span>
+                <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
                 {step.selector_chain && step.selector_chain[0] && (
-                  <span className="text-[#6B7280] text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
+                  <span className="text-text-gray text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
                     {step.selector_chain[0].value}
                   </span>
                 )}
-                {step.value && <span className="text-[#9AA0B0] text-xs">"{step.value.slice(0, 50)}"</span>}
-                {step.intent && <span className="text-[#9AA0B0] text-xs italic">{step.intent}</span>}
+                {step.value && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
+                {step.intent && <span className="text-text-secondary text-xs italic">{step.intent}</span>}
               </div>
             ))}
           </div>
@@ -121,10 +116,10 @@ export default function WorkflowDetailPage() {
 
         {data.prompt && (
           <Card>
-            <h2 className="text-sm font-medium text-[#E8EAED] mb-3 flex items-center gap-2">
+            <h2 className="text-sm font-medium text-text-primary mb-3 flex items-center gap-2">
               <FileText size={14} /> Intent / Prompt
             </h2>
-            <p className="text-[#9AA0B0] text-sm italic">"{data.prompt}"</p>
+            <p className="text-text-secondary text-sm italic">"{data.prompt}"</p>
           </Card>
         )}
       </div>

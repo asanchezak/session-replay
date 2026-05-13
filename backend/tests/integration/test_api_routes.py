@@ -6,6 +6,24 @@ from httpx import AsyncClient
 API_HEADERS = {"X-API-Key": "dev-api-key-change-in-production"}
 
 
+async def _create_active_wf(api_client: AsyncClient, name: str) -> str:
+    wf_resp = await api_client.post(
+        "/v1/workflows", json={"name": name}, headers=API_HEADERS
+    )
+    wf_id = wf_resp.json()["id"]
+    await api_client.post(
+        f"/v1/workflows/{wf_id}/steps",
+        json={"step_index": 0, "action_type": "click", "selector_chain": {"type": "css", "value": "#x"}},
+        headers=API_HEADERS,
+    )
+    await api_client.put(
+        f"/v1/workflows/{wf_id}/status",
+        json={"status": "active"},
+        headers=API_HEADERS,
+    )
+    return wf_id
+
+
 @pytest.mark.asyncio
 async def test_create_workflow(api_client: AsyncClient):
     response = await api_client.post(
@@ -66,10 +84,7 @@ async def test_create_run(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_run_workflow(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Run WF"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Run WF")
 
     response = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -80,10 +95,7 @@ async def test_run_workflow(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_pause_resume_run(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Pause Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Pause Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -108,10 +120,7 @@ async def test_pause_resume_run(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_cancel_run(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Cancel Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Cancel Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -127,10 +136,7 @@ async def test_cancel_run(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_complete_run(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Complete Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Complete Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -146,10 +152,7 @@ async def test_complete_run(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_fail_run(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Fail Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Fail Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -199,10 +202,7 @@ async def test_error_contract_on_404(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_audit_trail(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Audit Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Audit Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -235,10 +235,7 @@ async def test_audit_trail(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_checkpoint(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "CP Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "CP Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
@@ -256,10 +253,7 @@ async def test_checkpoint(api_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_intervention_recording(api_client: AsyncClient):
-    wf_resp = await api_client.post(
-        "/v1/workflows", json={"name": "Int Test"}, headers=API_HEADERS
-    )
-    wf_id = wf_resp.json()["id"]
+    wf_id = await _create_active_wf(api_client, "Int Test")
 
     run_resp = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS

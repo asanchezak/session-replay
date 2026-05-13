@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import logging
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.exceptions import NotFoundError
-from core.models.workflow import Workflow, WorkflowStep
-from services.audit import AuditService
+from core.exceptions import NotFoundError, StateTransitionError
+from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep
+from services.audit import AppendEvent, AuditService
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowService:
+    """Service for managing workflow definitions and their steps."""
+
     def __init__(self, session: AsyncSession):
         self.session = session
         self.audit = AuditService(session)
@@ -23,6 +28,7 @@ class WorkflowService:
         target_url: str | None = None,
         created_by: str | None = None,
     ) -> Workflow:
+        """Create a new workflow definition."""
         workflow = Workflow(
             name=name,
             description=description,
@@ -36,6 +42,7 @@ class WorkflowService:
         return workflow
 
     async def get(self, workflow_id: str) -> Workflow:
+        """Get a workflow by ID."""
         try:
             uid = uuid.UUID(workflow_id)
         except ValueError:
@@ -51,6 +58,7 @@ class WorkflowService:
     async def list(
         self, status: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[Workflow]:
+        """List workflows with optional status filter."""
         query = select(Workflow)
         if status:
             query = query.where(Workflow.status == status)
@@ -59,14 +67,20 @@ class WorkflowService:
         return list(result.scalars().all())
 
     async def update_status(self, workflow_id: str, status: str) -> Workflow:
+        """Update the status of a workflow."""
+        logger.info("Updating workflow status id=%s status=%s", workflow_id, status)
         workflow = await self.get(workflow_id)
+        if not WorkflowStatus.valid_transitions(workflow.status, status):
+            raise StateTransitionError(
+                f"Cannot transition from '{workflow.status}' to '{status}'"
+            )
         workflow.status = status
         await self.session.flush()
-        await self.audit.append(
-            event_type="checkpoint",
+        await self.audit.append(AppendEvent(
+            event_type="workflow_status_changed",
             payload={"workflow_id": workflow_id, "status": status},
             run_id=workflow_id,
-        )
+        ))
         return workflow
 
     async def add_step(
@@ -78,6 +92,7 @@ class WorkflowService:
         selector_chain: dict | None = None,
         **kwargs,
     ) -> WorkflowStep:
+        """Add a step to a workflow."""
         step = WorkflowStep(
             workflow_id=workflow_id,
             step_index=step_index,
@@ -91,6 +106,7 @@ class WorkflowService:
         return step
 
     async def get_steps(self, workflow_id: str) -> list[WorkflowStep]:
+        """Get all steps for a workflow, ordered by step_index."""
         result = await self.session.execute(
             select(WorkflowStep)
             .where(WorkflowStep.workflow_id == workflow_id)
@@ -99,7 +115,7 @@ class WorkflowService:
         return list(result.scalars().all())
 
     async def count_steps(self, workflow_id: str) -> int:
-        from sqlalchemy import func
+        """Count the number of steps in a workflow."""
         result = await self.session.execute(
             select(func.count(WorkflowStep.id))
             .where(WorkflowStep.workflow_id == workflow_id)
@@ -114,6 +130,7 @@ class WorkflowService:
         prompt: str | None = None,
         target_url: str | None = None,
     ) -> Workflow:
+        """Update workflow metadata."""
         workflow = await self.get(workflow_id)
         if name is not None:
             workflow.name = name
@@ -134,6 +151,7 @@ class WorkflowService:
         intent: str | None = None,
         ai_hint: str | None = None,
     ) -> WorkflowStep:
+        """Update a specific step's selectors, intent, or AI hint."""
         await self.get(workflow_id)
         steps = await self.get_steps(workflow_id)
         for step in steps:
@@ -149,10 +167,9 @@ class WorkflowService:
         raise NotFoundError(f"Step {step_index} not found in workflow {workflow_id}")
 
     async def delete(self, workflow_id: str) -> None:
+        """Delete a workflow and its steps."""
         workflow = await self.get(workflow_id)
-        await self.session.delete(workflow)
         await self.session.execute(
-            update(WorkflowStep)
-            .where(WorkflowStep.workflow_id == workflow_id)
-            .values(workflow_id=None)
+            delete(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id)
         )
+        await self.session.delete(workflow)

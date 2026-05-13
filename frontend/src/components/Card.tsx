@@ -11,7 +11,7 @@ export default function Card({ children, className = "", padding = "md", hover =
   const p = padding === "sm" ? "p-3" : padding === "lg" ? "p-6" : "p-4";
   return (
     <div
-      className={`bg-[#1A1D27] rounded-lg border border-[#2D3148] ${p} ${hover ? "hover:border-[#3D4160] transition-colors" : ""} ${className}`}
+      className={`bg-bg-surface rounded-lg border border-border ${p} ${hover ? "hover:border-border-hover transition-colors" : ""} ${className}`}
     >
       {children}
     </div>

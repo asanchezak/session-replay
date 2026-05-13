@@ -1,0 +1,106 @@
+- generic [active] [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]: Session Replay
+    - link "Dashboard" [ref=e7] [cursor=pointer]:
+      - /url: "#"
+    - link "Workflows" [ref=e8] [cursor=pointer]:
+      - /url: "#"
+    - link "Runs" [ref=e9] [cursor=pointer]:
+      - /url: "#"
+    - link "Audit" [ref=e10] [cursor=pointer]:
+      - /url: "#"
+    - link "Connectors" [ref=e11] [cursor=pointer]:
+      - /url: "#"
+    - link "Settings" [ref=e12] [cursor=pointer]:
+      - /url: "#"
+    - generic [ref=e14]: All Systems
+  - heading "Dashboard" [level=1] [ref=e16]
+  - paragraph [ref=e17]: Demo data seeded via API — real backend running on port 8000
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e20]: Active Workflows
+      - generic [ref=e21]: "2"
+    - generic [ref=e22]:
+      - generic [ref=e23]: Success Rate
+      - generic [ref=e24]: 33.3%
+    - generic [ref=e25]:
+      - generic [ref=e26]: Waiting for You
+      - generic [ref=e27]: "1"
+    - generic [ref=e28]:
+      - generic [ref=e29]: Failed Runs
+      - generic [ref=e30]: "0"
+    - generic [ref=e31]:
+      - generic [ref=e32]: Connectors
+      - generic [ref=e33]: Odoo
+  - generic [ref=e34]:
+    - generic [ref=e35]: ⚠ Requires Attention (1)
+    - list [ref=e36]:
+      - listitem [ref=e37]: "Run #138c1e7e — CAPTCHA detected on LinkedIn"
+      - listitem [ref=e38]: Selector mismatch on LinkedIn jobs listing (recovery pending)
+  - generic [ref=e39]:
+    - generic [ref=e40]:
+      - heading "Recent Runs" [level=2] [ref=e41]
+      - table [ref=e42]:
+        - rowgroup [ref=e43]:
+          - row "Run Status Step Error Started" [ref=e44]:
+            - columnheader "Run" [ref=e45]
+            - columnheader "Status" [ref=e46]
+            - columnheader "Step" [ref=e47]
+            - columnheader "Error" [ref=e48]
+            - columnheader "Started" [ref=e49]
+        - rowgroup [ref=e50]:
+          - row "#138c1e7e ⚠ Waiting For User 1/7 — 2026-05-12 15:31" [ref=e51]:
+            - cell "#138c1e7e" [ref=e52]
+            - cell "⚠ Waiting For User" [ref=e53]
+            - cell "1/7" [ref=e54]
+            - cell "—" [ref=e55]
+            - cell "2026-05-12 15:31" [ref=e56]
+          - row "#00ed4f59 ● Running 3/7 — 2026-05-12 15:31" [ref=e57]:
+            - cell "#00ed4f59" [ref=e58]
+            - cell "● Running" [ref=e59]
+            - cell "3/7" [ref=e60]
+            - cell "—" [ref=e61]
+            - cell "2026-05-12 15:31" [ref=e62]
+          - row "#6829463f ✓ Completed 3/7 — 2026-05-12 15:31" [ref=e63]:
+            - cell "#6829463f" [ref=e64]
+            - cell "✓ Completed" [ref=e65]
+            - cell "3/7" [ref=e66]
+            - cell "—" [ref=e67]
+            - cell "2026-05-12 15:31" [ref=e68]
+    - generic [ref=e69]:
+      - heading "Workflows" [level=2] [ref=e70]
+      - table [ref=e71]:
+        - rowgroup [ref=e72]:
+          - row "Name Target Status Created" [ref=e73]:
+            - columnheader "Name" [ref=e74]
+            - columnheader "Target" [ref=e75]
+            - columnheader "Status" [ref=e76]
+            - columnheader "Created" [ref=e77]
+        - rowgroup [ref=e78]:
+          - row "Candidate Search linkedin.com/jobs active 2026-05-12" [ref=e79] [cursor=pointer]:
+            - cell "Candidate Search" [ref=e80]
+            - cell "linkedin.com/jobs" [ref=e81]
+            - cell "active" [ref=e82]
+            - cell "2026-05-12" [ref=e83]
+          - row "Job Sync mycompany.odoo.com active 2026-05-12" [ref=e84] [cursor=pointer]:
+            - cell "Job Sync" [ref=e85]
+            - cell "mycompany.odoo.com" [ref=e86]
+            - cell "active" [ref=e87]
+            - cell "2026-05-12" [ref=e88]
+          - row "Profile Review — draft 2026-05-12" [ref=e89] [cursor=pointer]:
+            - cell "Profile Review" [ref=e90]
+            - cell "—" [ref=e91]
+            - cell "draft" [ref=e92]
+            - cell "2026-05-12" [ref=e93]
+  - generic [ref=e94]:
+    - heading "API Verification" [level=2] [ref=e95]
+    - paragraph [ref=e96]:
+      - text: Backend API at
+      - code [ref=e97]: localhost:8000/v1
+      - text: — ✓ Healthy
+    - paragraph [ref=e98]:
+      - code [ref=e99]: GET /v1/workflows
+      - text: ": 3 workflows returned"
+    - paragraph [ref=e100]:
+      - code [ref=e101]: GET /v1/runs
+      - text: ": 3 runs returned"

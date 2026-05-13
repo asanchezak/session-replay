@@ -81,30 +81,34 @@ export class StepHealer {
       log.log("Attempting AI healing");
       try {
         const oldSelectors = step.selector_chain.map((s) => s.value);
-        const intent = (step as any).intent || step.value || "";
+        const intent = step.intent || step.value || "";
         const healResponse = await apiClient.healStep(
           runId, stepIndex, domSnippet, oldSelectors, intent,
         );
 
-        if (healResponse.new_selectors && healResponse.new_selectors.length > 0 && healResponse.confidence > 0.3) {
-          log.log(`AI suggested ${healResponse.new_selectors.length} new selectors (confidence: ${healResponse.confidence})`);
+        if (healResponse.new_selectors && healResponse.new_selectors.length > 0) {
+          if (healResponse.confidence > 0.7) {
+            log.log(`AI suggested ${healResponse.new_selectors.length} new selectors (confidence: ${healResponse.confidence})`);
 
-          const aiStep: BackgroundToContentMessage["step"] = {
-            ...step,
-            selector_chain: healResponse.new_selectors,
-          };
-          try {
-            const aiResult = await chrome.tabs.sendMessage(tabId, {
-              type: "EXECUTE_STEP",
-              step: aiStep,
-            } as BackgroundToContentMessage);
-            const res = aiResult as { success: boolean; error?: string };
-            if (res.success) {
-              log.log(`AI healing succeeded with selector: ${healResponse.new_selectors[0]?.value}`);
-              return { success: true, newSelectors: healResponse.new_selectors };
+            const aiStep: BackgroundToContentMessage["step"] = {
+              ...step,
+              selector_chain: healResponse.new_selectors,
+            };
+            try {
+              const aiResult = await chrome.tabs.sendMessage(tabId, {
+                type: "EXECUTE_STEP",
+                step: aiStep,
+              } as BackgroundToContentMessage);
+              const res = aiResult as { success: boolean; error?: string };
+              if (res.success) {
+                log.log(`AI healing succeeded with selector: ${healResponse.new_selectors[0]?.value}`);
+                return { success: true, newSelectors: healResponse.new_selectors };
+              }
+            } catch {
+              log.error("AI selector failed during execution");
             }
-          } catch {
-            log.error("AI selector failed during execution");
+          } else if (healResponse.confidence > 0.3) {
+            return { success: false, error: "low_confidence" };
           }
         }
       } catch (err) {

@@ -1,7 +1,24 @@
-from sqlalchemy import JSON, Boolean, Integer, String, Text
+from enum import Enum
+
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin
+
+
+class WorkflowStatus(str, Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+    @classmethod
+    def valid_transitions(cls, current: str, target: str) -> bool:
+        transitions = {
+            cls.DRAFT: {cls.ACTIVE, cls.ARCHIVED},
+            cls.ACTIVE: {cls.ARCHIVED},
+            cls.ARCHIVED: set(),
+        }
+        return target in transitions.get(cls(current), set())
 
 
 class Workflow(Base, TimestampMixin, UUIDMixin):
@@ -21,11 +38,15 @@ class Workflow(Base, TimestampMixin, UUIDMixin):
 class WorkflowStep(Base, TimestampMixin, UUIDMixin):
     __tablename__ = "workflow_steps"
 
-    workflow_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     step_index: Mapped[int] = mapped_column(Integer, nullable=False)
     action_type: Mapped[str] = mapped_column(String(30), nullable=False)
     intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     selector_chain: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    methods: Mapped[list | None] = mapped_column(JSON, nullable=True)
     accessibility_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     text_anchors: Mapped[list | None] = mapped_column(JSON, nullable=True)
     dom_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)

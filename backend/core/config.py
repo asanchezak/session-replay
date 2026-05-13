@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -10,12 +11,26 @@ class Settings(BaseSettings):
     ai_model: str = "gpt-4o-mini"
     ai_confidence_threshold: float = 0.85
     deterministic_only: bool = False
-    cors_origins: list[str] = ["http://localhost:*"]
-    api_key: str = "dev-api-key-change-in-production"
-    secret_key: str = "change-me-to-a-random-secret"
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:8081"]
+    cors_origin_regex: str = r"chrome-extension://.*"
+    api_key: SecretStr = SecretStr("dev-api-key-change-in-production")
+    secret_key: SecretStr = SecretStr("change-me-to-a-random-secret")
     log_level: str = "INFO"
+    debug: bool = False
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = 600
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def check_insecure_defaults(self):
+        if self.api_key.get_secret_value() == "dev-api-key-change-in-production":
+            raise RuntimeError(
+                "Insecure default API key — set API_KEY in .env or environment"
+            )
+        if self.secret_key.get_secret_value() == "change-me-to-a-random-secret":
+            raise RuntimeError(
+                "Insecure default secret key — set SECRET_KEY in .env or environment"
+            )
 
 
 settings = Settings()

@@ -14,6 +14,7 @@ dependencies = [
     "cryptography>=42.0.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.12",
+    "fsspec>=2026.4.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -52,7 +53,19 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "postgres: requires a real PostgreSQL instance (Docker + testcontainers)",
+    "slow: takes longer than 30 seconds",
+    "real_ai: requires a real AI API key",
+]
 
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.152.7",
+    "respx>=0.23.1",
+    "testcontainers>=4.14.2",
+]

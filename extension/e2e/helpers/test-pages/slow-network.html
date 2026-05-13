@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <title>Slow page (S15)</title>
+  <script>
+    // Simulate 3G by adding a synthetic delay before showing the form.
+    const params = new URLSearchParams(location.search);
+    const delay = parseInt(params.get("delay") || "1500", 10);
+    setTimeout(() => {
+      document.body.innerHTML = `
+        <form id="f"><input id="q"/><button id="go" type="submit">Go</button></form>
+      `;
+    }, delay);
+  </script>
+</head>
+<body>Loading…</body>
+</html>

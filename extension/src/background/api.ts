@@ -177,6 +177,13 @@ export class ApiClient {
     );
   }
 
+  async pauseRun(runId: string, reason: string, stepIndex: number) {
+    return this.request<{ id: string; status: string }>(
+      "POST", `/runs/${runId}/pause`,
+      { reason, step_index: stepIndex },
+    );
+  }
+
   async getEvent(eventId: string) {
     return this.request("GET", `/events/${eventId}`);
   }

@@ -5,24 +5,25 @@ import {
   type CaptureResult,
 } from "./capture";
 import { executeStep, captureDomSnippet, type StepToExecute, type StepResult } from "./replay";
+import { detectChallenges } from "../background/detector";
 import type {
   ContentToBackgroundMessage,
   BackgroundToContentMessage,
 } from "../shared/messaging";
 
+const STORAGE_KEY = "recording_state";
+
 let recordingEnabled = false;
 let eventCount = 0;
 
 function sendDebugLog(level: string, msg: string): void {
-  // Send via background SW to avoid CSP blocks on the host page
   chrome.runtime.sendMessage({ type: "DEBUG_LOG", level, message: msg, source: "content-script" }).catch(() => {});
 }
 
 sendDebugLog("log", "Content script loaded");
 
-// Read initial recording state from storage (survives page navigation)
-chrome.storage.session.get("recording_state").then((data) => {
-  const state = data.recording_state as { isRecording: boolean; events: unknown[] } | undefined;
+chrome.storage.session.get(STORAGE_KEY).then((data) => {
+  const state = data[STORAGE_KEY] as { isRecording: boolean; events: unknown[] } | undefined;
   if (state?.isRecording) {
     recordingEnabled = true;
     eventCount = state.events?.length ?? 0;
@@ -30,23 +31,21 @@ chrome.storage.session.get("recording_state").then((data) => {
   }
 }).catch(() => {});
 
-// React to recording state changes directly from storage (no message race)
-// This replaces the SET_RECORDING message as the primary mechanism
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "session" && changes.recording_state) {
-    const state = changes.recording_state.newValue;
+  if (area !== "session") return;
+  const relevantKeys = Object.keys(changes).filter(k => k === STORAGE_KEY || k.startsWith("recording_"));
+  if (relevantKeys.length === 0) return;
+  if (changes[STORAGE_KEY]) {
+    const state = changes[STORAGE_KEY].newValue;
     recordingEnabled = state?.isRecording ?? false;
     eventCount = state?.events?.length ?? 0;
     sendDebugLog("log", `Storage: recording ${recordingEnabled ? "enabled" : "disabled"} (${eventCount} events)`);
   }
 });
 
-// Flag for Playwright tests to verify content script is injected
 (window as any).__SR_CONTENT_SCRIPT__ = true;
 
 // ── Shadow DOM Replay UI ──────────────────────────────────────────
-// Injects a replay progress panel into the page using Shadow DOM for
-// complete CSS isolation from the host page.
 
 const SHADOW_STYLES = `
   :host { all: initial; position: fixed; bottom: 16px; right: 16px; z-index: 2147483647; }
@@ -70,24 +69,55 @@ const SHADOW_STYLES = `
 let shadowHost: HTMLDivElement | null = null;
 let shadowRoot: ShadowRoot | null = null;
 
+function buildShadowPanel(): HTMLDivElement {
+  const panel = document.createElement("div");
+  panel.className = "sr-panel";
+
+  const stepDiv = document.createElement("div");
+  stepDiv.className = "step";
+  panel.appendChild(stepDiv);
+
+  const progress = document.createElement("div");
+  progress.className = "progress";
+  const progressBar = document.createElement("div");
+  progressBar.className = "progress-bar";
+  progress.appendChild(progressBar);
+  panel.appendChild(progress);
+
+  const statusDiv = document.createElement("div");
+  statusDiv.className = "status";
+  panel.appendChild(statusDiv);
+
+  return panel;
+}
+
 export function showReplayPanel(step: number, total: number, status: string): void {
-  if (!shadowHost) {
+  if (!shadowHost || !shadowHost.isConnected) {
     shadowHost = document.createElement("div");
     shadowHost.id = "sr-replay-panel";
     document.body.appendChild(shadowHost);
     shadowRoot = shadowHost.attachShadow({ mode: "closed" });
+
+    const style = document.createElement("style");
+    style.textContent = SHADOW_STYLES;
+    shadowRoot.appendChild(style);
+
+    shadowRoot.appendChild(buildShadowPanel());
   }
   if (!shadowRoot) return;
 
   const pct = total > 0 ? Math.round((step / total) * 100) : 0;
-  shadowRoot.innerHTML = `
-    <style>${SHADOW_STYLES}</style>
-    <div class="sr-panel">
-      <div class="step">Step ${step}/${total}</div>
-      <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
-      <div class="status">${status}</div>
-    </div>
-  `;
+  const panel = shadowRoot.querySelector(".sr-panel");
+  if (!panel) return;
+
+  const stepDiv = panel.querySelector(".step");
+  if (stepDiv) stepDiv.textContent = `Step ${step}/${total}`;
+
+  const progressBar = panel.querySelector(".progress-bar") as HTMLElement;
+  if (progressBar) progressBar.style.width = `${pct}%`;
+
+  const statusDiv = panel.querySelector(".status");
+  if (statusDiv) statusDiv.textContent = status;
 }
 
 export function hideReplayPanel(): void {
@@ -98,25 +128,36 @@ export function hideReplayPanel(): void {
   shadowRoot = null;
 }
 
+// ── Merged onMessage listener (E-C-12) ────────────────────────────
+
 chrome.runtime.onMessage.addListener(
   (
-    msg: BackgroundToContentMessage | { type: string; step?: BackgroundToContentMessage["step"]; selectorPattern?: string },
+    msg: BackgroundToContentMessage | { type: string; step?: BackgroundToContentMessage["step"]; selectorPattern?: string; enabled?: boolean },
     _sender: chrome.runtime.MessageSender,
     sendResponse: (response: unknown) => void,
   ) => {
     switch (msg.type) {
       case "EXECUTE_STEP":
-        const result = executeStep(msg.step as StepToExecute);
-        sendResponse({ type: "STEP_RESULT", ...result } as StepResult);
+        sendResponse({ type: "STEP_RESULT", ...executeStep((msg as BackgroundToContentMessage).step as StepToExecute) } as StepResult);
         break;
       case "CAPTURE_DOM_SNIPPET":
-        const snippet = captureDomSnippet(msg.selectorPattern || "");
-        sendResponse({ type: "DOM_SNIPPET_RESULT", ...snippet });
+        sendResponse({ type: "DOM_SNIPPET_RESULT", ...captureDomSnippet((msg as any).selectorPattern || "") });
+        break;
+      case "SET_RECORDING":
+        recordingEnabled = (msg as any).enabled ?? false;
+        eventCount = 0;
+        sendDebugLog("log", `Recording ${recordingEnabled ? "enabled" : "disabled"}`);
+        sendResponse({ success: true });
+        break;
+      case "DETECT_CHALLENGES":
+        sendResponse({ type: "CHALLENGES_DETECTED", challenges: detectChallenges() });
         break;
     }
     return true;
   },
 );
+
+// ── Event capture ──────────────────────────────────────────────────
 
 function sendToBackground(event: CaptureResult): void {
   if (!recordingEnabled) return;
@@ -157,27 +198,28 @@ document.addEventListener("change", (e: Event) => {
   }
 }, false);
 
+// ── Scroll listener with AbortController (E-C-11) ──────────────────
+
+let scrollController: AbortController | null = null;
 let scrollTimeout: ReturnType<typeof setTimeout> | null = null;
-document.addEventListener("scroll", () => {
+
+function handleScroll(event: Event): void {
   if (!recordingEnabled) return;
   if (scrollTimeout) clearTimeout(scrollTimeout);
   scrollTimeout = setTimeout(() => {
-    sendToBackground(captureScroll());
+    sendToBackground(captureScroll(event));
   }, 500);
-}, false);
+}
 
-chrome.runtime.onMessage.addListener(
-  (
-    msg2: { type: string; enabled?: boolean },
-    _sender: chrome.runtime.MessageSender,
-    sendResponse: (response: { success: boolean }) => void,
-  ) => {
-    if (msg2.type === "SET_RECORDING") {
-      recordingEnabled = msg2.enabled ?? false;
-      eventCount = 0;
-      sendDebugLog("log", `Recording ${recordingEnabled ? "enabled" : "disabled"}`);
-      sendResponse({ success: true });
-    }
-    return true;
-  },
-);
+function initScrollListener(): void {
+  if (scrollController) {
+    scrollController.abort();
+  }
+  scrollController = new AbortController();
+  document.addEventListener("scroll", handleScroll, {
+    signal: scrollController.signal,
+    passive: true,
+  });
+}
+
+initScrollListener();

@@ -44,6 +44,13 @@ async def add_step(
 
 
 async def run_workflow(client: AsyncClient, wf_id: str) -> dict:
+    resp = await client.put(
+        f"/v1/workflows/{wf_id}/status",
+        json={"status": "active"},
+        headers=API_HEADERS,
+    )
+    if resp.status_code not in (200, 409):
+        assert False, f"activate failed: {resp.text}"
     resp = await client.post(f"/v1/workflows/{wf_id}/run", headers=API_HEADERS)
     assert resp.status_code == 200, f"run_workflow failed: {resp.text}"
     return resp.json()
@@ -310,17 +317,25 @@ async def test_e2e_state_machine_boundaries(api_client: AsyncClient):
     )
     assert comp_resp.status_code == 409
 
-    # Can't fail a queued run (wait, this should work: QUEUED -> FAILED)
-    # Actually, QUEUED can't transition directly to FAILED in the state machine.
-    # Let me check: QUEUED→{RUNNING, CANCELED}, no FAILED -> this is correct.
+    # QUEUED→FAILED is now allowed (state machine includes FAILED from QUEUED)
     fail_resp = await api_client.post(
         f"/v1/runs/{run_id}/fail",
         json={"error": "test"},
         headers=API_HEADERS,
     )
-    assert fail_resp.status_code == 409
+    assert fail_resp.status_code == 200
 
-    # Transition to running first
+    # Add step and activate before transitioning to running
+    await api_client.post(
+        f"/v1/workflows/{wf_id}/steps",
+        json={"step_index": 0, "action_type": "click", "selector_chain": {"type": "css", "value": "#x"}},
+        headers=API_HEADERS,
+    )
+    await api_client.put(
+        f"/v1/workflows/{wf_id}/status",
+        json={"status": "active"},
+        headers=API_HEADERS,
+    )
     run_resp2 = await api_client.post(
         f"/v1/workflows/{wf_id}/run", headers=API_HEADERS,
     )
@@ -366,6 +381,7 @@ async def test_e2e_concurrent_runs(api_client: AsyncClient):
     for name in ["Alpha", "Beta", "Gamma"]:
         wf = await create_workflow(api_client, name)
         wf_ids.append(wf["id"])
+        await add_step(api_client, wf["id"], 0, "click", "auto step")
 
     # Start all three
     run_ids = []
@@ -597,6 +613,7 @@ async def test_e2e_audit_tamper_detection(api_client: AsyncClient):
     """Verify that the hash chain detects data tampering."""
     wf = await create_workflow(api_client, "Tamper Test")
     wf_id = wf["id"]
+    await add_step(api_client, wf_id, 0, "click", "auto step")
 
     run = await run_workflow(api_client, wf_id)
     run_id = run["id"]

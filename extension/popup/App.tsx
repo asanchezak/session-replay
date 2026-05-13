@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import type { PopupState } from "../src/shared/types";
+import { IdleView } from "./IdleView";
+import { RecordingView } from "./RecordingView";
+import { RunningView } from "./RunningView";
+import { WaitingView } from "./WaitingView";
+import { ErrorView } from "./ErrorView";
 
 const API_BASE = "http://localhost:8081/v1";
 
@@ -210,89 +215,6 @@ function openDashboard() {
   chrome.tabs.create({ url: DASHBOARD_URL });
 }
 
-function IdleView({
-  onRecord, onRun, lastRecordedId, recordedPrompt, onShowPrompt,
-}: {
-  onRecord: () => void; onRun: () => void;
-  lastRecordedId: string | null; recordedPrompt: string; onShowPrompt: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-
-  if (editing && lastRecordedId) {
-    return (
-      <RecordingCompleteView
-        workflowId={lastRecordedId}
-        initialPrompt={recordedPrompt}
-        onSave={() => { setEditing(false); onShowPrompt(); }}
-        onDashboard={() => { openDashboard(); setEditing(false); }}
-      />
-    );
-  }
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-      <button
-        onClick={onRecord}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-          padding: "12px", borderRadius: "6px", border: "none",
-          background: "#E17055", color: "#fff", fontSize: "14px", fontWeight: 500,
-          cursor: "pointer",
-        }}
-      >
-        <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#fff" }} />
-        Record Workflow
-      </button>
-      <button
-        onClick={onRun}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-          padding: "12px", borderRadius: "6px", border: "none",
-          background: "#6C5CE7", color: "#fff", fontSize: "14px", fontWeight: 500,
-          cursor: "pointer",
-        }}
-      >
-        ▶ Run Workflow
-      </button>
-      <button
-        onClick={openDashboard}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-          padding: "12px", borderRadius: "6px", border: "1px solid #2D3148",
-          background: "transparent", color: "#74B9FF", fontSize: "14px", fontWeight: 500,
-          cursor: "pointer",
-        }}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="3" y="3" width="7" height="7" rx="1" />
-          <rect x="14" y="3" width="7" height="7" rx="1" />
-          <rect x="3" y="14" width="7" height="7" rx="1" />
-          <rect x="14" y="14" width="7" height="7" rx="1" />
-        </svg>
-        Dashboard
-      </button>
-      {lastRecordedId && (
-        <button
-          onClick={() => setEditing(true)}
-          style={{
-            padding: "8px 12px", borderRadius: "6px", border: "1px solid #00B894",
-            background: "rgba(0,184,148,0.1)", color: "#00B894",
-            fontSize: "12px", cursor: "pointer",
-          }}
-        >
-          ✏️ Edit Workflow Prompt
-        </button>
-      )}
-      <div style={{
-        padding: "12px", borderRadius: "6px", background: "#1A1D27",
-        textAlign: "center", color: "#9AA0B0", fontSize: "12px",
-      }}>
-        No active workflows. Start recording to create one.
-      </div>
-    </div>
-  );
-}
-
 function WorkflowListView({
   workflows, running, onRun, onBack,
 }: {
@@ -361,125 +283,6 @@ function WorkflowListView({
   );
 }
 
-function RecordingView({ stepCount, onStop }: { stepCount: number; onStop: () => void }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: "8px",
-        padding: "8px 12px", borderRadius: "6px",
-        background: "rgba(225,112,85,0.15)",
-      }}>
-        <span style={{
-          width: 10, height: 10, borderRadius: "50%", background: "#E17055",
-          animation: "pulse 1.5s infinite",
-        }} />
-        <span style={{ color: "#E17055", fontWeight: 500, fontSize: "13px" }}>
-          Recording... {stepCount} step{stepCount !== 1 ? "s" : ""}
-        </span>
-        <style>{`
-          @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-        `}</style>
-      </div>
-      <button
-        onClick={onStop}
-        style={{
-          padding: "10px", borderRadius: "6px", border: "none",
-          background: "#242836", color: "#E8EAED", fontSize: "13px",
-          cursor: "pointer",
-        }}
-      >
-        ■ Stop Recording
-      </button>
-    </div>
-  );
-}
-
-function RunningView({
-  workflowName, currentStep, totalSteps, runId,
-}: {
-  workflowName: string; currentStep: number; totalSteps: number; runId: string;
-}) {
-  const pct = totalSteps > 0 ? Math.round((currentStep / totalSteps) * 100) : 0;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-      <div style={{
-        padding: "8px 12px", borderRadius: "6px",
-        background: "rgba(116,185,255,0.15)",
-      }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-          <span style={{ color: "#74B9FF", fontWeight: 500, fontSize: "13px" }}>
-            {workflowName}
-          </span>
-          <span style={{ color: "#9AA0B0", fontSize: "11px" }}>
-            Step {currentStep}/{totalSteps}
-          </span>
-        </div>
-        <div style={{
-          height: 4, background: "#2A2E3D", borderRadius: 2, overflow: "hidden",
-        }}>
-          <div style={{
-            width: `${pct}%`, height: "100%",
-            background: "#74B9FF", borderRadius: 2,
-            transition: "width 0.3s ease",
-          }} />
-        </div>
-        <span style={{
-          color: "#9AA0B0", fontSize: "11px",
-          marginTop: "4px", display: "block",
-        }}>
-          {pct}% complete
-        </span>
-      </div>
-      <button
-        onClick={() => chrome.runtime.sendMessage({ type: "PAUSE_RUN", runId })}
-        style={{
-          padding: "10px", borderRadius: "6px", border: "none",
-          background: "#242836", color: "#E8EAED", fontSize: "13px",
-          cursor: "pointer",
-        }}
-      >
-        ⏸ Pause
-      </button>
-      <button
-        onClick={() => chrome.runtime.sendMessage({ type: "VIEW_DETAILS", runId })}
-        style={{
-          padding: "8px", borderRadius: "6px", border: "1px solid #2D3148",
-          background: "transparent", color: "#9AA0B0", fontSize: "12px",
-          cursor: "pointer",
-        }}
-      >
-        View Details
-      </button>
-    </div>
-  );
-}
-
-function WaitingView({ reason }: { reason: string }) {
-  return (
-    <div style={{
-      padding: "12px", borderRadius: "6px",
-      background: "rgba(253,203,110,0.15)",
-      border: "1px solid rgba(253,203,110,0.3)",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-        <span style={{ fontSize: "16px" }}>⚠</span>
-        <span style={{ fontWeight: 500, color: "#FDCB6E" }}>Action Required</span>
-      </div>
-      <p style={{ color: "#E8EAED", fontSize: "12px", marginBottom: "8px" }}>{reason}</p>
-      <button
-        onClick={() => chrome.runtime.sendMessage({ type: "RESUME_RUN" })}
-        style={{
-          padding: "8px 16px", borderRadius: "6px", border: "none",
-          background: "#6C5CE7", color: "#fff", fontSize: "12px",
-          cursor: "pointer",
-        }}
-      >
-        I've Handled It → Resume
-      </button>
-    </div>
-  );
-}
-
 function RecoveringView({
   workflowName, currentStep, totalSteps, error,
 }: {
@@ -508,80 +311,6 @@ function RecoveringView({
           {workflowName} — Step {currentStep}/{totalSteps}
         </p>
         <p style={{ color: "#E8EAED", fontSize: "11px" }}>{error}</p>
-      </div>
-    </div>
-  );
-}
-
-function RecordingCompleteView({
-  workflowId, initialPrompt, onSave, onDashboard,
-}: {
-  workflowId: string; initialPrompt: string; onSave: () => void; onDashboard: () => void;
-}) {
-  const [prompt, setPrompt] = useState(initialPrompt);
-  const [saving, setSaving] = useState(false);
-
-  const savePrompt = async () => {
-    setSaving(true);
-    try {
-      await fetch(`${API_BASE}/workflows/${workflowId}`, {
-        method: "PUT",
-        headers: { "X-API-Key": "dev-api-key-change-in-production", "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-    } catch {
-      // silently fail
-    }
-    setSaving(false);
-    onSave();
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-      <div style={{
-        padding: "8px 12px", borderRadius: "6px",
-        background: "rgba(0,184,148,0.12)",
-      }}>
-        <span style={{ color: "#00B894", fontWeight: 500, fontSize: "13px" }}>
-          ✓ Workflow Saved
-        </span>
-      </div>
-      <label style={{ fontSize: "12px", color: "#9AA0B0" }}>
-        Describe what this workflow does:
-      </label>
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        rows={3}
-        style={{
-          width: "100%", padding: "8px", borderRadius: "6px",
-          border: "1px solid #2D3148", background: "#1A1D27", color: "#E8EAED",
-          fontSize: "12px", fontFamily: "inherit", resize: "none", boxSizing: "border-box",
-        }}
-        placeholder="e.g. Search for candidates on LinkedIn and sync to Odoo"
-      />
-      <div style={{ display: "flex", gap: "8px" }}>
-        <button
-          onClick={savePrompt}
-          disabled={saving}
-          style={{
-            flex: 1, padding: "10px", borderRadius: "6px", border: "none",
-            background: "#6C5CE7", color: "#fff", fontSize: "13px",
-            fontWeight: 500, cursor: "pointer", opacity: saving ? 0.6 : 1,
-          }}
-        >
-          {saving ? "Saving..." : "Save"}
-        </button>
-        <button
-          onClick={onDashboard}
-          style={{
-            flex: 1, padding: "10px", borderRadius: "6px", border: "1px solid #2D3148",
-            background: "transparent", color: "#74B9FF", fontSize: "13px",
-            cursor: "pointer",
-          }}
-        >
-          Open Dashboard
-        </button>
       </div>
     </div>
   );
@@ -667,22 +396,6 @@ function SettingsView({ onClose }: { onClose: () => void }) {
       >
         {saving ? "Saving..." : saved ? "✓ Saved" : "Save"}
       </button>
-    </div>
-  );
-}
-
-function ErrorView({ message }: { message: string }) {
-  return (
-    <div style={{
-      padding: "12px", borderRadius: "6px",
-      background: "rgba(225,112,85,0.15)",
-      border: "1px solid rgba(225,112,85,0.3)",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-        <span style={{ fontSize: "16px" }}>✗</span>
-        <span style={{ fontWeight: 500, color: "#E17055" }}>Error</span>
-      </div>
-      <p style={{ color: "#E8EAED", fontSize: "12px" }}>{message}</p>
     </div>
   );
 }

@@ -1,13 +1,14 @@
 import uuid
 from enum import Enum
 
-from sqlalchemy import JSON, String, Text
+from sqlalchemy import JSON, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin
 
 
 class ActorType(str, Enum):
+    # DB column: String(20) — values stored as strings matching enum names
     system = "system"
     human = "human"
     ai = "ai"
@@ -15,6 +16,7 @@ class ActorType(str, Enum):
 
 
 class EventType(str, Enum):
+    # DB column: String(30) — values stored as strings matching enum names
     click = "click"
     type = "type"
     select = "select"
@@ -32,6 +34,7 @@ class EventType(str, Enum):
     run_failed = "run_failed"
     run_canceled = "run_canceled"
     checkpoint = "checkpoint"
+    workflow_status_changed = "workflow_status_changed"
     recovery_attempt = "recovery_attempt"
     recovery_success = "recovery_success"
     recovery_failure = "recovery_failure"
@@ -58,3 +61,10 @@ class EventLog(Base, TimestampMixin, UUIDMixin):
     previous_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence_number", name="uq_event_log_run_seq"),
+        UniqueConstraint("run_id", "nonce", name="uq_event_log_run_nonce"),
+    )

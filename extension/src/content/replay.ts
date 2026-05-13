@@ -46,15 +46,15 @@ function findElementByText(text: string): Element | null {
   const elements = document.querySelectorAll<HTMLElement>(
     "a, button, span, label, div, h1, h2, h3, h4, h5, h6, p, li, td, th",
   );
-  const lowerText = text.toLowerCase().trim();
+  const lowerText = text.toLowerCase().replace(/[\n\t]/g, " ").trim();
 
   for (const el of elements) {
-    if ((el.textContent || "").toLowerCase().trim() === lowerText) {
+    if ((el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim() === lowerText) {
       return el;
     }
   }
   for (const el of elements) {
-    if ((el.textContent || "").toLowerCase().trim().includes(lowerText)) {
+    if ((el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim().includes(lowerText)) {
       return el;
     }
   }
@@ -83,7 +83,7 @@ function findElementByAccessibility(data: string): Element | null {
   }
 
   if (role) {
-    const byRole = document.querySelector<HTMLElement>(`[role="${role.replace(/"/g, '\\"')}"]`);
+    const byRole = document.querySelector<HTMLElement>(`[role="${CSS.escape(role)}"]`);
     if (byRole) return byRole;
   }
 
@@ -91,6 +91,10 @@ function findElementByAccessibility(data: string): Element | null {
 }
 
 function findElementByXPath(xpath: string): Element | null {
+  const DANGEROUS_XPATH = /count\(|string-length\(|substring\(|name\(|translate\(|normalize-space\(/i;
+  if (DANGEROUS_XPATH.test(xpath)) {
+    return null;
+  }
   const result = document.evaluate(
     xpath,
     document,
@@ -103,6 +107,10 @@ function findElementByXPath(xpath: string): Element | null {
 
 function simulateClick(element: Element): boolean {
   if (!(element instanceof HTMLElement)) return false;
+
+  // Note: dispatched events have isTrusted: false, which blocks site features
+  // like requestFullscreen. For future: consider using chrome.debugger API
+  // (E-M-12) to produce trusted events.
 
   const rect = element.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
@@ -140,8 +148,30 @@ function simulateType(element: Element, value?: string): boolean {
   }
 
   element.focus();
-  element.value = value || "";
-  element.dispatchEvent(new Event("input", { bubbles: true }));
+
+  const val = value || "";
+
+  if (element instanceof HTMLInputElement) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, "value"
+    )?.set;
+    if (nativeSetter) {
+      nativeSetter.call(element, val);
+    } else {
+      element.value = val;
+    }
+  } else if (element instanceof HTMLTextAreaElement) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype, "value"
+    )?.set;
+    if (nativeSetter) {
+      nativeSetter.call(element, val);
+    } else {
+      element.value = val;
+    }
+  }
+
+  element.dispatchEvent(new InputEvent("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
   element.blur();
 
@@ -151,7 +181,22 @@ function simulateType(element: Element, value?: string): boolean {
 function simulateSelect(element: Element, value?: string): boolean {
   if (!(element instanceof HTMLSelectElement)) return false;
 
-  element.value = value || "";
+  if (element.multiple && value) {
+    const values = value.split(",").map(v => v.trim());
+    for (const option of element.options) {
+      option.selected = values.includes(option.value);
+    }
+  } else {
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLSelectElement.prototype, "value"
+    )?.set;
+    if (nativeSetter) {
+      nativeSetter.call(element, value || "");
+    } else {
+      element.value = value || "";
+    }
+  }
+
   element.dispatchEvent(new Event("change", { bubbles: true }));
   return true;
 }
@@ -162,11 +207,14 @@ function simulateScroll(element: Element): boolean {
 }
 
 function simulateNavigate(value?: string): boolean {
-  if (value && value.startsWith("http")) {
-    window.location.href = value;
+  if (!value) return false;
+
+  if (value.startsWith("./") || value.startsWith("../") || value.startsWith("?") || value.startsWith("#")) {
+    window.location.href = new URL(value, window.location.href).href;
     return true;
   }
-  if (value && value.startsWith("/")) {
+
+  if (value.startsWith("http") || value.startsWith("/")) {
     window.location.href = value;
     return true;
   }
@@ -176,9 +224,21 @@ function simulateNavigate(value?: string): boolean {
 const FRAMEWORK_ATTR_PREFIXES = ["data-react", "data-v-", "data-svelte-", "data-ng-", "data-debug", "data-server-rendered"];
 
 const PII_PATTERNS = [
+  // Standard email addresses
   /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g,
+  // International email addresses (IDN - unicode domain names)
+  /\b[^\s@]+@[^\s@]+\.[^\s]{2,}\b/g,
+  // US phone numbers: xxx-xxx-xxxx formats
   /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
+  // International phone numbers with + prefix
+  /\+\d{1,4}[-.\s]?\d{6,14}\b/g,
+  // 16-digit credit cards
   /\b\d{4}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{4}\b/g,
+  // 15-digit AmEx credit cards (starts with 34 or 37)
+  /\b3[47]\d{2}[-.\s]?\d{6}[-.\s]?\d{5}\b/g,
+  // 13-digit Visa credit cards (starts with 4)
+  /\b4\d{2}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{1}\b/g,
+  // SSN (xxx-xx-xxxx)
   /\b\d{3}-\d{2}-\d{4}\b/g,
 ];
 
@@ -203,7 +263,7 @@ function sanitizeNode(node: Node, depth: number = 0): string {
     if (n === "id" || n === "class" || n === "role" || n === "aria-label" ||
         n === "data-testid" || n === "data-cy" || n === "data-qa" || n === "data-test" ||
         n === "name" || n === "href" || n === "src" || n === "type" || n === "placeholder" ||
-        n.startsWith("aria-")) {
+        n.startsWith("aria-") || n.startsWith("data-test-")) {
       if (n === "value") continue;
       if (n === "href" || n === "src") {
         try {

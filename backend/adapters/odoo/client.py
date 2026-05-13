@@ -5,6 +5,14 @@ from typing import Any
 import httpx
 
 
+class OdooClientError(Exception):
+    pass
+
+
+class AccessError(OdooClientError):
+    pass
+
+
 class OdooClient:
     def __init__(
         self,
@@ -23,10 +31,11 @@ class OdooClient:
 
     async def authenticate(self) -> int:
         if self.api_key:
-            self._uid = 2  # API key auth
+            self._uid = 2
             return self._uid
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        timeout = httpx.Timeout(connect=5, read=20, write=5, pool=5)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 f"{self.url}/jsonrpc",
                 json={
@@ -49,8 +58,11 @@ class OdooClient:
     ) -> Any:
         if self._uid is None and method != "login":
             await self.authenticate()
+        return await self._request_with_reauth(model, method, args or [])
 
-        async with httpx.AsyncClient(timeout=60) as client:
+    async def _request(self, model: str, method: str, args: list) -> Any:
+        timeout = httpx.Timeout(connect=5, read=20, write=5, pool=5)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             payload = {
                 "jsonrpc": "2.0",
                 "method": "call",
@@ -63,7 +75,7 @@ class OdooClient:
                         self.api_key or self.password or "",
                         model,
                         method,
-                        args or [],
+                        args,
                     ],
                 },
             }
@@ -76,19 +88,34 @@ class OdooClient:
             if "error" in data:
                 error_msg = data["error"].get("message", str(data["error"]))
                 if "AccessError" in error_msg or "Access Denied" in error_msg:
-                    self._uid = None
-                    await self.authenticate()
-                    return await self.call(model, method, args)
+                    raise AccessError(error_msg)
                 raise Exception(f"Odoo RPC error: {error_msg}")
             return data["result"]
 
+    async def _request_with_reauth(
+        self, model: str, method: str, args: list, retry: bool = True
+    ) -> Any:
+        try:
+            return await self._request(model, method, args)
+        except AccessError:
+            if not retry:
+                raise
+            self._uid = None
+            await self.authenticate()
+            return await self._request(model, method, args)
+
     async def search_read(
-        self, model: str, domain: list, fields: list[str] | None = None
+        self,
+        model: str,
+        domain: list,
+        fields: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[dict]:
-        args = [domain]
+        kwargs: dict[str, Any] = {"limit": limit, "offset": offset}
         if fields:
-            args.append({"fields": fields})
-        result = await self.call(model, "search_read", args)
+            kwargs["fields"] = fields
+        result = await self.call(model, "search_read", [domain, kwargs])
         if isinstance(result, list):
             return result
         return []

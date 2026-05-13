@@ -6,6 +6,7 @@ import DashboardPage from "./pages/DashboardPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import WorkflowDetailPage from "./pages/WorkflowDetailPage";
 import RunsPage from "./pages/RunsPage";
+import RunDetailPage from "./pages/RunDetailPage";
 import AuditPage from "./pages/AuditPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -21,6 +22,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/workflows/:workflowId" element={<WorkflowDetailPage />} />
           <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:runId" element={<RunDetailPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/connectors" element={<ConnectorsPage />} />
           <Route path="/settings" element={<SettingsPage />} />

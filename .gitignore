@@ -10,3 +10,6 @@ docker/volumes/
 .mypy_cache/
 .ruff_cache/
 *.db
+.e2e-profile/
+test-results/
+playwright-report/

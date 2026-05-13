@@ -113,14 +113,14 @@ export function buildXPathSelector(el: HTMLElement): string {
 export function buildSelectors(el: HTMLElement): SelectorSet[] {
   const chain: SelectorSet[] = [];
 
+  const a11y = buildAccessibilitySelector(el);
+  if (a11y) chain.push({ type: "accessibility", value: a11y });
+
   const css = buildCssSelector(el);
   if (css) chain.push({ type: "css", value: css });
 
   const text = buildTextSelector(el);
   if (text) chain.push({ type: "text", value: text });
-
-  const a11y = buildAccessibilitySelector(el);
-  if (a11y) chain.push({ type: "accessibility", value: a11y });
 
   const xpath = buildXPathSelector(el);
   chain.push({ type: "xpath", value: xpath });

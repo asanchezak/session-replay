@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, KeyboardEvent } from "react";
 
 export interface Column<T> {
   key: string;
@@ -15,6 +15,8 @@ interface DataTableProps<T> {
   onRowClick?: (item: T) => void;
 }
 
+const VISIBLE_LIMIT = 100;
+
 export default function DataTable<T>({
   columns, data, keyExtractor, emptyState, onRowClick,
 }: DataTableProps<T>) {
@@ -22,15 +24,19 @@ export default function DataTable<T>({
     return <>{emptyState}</>;
   }
 
+  const showAll = data.length <= VISIBLE_LIMIT;
+  const visible = data.slice(0, VISIBLE_LIMIT);
+  const hiddenCount = data.length - VISIBLE_LIMIT;
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm" role="table">
         <thead>
-          <tr className="border-b border-[#2D3148]">
+          <tr className="border-b border-border">
             {columns.map((col) => (
               <th
                 key={col.key}
-                className="text-left text-[#9AA0B0] font-normal text-xs py-3 px-3 first:pl-0 last:pr-0"
+                className="text-left text-text-secondary font-normal text-xs py-3 px-3 first:pl-0 last:pr-0"
                 scope="col"
               >
                 {col.label}
@@ -39,14 +45,22 @@ export default function DataTable<T>({
           </tr>
         </thead>
         <tbody>
-          {data.map((item) => (
+          {visible.map((item) => (
             <tr
               key={keyExtractor(item)}
               onClick={() => onRowClick?.(item)}
-              className={`border-b border-[#2D3148] hover:bg-[#242836] transition-colors ${onRowClick ? "cursor-pointer" : ""}`}
+              onKeyDown={(e: KeyboardEvent) => {
+                if (onRowClick && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  onRowClick(item);
+                }
+              }}
+              tabIndex={onRowClick ? 0 : undefined}
+              role={onRowClick ? "button" : undefined}
+              className={`border-b border-border hover:bg-bg-elevated transition-colors ${onRowClick ? "cursor-pointer" : ""}`}
             >
               {columns.map((col) => (
-                <td key={col.key} className="py-3 px-3 first:pl-0 last:pr-0 text-[#E8EAED]">
+                <td key={col.key} className="py-3 px-3 first:pl-0 last:pr-0 text-text-primary">
                   {col.render(item)}
                 </td>
               ))}
@@ -54,6 +68,11 @@ export default function DataTable<T>({
           ))}
         </tbody>
       </table>
+      {!showAll && (
+        <div className="py-3 px-3 text-text-gray text-xs text-center border-t border-border">
+          Showing {VISIBLE_LIMIT} of {data.length} rows
+        </div>
+      )}
     </div>
   );
 }

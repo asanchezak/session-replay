@@ -1,8 +1,9 @@
-import type { ActionEvent, PopupState } from "./types";
+import type { ActionEvent } from "./types";
 
 export interface ContentToBackgroundMessage {
   type: "RECORD_EVENT";
   event: ActionEvent;
+  protocol_version?: number;
 }
 
 export interface ContentToBackgroundResponse {
@@ -24,6 +25,7 @@ export interface BackgroundToContentMessage {
       value?: string;
     }>;
   };
+  protocol_version?: number;
 }
 
 export interface BackgroundToContentResponse {
@@ -35,11 +37,13 @@ export interface BackgroundToContentResponse {
 export interface ContentScriptReadyMessage {
   type: "CONTENT_SCRIPT_READY";
   tabId: number;
+  protocol_version?: number;
 }
 
 export interface CaptureDomSnippetMessage {
   type: "CAPTURE_DOM_SNIPPET";
   selectorPattern: string;
+  protocol_version?: number;
 }
 
 export interface DomSnippetResponse {
@@ -50,10 +54,30 @@ export interface DomSnippetResponse {
   error?: string;
 }
 
+export interface DetectChallengesMessage {
+  type: "DETECT_CHALLENGES";
+  protocol_version?: number;
+}
+
+export interface ChallengesDetectedResponse {
+  type: "CHALLENGES_DETECTED";
+  challenges: Array<{
+    detected: boolean;
+    type: string | null;
+    confidence: number;
+    description: string | null;
+  }>;
+}
+
 export type ExtensionMessage =
   | ContentToBackgroundMessage
-  | BackgroundToContentMessage;
+  | BackgroundToContentMessage
+  | ContentScriptReadyMessage
+  | CaptureDomSnippetMessage
+  | DetectChallengesMessage;
 
 export type ExtensionResponse =
   | ContentToBackgroundResponse
-  | BackgroundToContentResponse;
+  | BackgroundToContentResponse
+  | DomSnippetResponse
+  | ChallengesDetectedResponse;

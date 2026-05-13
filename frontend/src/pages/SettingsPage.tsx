@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Card from "../components/Card";
 import Banner from "../components/Banner";
 import { Settings, Key, Bell, Users, Clock, Shield } from "lucide-react";
+import { useApi } from "../hooks/useApi";
 
 interface SettingRowProps {
   label: string;
@@ -28,10 +29,53 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("sk-••••••••••••••••");
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const { request } = useApi();
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await request<{ settings: Record<string, unknown> }>("GET", "/settings");
+        if (!cancelled && data.settings) {
+          if (typeof data.settings.ai_confidence_threshold === "number") {
+            setAiThreshold(Math.round(data.settings.ai_confidence_threshold * 100));
+          }
+          if (typeof data.settings.auto_retry_limit === "number") {
+            setAutoRetry(data.settings.auto_retry_limit);
+          }
+          if (typeof data.settings.retention_days === "number") {
+            setRetentionDays(data.settings.retention_days);
+          }
+        }
+      } catch {
+        // use defaults
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [request]);
+
+  const handleSave = async () => {
+    setError(null);
+    setSaved(false);
+    try {
+      await request("PUT", "/settings", {
+        ai_confidence_threshold: aiThreshold / 100,
+        auto_retry_limit: autoRetry,
+        retention_days: retentionDays,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save settings");
+    }
+  };
+
+  const handleRevoke = () => {
+    setApiKey("sk-" + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join(""));
   };
 
   return (
@@ -40,10 +84,22 @@ export default function SettingsPage() {
         <Settings size={20} /> Settings
       </h1>
 
+      {loading && (
+        <div className="mb-4 text-[#9AA0B0] text-sm">Loading settings…</div>
+      )}
+
       {saved && (
         <div className="mb-4">
           <Banner type="success" title="Settings saved">
             Configuration updated successfully.
+          </Banner>
+        </div>
+      )}
+
+      {error && (
+        <div className="mb-4">
+          <Banner type="error" title="Failed to save settings">
+            {error}
           </Banner>
         </div>
       )}
@@ -125,7 +181,7 @@ export default function SettingsPage() {
               >
                 {showKey ? "Hide" : "Show"}
               </button>
-              <button className="text-xs text-[#E17055] hover:text-[#FF8A76]">
+              <button onClick={handleRevoke} className="text-xs text-[#E17055] hover:text-[#FF8A76]">
                 Revoke
               </button>
             </div>

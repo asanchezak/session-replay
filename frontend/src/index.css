@@ -15,6 +15,8 @@
   --color-error: #E17055;
   --color-info: #74B9FF;
   --color-border: #2D3148;
+  --color-text-gray: #6B7280;
+  --color-border-hover: #3D4160;
   --font-sans: Inter, system-ui, sans-serif;
   --font-mono: JetBrains Mono, SF Mono, monospace;
 }
@@ -23,4 +25,9 @@
   outline: 2px solid #6C5CE7;
   outline-offset: 2px;
   border-radius: 4px;
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
 }

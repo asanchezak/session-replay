@@ -17,13 +17,18 @@ class OdooConfig:
 
 
 class OdooAdapter(BaseAdapter):
-    def __init__(self):
+    def __init__(self, config: dict | None = None):
         self._client: OdooClient | None = None
         self._config: OdooConfig | None = None
+        self._init_config = config
 
     @property
     def adapter_type(self) -> str:
         return "odoo"
+
+    async def connect(self) -> None:
+        if self._init_config:
+            await self.initialize(self._init_config)
 
     async def initialize(self, config: dict) -> None:
         self._config = OdooConfig(
@@ -68,11 +73,13 @@ class OdooAdapter(BaseAdapter):
         }
         return mapping.get(resource, resource)
 
-    async def list(self, resource: str, filters: dict | None = None) -> list[dict]:
+    async def list(
+        self, resource: str, filters: dict | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict]:
         model = self._model_for(resource)
         domain = self._build_domain(filters)
         fields = list((filters or {}).keys()) if filters else None
-        return await self._client.search_read(model, domain, fields)
+        return await self._client.search_read(model, domain, fields, limit=limit, offset=offset)
 
     async def get(self, resource: str, id: str) -> dict | None:
         model = self._model_for(resource)
@@ -88,11 +95,16 @@ class OdooAdapter(BaseAdapter):
         model = self._model_for(resource)
         await self._client.call(model, "write", [[int(id)], data])
 
-    async def upsert(self, resource: str, data: dict) -> str:
-        self._model_for(resource)
-        if "id" in data and data["id"]:
-            await self.update(resource, str(data["id"]), data)
-            return str(data["id"])
+    async def upsert(self, resource: str, data: dict, key: str | None = None) -> str:
+        model = self._model_for(resource)
+        if key and key in data:
+            existing = await self._client.search_read(
+                model, [(key, "=", data[key])], fields=["id"]
+            )
+            if existing:
+                record_id = existing[0]["id"]
+                await self._client.call(model, "write", [[record_id], data])
+                return str(record_id)
         return await self.create(resource, data)
 
     def _build_domain(self, filters: dict | None) -> list:

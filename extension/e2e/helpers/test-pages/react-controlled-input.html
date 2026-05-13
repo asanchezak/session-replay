@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <title>React-controlled input (S12)</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <pre id="state-mirror"></pre>
+  <script>
+    const { useState } = React;
+    function Form() {
+      const [v, setV] = useState("");
+      React.useEffect(() => {
+        document.getElementById("state-mirror").textContent = v;
+      }, [v]);
+      return React.createElement("form", null,
+        React.createElement("input", {
+          id: "q",
+          value: v,
+          onChange: (e) => setV(e.target.value),
+        }),
+        React.createElement("button", { type: "submit" }, "Submit"),
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Form));
+  </script>
+</body>
+</html>

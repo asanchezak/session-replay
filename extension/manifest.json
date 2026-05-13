@@ -10,7 +10,10 @@
     "sidePanel",
     "alarms"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
   "action": {
     "default_popup": "dist/popup.html",
     "default_title": "Session Replay"

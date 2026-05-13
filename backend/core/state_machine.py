@@ -22,7 +22,7 @@ _TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.IDLE: {RunStatus.RECORDING, RunStatus.QUEUED, RunStatus.CANCELED},
     RunStatus.RECORDING: {RunStatus.VALIDATED, RunStatus.CANCELED},
     RunStatus.VALIDATED: {RunStatus.QUEUED, RunStatus.IDLE},
-    RunStatus.QUEUED: {RunStatus.RUNNING, RunStatus.CANCELED},
+    RunStatus.QUEUED: {RunStatus.RUNNING, RunStatus.CANCELED, RunStatus.FAILED},
     RunStatus.RUNNING: {
         RunStatus.WAITING_FOR_USER,
         RunStatus.RECOVERING,

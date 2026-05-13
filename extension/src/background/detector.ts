@@ -40,7 +40,11 @@ function checkLoginForm(): ChallengeDetection {
   const passwordFields = document.querySelectorAll<HTMLInputElement>(
     'input[type="password"]',
   );
-  if (passwordFields.length > 0) {
+  const visiblePasswordFields = Array.from(passwordFields).filter((f) => {
+    const style = window.getComputedStyle(f);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+  if (visiblePasswordFields.length > 0) {
     const hasUsernameField = document.querySelector<HTMLInputElement>(
       'input[type="email"], input[name="username"], input[name="login"], input[name="email"]',
     );
@@ -48,7 +52,7 @@ function checkLoginForm(): ChallengeDetection {
       detected: true,
       type: "login_form",
       confidence: hasUsernameField ? 0.95 : 0.8,
-      description: `Login form detected with ${passwordFields.length} password field(s)`,
+      description: `Login form detected with ${visiblePasswordFields.length} password field(s)`,
     };
   }
   return { detected: false, type: null, confidence: 0, description: null };
@@ -68,6 +72,17 @@ function checkTwoFactor(): ChallengeDetection {
   for (const sel of tfaSelectors) {
     const el = document.querySelector(sel);
     if (el) {
+      const input = el as HTMLInputElement;
+      const name = (input.name || "").toLowerCase();
+      const id = (input.id || "").toLowerCase();
+      const label = document.querySelector(`label[for="${input.id}"]`)?.textContent?.toLowerCase() || "";
+      if (
+        name.includes("promo") || name.includes("coupon") || name.includes("discount") ||
+        id.includes("promo") || id.includes("coupon") || id.includes("discount") ||
+        label.includes("promo") || label.includes("coupon") || label.includes("discount")
+      ) {
+        continue;
+      }
       return {
         detected: true,
         type: "two_factor",
@@ -89,6 +104,7 @@ function checkUnexpectedModal(): ChallengeDetection {
     if (
       style.display !== "none" &&
       style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
       modal.offsetWidth > 0
     ) {
       return {

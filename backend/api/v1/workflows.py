@@ -1,11 +1,20 @@
-from fastapi import APIRouter, Depends, Request
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ai.client import get_ai_provider
+from core.config import settings
 from core.database import get_db
-from core.exceptions import NotFoundError
+from core.exceptions import NotFoundError, StateTransitionError
+from core.state_machine import RunStatus
+from services.execution_service import ExecutionService
 from services.workflow_service import WorkflowService
+
+logger = logging.getLogger(__name__)
 
 
 class SelectorSet(BaseModel):
@@ -32,7 +41,7 @@ class CreateWorkflowRequest(BaseModel):
 
 class AddStepRequest(BaseModel):
     step_index: int
-    action_type: str
+    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract"]
     intent: str | None = None
     selector_chain: dict | None = None
     value: str | None = None
@@ -80,6 +89,7 @@ async def record_workflow(
     req: RecordWorkflowRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Recording workflow name=%s", req.name)
     svc = WorkflowService(db)
     workflow = await svc.create(
         name=req.name,
@@ -137,6 +147,7 @@ async def create_workflow(
     req: CreateWorkflowRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Creating workflow name=%s", req.name)
     svc = WorkflowService(db)
     workflow = await svc.create(
         name=req.name,
@@ -157,10 +168,11 @@ async def create_workflow(
 @router.get("")
 async def list_workflows(
     status: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Listing workflows status=%s", status)
     svc = WorkflowService(db)
     workflows = await svc.list(status=status, limit=limit, offset=offset)
     return [
@@ -182,6 +194,7 @@ async def get_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Getting workflow workflow_id=%s", workflow_id)
     svc = WorkflowService(db)
     try:
         workflow = await svc.get(workflow_id)
@@ -218,6 +231,7 @@ async def add_step(
     req: AddStepRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Adding step to workflow workflow_id=%s step_index=%d", workflow_id, req.step_index)
     svc = WorkflowService(db)
     try:
         await svc.get(workflow_id)
@@ -269,6 +283,11 @@ async def update_workflow_status(
         workflow = await svc.update_status(workflow_id, req.status)
     except NotFoundError:
         return _not_found("Workflow not found")
+    except StateTransitionError as e:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "INVALID_TRANSITION", "message": str(e)}},
+        )
 
     return {"id": str(workflow.id), "status": workflow.status}
 
@@ -307,9 +326,7 @@ async def generate_workflow_prompt(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    from ai.client import get_ai_provider
-    from core.config import settings
-
+    logger.info("Generating prompt for workflow_id=%s", workflow_id)
     svc = WorkflowService(db)
     try:
         workflow = await svc.get(workflow_id)
@@ -334,18 +351,24 @@ async def generate_workflow_prompt(
         )
         prompt_text = f"A workflow with {len(steps)} steps:\n{steps_desc}"
 
-        provider = get_ai_provider(api_key_override=effective_key)
-        ai_prompt = (
-            f"Summarize what this browser workflow does in one short sentence.\n\n"
-            f"{prompt_text}"
-        )
-        response = await provider.generate(ai_prompt, max_tokens=100)
-        generated = response.content.strip().strip('"')
+        try:
+            provider = get_ai_provider(api_key_override=effective_key)
+            ai_prompt = (
+                f"Summarize what this browser workflow does in one short sentence.\n\n"
+                f"{prompt_text}"
+            )
+            response = await provider.generate(ai_prompt, max_tokens=100)
+            generated = response.content.strip().strip('"')
+            used_ai = True
+        except Exception:
+            generated = f"{action_summary}{target}"
+            used_ai = False
     else:
         generated = f"{action_summary}{target}"
+        used_ai = False
 
     workflow = await svc.update_workflow(workflow_id=workflow_id, prompt=generated)
-    return {"prompt": workflow.prompt, "generated": bool(effective_key)}
+    return {"prompt": workflow.prompt, "generated": used_ai}
 
 
 def _summarize_actions(steps) -> str:
@@ -386,8 +409,39 @@ async def run_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    from core.state_machine import RunStatus
-    from services.execution_service import ExecutionService
+    logger.info("Running workflow workflow_id=%s", workflow_id)
+    wf_svc = WorkflowService(db)
+    try:
+        workflow = await wf_svc.get(workflow_id)
+    except NotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}},
+        )
+
+    steps = await wf_svc.get_steps(workflow_id)
+    if len(steps) < 1:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "EMPTY_WORKFLOW",
+                    "message": "Workflow has no steps",
+                }
+            },
+        )
+
+    if workflow.status != "active":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "INVALID_STATUS",
+                    "message": f"Workflow status is '{workflow.status}', must be 'active'",
+                }
+            },
+        )
+
     svc = ExecutionService(db)
     try:
         run = await svc.create_run(workflow_id=workflow_id)

@@ -11,6 +11,7 @@ class SyncRequest(BaseModel):
     connector_id: str
     action: str
     params: dict = {}
+    password: str | None = None
 
 
 @router.post("/odoo/sync")
@@ -36,9 +37,9 @@ async def sync_odoo(
             "url": settings.database_url,  # placeholder — real config from connector store
             "database": "workflow",
             "username": "admin",
-            "api_key": settings.api_key,
+            "password": req.password or "",
         })
-        await adapter.initialize()
+        await adapter.connect()
 
         result = await adapter.search_read(req.action, [])
         count = len(result) if isinstance(result, list) else 0

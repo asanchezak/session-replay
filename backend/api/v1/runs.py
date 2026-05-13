@@ -1,15 +1,24 @@
-from datetime import UTC, datetime
+import logging
+import uuid
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
+from core.models.event import EventLog
 from core.models.intervention import HumanIntervention
+from services.artifact_service import ArtifactService
+from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
 from services.healing_service import HealingService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -24,12 +33,16 @@ class InjectHealOverrideRequest(BaseModel):
 
 @router.post("/testing/inject-heal-override")
 async def inject_heal_override(req: InjectHealOverrideRequest):
+    if not settings.debug:
+        raise HTTPException(status_code=404, detail="Not found")
     _HEAL_OVERRIDES[req.run_id] = req.response
     return {"injected": True}
 
 
 @router.post("/testing/clear-heal-overrides")
 async def clear_heal_overrides():
+    if not settings.debug:
+        raise HTTPException(status_code=404, detail="Not found")
     _HEAL_OVERRIDES.clear()
     return {"cleared": True}
 
@@ -69,12 +82,14 @@ async def create_run(
     req: CreateRunRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Creating run workflow_id=%s user_id=%s", req.workflow_id, req.user_id)
     svc = ExecutionService(db)
     try:
         run = await svc.create_run(
             workflow_id=req.workflow_id, user_id=req.user_id
         )
     except NotFoundError:
+        logger.warning("Workflow not found for create_run workflow_id=%s", req.workflow_id)
         return _error("NOT_FOUND", "Workflow not found")
 
     return {
@@ -91,27 +106,16 @@ async def create_run(
 async def list_runs(
     workflow_id: str | None = None,
     status: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Listing runs workflow_id=%s status=%s", workflow_id, status)
     svc = ExecutionService(db)
     runs = await svc.list_runs(
         workflow_id=workflow_id, status=status, limit=limit, offset=offset
     )
-    return [
-        {
-            "id": str(r.id),
-            "workflow_id": r.workflow_id,
-            "status": r.status,
-            "current_step_index": r.current_step_index,
-            "total_steps": r.total_steps,
-            "pause_reason": r.pause_reason,
-            "error_summary": r.error_summary,
-            "created_at": r.created_at.isoformat(),
-        }
-        for r in runs
-    ]
+    return runs
 
 
 @router.get("/{run_id}")
@@ -119,10 +123,12 @@ async def get_run(
     run_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Getting run run_id=%s", run_id)
     svc = ExecutionService(db)
     try:
         run = await svc.get_run(run_id)
     except NotFoundError:
+        logger.warning("Run not found run_id=%s", run_id)
         return _error("NOT_FOUND", "Run not found")
 
     return {
@@ -137,6 +143,55 @@ async def get_run(
         "ended_at": run.ended_at.isoformat() if run.ended_at else None,
         "created_at": run.created_at.isoformat(),
     }
+
+
+@router.get("/{run_id}/events")
+async def get_run_events(
+    run_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    event_type: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    try:
+        await svc.get_run(run_id)
+    except NotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Run not found"}},
+        )
+
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Run not found"}},
+        )
+
+    query = select(EventLog).where(EventLog.run_id == run_uuid)
+    if event_type:
+        query = query.where(EventLog.event_type == event_type)
+    query = query.order_by(EventLog.sequence_number).offset(offset).limit(limit)
+
+    result = await db.execute(query)
+    events = list(result.scalars().all())
+
+    return [
+        {
+            "id": str(e.id),
+            "event_type": e.event_type,
+            "actor_type": e.actor_type,
+            "payload": e.payload,
+            "page_url": e.page_url,
+            "hash": e.hash,
+            "previous_hash": e.previous_hash,
+            "sequence_number": e.sequence_number,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]
 
 
 @router.post("/{run_id}/pause")
@@ -206,13 +261,12 @@ async def checkpoint_run(
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
 
-    from services.audit import AuditService
     audit = AuditService(db)
-    await audit.append(
+    await audit.append(AppendEvent(
         event_type="checkpoint",
         payload={"step_index": req.step_index, "snapshot": req.snapshot},
         run_id=run_id,
-    )
+    ))
     return {"id": str(run.id), "status": run.status, "checkpoint_step": req.step_index}
 
 
@@ -314,7 +368,6 @@ class HealStepRequest(BaseModel):
     dom_snippet: str
     old_selectors: list[str]
     intent: str | None = None
-    override_response: dict | None = None
 
 
 class HealResultRequest(BaseModel):
@@ -339,7 +392,6 @@ async def report_step_result(
     db: AsyncSession = Depends(get_db),
 ):
     svc = ExecutionService(db)
-    from services.audit import AuditService
     audit = AuditService(db)
 
     try:
@@ -354,7 +406,14 @@ async def report_step_result(
             status=409,
         )
 
-    await audit.append(
+    if req.step_index != run.current_step_index:
+        return _error(
+            "STEP_INDEX_MISMATCH",
+            f"Expected step {run.current_step_index}, got {req.step_index}",
+            status=409,
+        )
+
+    await audit.append(AppendEvent(
         event_type="step_executed",
         payload={
             "step_index": req.step_index,
@@ -364,14 +423,21 @@ async def report_step_result(
             "screenshot_ref": req.screenshot_ref,
         },
         run_id=run_id,
-    )
+    ))
 
-    if req.step_index != run.current_step_index:
-        return _error(
-            "STEP_INDEX_MISMATCH",
-            f"Expected step {run.current_step_index}, got {req.step_index}",
-            status=409,
-        )
+    if req.screenshot_ref:
+        artifact_svc = ArtifactService(db)
+        try:
+            await artifact_svc.store_artifact(
+                run_id=run_id,
+                step_index=req.step_index,
+                artifact_type="screenshot",
+                data=req.screenshot_ref.encode("utf-8"),
+                mime_type="text/plain",
+                metadata={"action_type": req.action_type, "is_ref": True},
+            )
+        except Exception:
+            logger.warning("Failed to store screenshot artifact", exc_info=True)
 
     if req.success:
         run.error_summary = None
@@ -432,8 +498,6 @@ async def heal_step(
             "confidence": override.get("confidence", 0.0),
             "explanation": override.get("explanation", ""),
         }
-    elif req.override_response:
-        result = req.override_response
     else:
         result = await svc.suggest_heal(
             run=run,
@@ -443,6 +507,14 @@ async def heal_step(
             intent=req.intent,
             ai_api_key=ai_api_key,
         )
+
+    if result.get("below_threshold"):
+        return _error(
+            "LOW_CONFIDENCE",
+            f"Healing confidence too low: {result.get('confidence', 0.0)}",
+            status=409,
+        )
+
     return {
         "step_index": req.step_index,
         "new_selectors": result["new_selectors"],
@@ -484,6 +556,22 @@ async def record_intervention(
     req: InterventionRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    existing = await db.execute(
+        select(HumanIntervention).where(
+            HumanIntervention.run_id == req.run_id,
+            HumanIntervention.trigger_reason == req.trigger_reason,
+            HumanIntervention.paused_at >= datetime.now(UTC) - timedelta(minutes=5),
+        )
+    )
+    existing_intervention = existing.scalar_one_or_none()
+    if existing_intervention:
+        return {
+            "id": str(existing_intervention.id),
+            "run_id": existing_intervention.run_id,
+            "trigger_reason": existing_intervention.trigger_reason,
+            "paused_at": existing_intervention.paused_at.isoformat(),
+        }
+
     intervention = HumanIntervention(
         run_id=req.run_id,
         trigger_reason=req.trigger_reason,

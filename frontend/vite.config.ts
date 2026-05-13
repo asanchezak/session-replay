@@ -9,7 +9,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/v1": "http://localhost:8000",
+      "/v1": "http://localhost:8081",
     },
   },
   define: {

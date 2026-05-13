@@ -4,6 +4,7 @@ import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
+import { formatTime } from "../lib/formatTime";
 import { GitBranch, Plus, Search } from "lucide-react";
 
 export default function WorkflowsPage() {
@@ -13,8 +14,8 @@ export default function WorkflowsPage() {
   if (loading) {
     return (
       <div>
-        <h1 className="text-xl font-semibold mb-4 text-[#E8EAED]">Workflows</h1>
-        <div className="text-[#9AA0B0] text-sm">Loading...</div>
+        <h1 className="text-xl font-semibold mb-4 text-text-primary">Workflows</h1>
+        <div className="text-text-secondary text-sm">Loading...</div>
       </div>
     );
   }
@@ -22,9 +23,9 @@ export default function WorkflowsPage() {
   if (error) {
     return (
       <div>
-        <h1 className="text-xl font-semibold mb-4 text-[#E8EAED]">Workflows</h1>
+        <h1 className="text-xl font-semibold mb-4 text-text-primary">Workflows</h1>
         <Card>
-          <div className="text-[#E17055] text-sm">Error loading workflows: {error}</div>
+          <div className="text-error text-sm">Error loading workflows: {error}</div>
         </Card>
       </div>
     );
@@ -33,8 +34,8 @@ export default function WorkflowsPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold text-[#E8EAED]">Workflows</h1>
-        <button className="flex items-center gap-2 px-3 py-2 bg-[#6C5CE7] text-white text-sm rounded-md hover:bg-[#7C6EF7] transition-colors">
+        <h1 className="text-xl font-semibold text-text-primary">Workflows</h1>
+        <button className="flex items-center gap-2 px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors">
           <Plus size={14} /> New
         </button>
       </div>
@@ -50,10 +51,10 @@ export default function WorkflowsPage() {
               <StatusBadge status={w.status as any} size="sm" />
             )},
             { key: "version", label: "Version", render: (w: WorkflowSummary) => (
-              <span className="text-[#9AA0B0]">v{w.version}</span>
+              <span className="text-text-secondary">v{w.version}</span>
             )},
             { key: "created", label: "Created", render: (w: WorkflowSummary) => (
-              <span className="text-[#9AA0B0]">{new Date(w.created_at).toLocaleDateString()}</span>
+              <span className="text-text-secondary">{formatTime(w.created_at)}</span>
             )},
           ]}
           data={workflows}
@@ -66,10 +67,10 @@ export default function WorkflowsPage() {
               description="Record your first workflow from the browser extension, or start from a template."
               actions={
                 <>
-                  <button className="px-3 py-2 bg-[#6C5CE7] text-white text-sm rounded-md hover:bg-[#7C6EF7] transition-colors">
+                  <button className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors">
                     Install Extension
                   </button>
-                  <button className="px-3 py-2 bg-[#242836] text-[#E8EAED] text-sm rounded-md hover:bg-[#2A2E3D] transition-colors">
+                  <button className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors">
                     Use Template
                   </button>
                 </>

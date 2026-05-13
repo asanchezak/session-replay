@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head><title>CSS-mangled (S10)</title></head>
+<body>
+  <!-- Same semantics as stable.html but with mangled class names and no IDs.
+       The accessibility chain (role + aria-label) should still resolve.  -->
+  <form class="_a1b2c3" onsubmit="event.preventDefault();">
+    <input class="_zzz1" type="text" aria-label="search" />
+    <select class="_zzz2" aria-label="location">
+      <option value="ny">New York</option>
+      <option value="rem">Remote</option>
+    </select>
+    <button class="_xxx9" type="submit" aria-label="Submit search" role="button">Search</button>
+  </form>
+</body>
+</html>

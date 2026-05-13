@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from copy import deepcopy
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from ai.client import get_ai_provider
 from ai.prompts import build_heal_prompt
 from core.config import settings
+from core.models.intervention import HumanIntervention
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
-from services.audit import AuditService
+from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
+
+logger = logging.getLogger(__name__)
 
 PII_PATTERNS = [
     (r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b', '[REDACTED:email]'),
@@ -28,18 +35,32 @@ def redact_pii(text: str) -> str:
 
 
 def _normalize_selector(sel: str | dict) -> dict:
-    if isinstance(sel, dict) and "type" in sel and "value" in sel:
-        return sel
+    if sel is None:
+        raise ValueError("Selector cannot be None")
+    if isinstance(sel, int):
+        raise ValueError(f"Selector cannot be int: {sel}")
+    if isinstance(sel, dict):
+        if "type" in sel and "value" in sel:
+            return sel
+        raise ValueError(f"Dict missing 'type' or 'value': {sel}")
     if isinstance(sel, str):
+        if not sel:
+            raise ValueError("Selector cannot be empty string")
         if sel.startswith("//") or sel.startswith("("):
             return {"type": "xpath", "value": sel}
         if sel.startswith("#") or sel.startswith(".") or sel.startswith("["):
             return {"type": "css", "value": sel}
         return {"type": "css", "value": sel}
-    return {"type": "css", "value": str(sel)}
+    raise ValueError(f"Invalid selector type: {type(sel).__name__}")
 
 
 class HealingService:
+    """Service for AI-based selector healing and recovery.
+
+    Attempts to heal broken selectors by analyzing the DOM and suggesting
+    new selectors. Falls back to human intervention when confidence is low.
+    """
+
     def __init__(self, session: AsyncSession):
         self.session = session
         self.execution = ExecutionService(session)
@@ -54,6 +75,7 @@ class HealingService:
         intent: str | None,
         ai_api_key: str | None = None,
     ) -> dict:
+        """Suggest new selectors for a broken step using AI analysis."""
         _ = run
         effective_key = ai_api_key or settings.ai_api_key
         if not effective_key:
@@ -94,24 +116,42 @@ class HealingService:
                 if normalized not in new_selectors:
                     new_selectors.append(normalized)
 
-            await self.audit.append(
+            confidence = result.get("confidence", 0.0)
+            explanation = result.get("explanation", "")
+
+            await self.audit.append(AppendEvent(
                 event_type="recovery_attempt",
                 payload={
                     "step_index": step_index,
                     "old_selectors": old_selectors,
                     "intent": intent_text,
                     "method": "ai",
-                    "confidence": result.get("confidence", 0.0),
-                    "explanation": result.get("explanation", ""),
+                    "confidence": confidence,
+                    "explanation": explanation,
                     "new_selectors_count": len(new_selectors),
                 },
                 run_id=str(run.id),
-            )
+            ))
+
+            if confidence < settings.ai_confidence_threshold:
+                intervention = HumanIntervention(
+                    run_id=str(run.id),
+                    trigger_reason="low_confidence_heal",
+                    paused_at=datetime.now(UTC),
+                )
+                self.session.add(intervention)
+                await self.session.flush()
+                return {
+                    "new_selectors": [],
+                    "confidence": confidence,
+                    "explanation": explanation,
+                    "below_threshold": True,
+                }
 
             return {
                 "new_selectors": new_selectors,
-                "confidence": result.get("confidence", 0.0),
-                "explanation": result.get("explanation", ""),
+                "confidence": confidence,
+                "explanation": explanation,
             }
         except (json.JSONDecodeError, ValueError):
             return {
@@ -126,28 +166,59 @@ class HealingService:
         step_index: int,
         new_selectors: list[dict],
     ) -> ExecutionRun:
-        snapshot = run.workflow_snapshot or {}
+        """Apply healed selectors to the run's workflow snapshot."""
+        snapshot = deepcopy(run.workflow_snapshot or {})
         steps = snapshot.get("steps", [])
         if step_index < len(steps):
             steps[step_index]["selector_chain"] = new_selectors
             run.workflow_snapshot = snapshot
+            flag_modified(run, "workflow_snapshot")
             await self.session.flush()
         return run
 
     async def recover(
         self, run_id: str, step_index: int, error: str
     ) -> ExecutionRun:
-        _ = (step_index, error)
+        """Attempt automatic recovery for a failed step."""
+        logger.info("Recovering run=%s step=%d error=%s", run_id, step_index, error)
+        run = await self.execution.get_run(run_id)
         run = await self.execution.transition(run_id, RunStatus.RECOVERING)
-        return run
+
+        snapshot = run.workflow_snapshot or {}
+        steps = snapshot.get("steps", [])
+        old_selectors: list[str] = []
+        intent = None
+        if step_index < len(steps):
+            step = steps[step_index]
+            selector_chain = step.get("selector_chain", [])
+            old_selectors = [
+                s.get("value", str(s)) if isinstance(s, dict) else str(s)
+                for s in selector_chain
+            ]
+            intent = step.get("intent")
+
+        result = await self.suggest_heal(
+            run=run,
+            step_index=step_index,
+            dom_snippet="",
+            old_selectors=old_selectors,
+            intent=intent,
+        )
+
+        if result.get("below_threshold") or not result.get("new_selectors"):
+            return await self.heal_failed(run_id, step_index, error)
+
+        return await self.heal_succeeded(run_id, step_index, result["new_selectors"])
 
     async def heal_succeeded(
         self, run_id: str, step_index: int, new_selectors: list[dict] | None = None
     ) -> ExecutionRun:
+        """Record a successful heal and resume the run."""
+        logger.info("Heal succeeded run=%s step=%d", run_id, step_index)
         run = await self.execution.get_run(run_id)
         if new_selectors:
             await self.apply_heal(run, step_index, new_selectors)
-        await self.audit.append(
+        await self.audit.append(AppendEvent(
             event_type="recovery_success",
             payload={
                 "step_index": step_index,
@@ -155,16 +226,18 @@ class HealingService:
                 "from_status": run.status,
             },
             run_id=run_id,
-        )
+        ))
         run = await self.execution.transition(run_id, RunStatus.RUNNING)
         return run
 
     async def heal_failed(
         self, run_id: str, step_index: int, error: str
     ) -> ExecutionRun:
+        """Record a failed heal and pause for human intervention."""
+        logger.warning("Heal failed run=%s step=%d error=%s", run_id, step_index, error)
         _ = step_index
         run = await self.execution.get_run(run_id)
-        await self.audit.append(
+        await self.audit.append(AppendEvent(
             event_type="recovery_failure",
             payload={
                 "step_index": step_index,
@@ -172,7 +245,15 @@ class HealingService:
                 "from_status": run.status,
             },
             run_id=run_id,
+        ))
+
+        intervention = HumanIntervention(
+            run_id=run_id,
+            trigger_reason="heal_failed",
+            paused_at=datetime.now(UTC),
         )
+        self.session.add(intervention)
+
         run = await self.execution.transition(run_id, RunStatus.WAITING_FOR_USER)
         run.pause_reason = error
         await self.session.flush()

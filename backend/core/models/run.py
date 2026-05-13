@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin
@@ -9,7 +9,9 @@ from core.models.base import Base, TimestampMixin, UUIDMixin
 class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     __tablename__ = "execution_runs"
 
-    workflow_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     workflow_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     browser_session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)

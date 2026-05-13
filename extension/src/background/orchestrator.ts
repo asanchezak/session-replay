@@ -7,7 +7,7 @@ const STORAGE_KEY = "recording_state";
 
 // Allow content scripts to read recording state directly from storage
 // This eliminates the race between SET_RECORDING message and SW restart
-chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }).catch(() => {});
+try { chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }); } catch { /* test env */ }
 
 let _initPromise: Promise<void> | null = null;
 let _eventQueue: ActionEvent[] = [];
@@ -132,6 +132,9 @@ export class Orchestrator {
     }
     if (!this._ready) {
       _eventQueue.push(event);
+      if (_eventQueue.length > 1000) {
+        _eventQueue.splice(0, _eventQueue.length - 1000);
+      }
       if (!_drainTimeout) {
         _drainTimeout = setTimeout(() => drainQueue(this), 5000);
       }
@@ -139,6 +142,9 @@ export class Orchestrator {
     }
 
     this.eventBuffer.push(event);
+    if (this.eventBuffer.length > 1000) {
+      this.eventBuffer.splice(0, this.eventBuffer.length - 1000);
+    }
     this.broadcastState();
     await this.persist();
   }
@@ -183,6 +189,14 @@ export class Orchestrator {
       total_steps: totalSteps,
       run_id: runId,
       error,
+    });
+  }
+
+  notifyWaiting(runId: string, reason: string): void {
+    this.broadcastState({
+      type: "waiting_for_user",
+      run_id: runId,
+      reason,
     });
   }
 

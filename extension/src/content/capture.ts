@@ -17,6 +17,7 @@ function getElementMetadata(target: EventTarget | null): Record<string, unknown>
   const tag = el.tagName.toLowerCase();
   const computedStyle = window.getComputedStyle(el);
   const chain = buildSelectors(el);
+  const root = el.getRootNode();
 
   return {
     tag,
@@ -39,6 +40,8 @@ function getElementMetadata(target: EventTarget | null): Record<string, unknown>
     type: (el as HTMLInputElement).type || undefined,
     placeholder: (el as HTMLInputElement).placeholder || undefined,
     name: (el as HTMLInputElement).name || undefined,
+    in_shadow_dom: root instanceof ShadowRoot,
+    in_iframe: window !== window.parent,
   };
 }
 
@@ -183,9 +186,25 @@ export function captureInput(event: Event): CaptureResult {
     };
   }
 
-  const value = target.value || target.textContent || "";
+  const rawValue = target.value || target.textContent || "";
   const name = (target as HTMLInputElement).name || "";
   const placeholder = (target as HTMLInputElement).placeholder || "";
+  const inputType = (target as HTMLInputElement).type || "";
+  const autoComplete = (target as HTMLInputElement).autocomplete || "";
+  const sensitiveAutocomplete = ["current-password", "new-password", "cc-number", "cc-csc"];
+  const isSensitive = inputType === "password" || sensitiveAutocomplete.includes(autoComplete);
+
+  let value: string;
+  let valueLength: number;
+  if (isSensitive) {
+    const label = autoComplete || inputType;
+    value = `[REDACTED:${label}]`;
+    valueLength = 0;
+  } else {
+    value = rawValue;
+    valueLength = rawValue.length;
+  }
+
   const intent = buildIntent("type", meta, value, name);
 
   return {
@@ -195,8 +214,8 @@ export function captureInput(event: Event): CaptureResult {
       intent,
       selector_chain: meta.selector_chain,
       value: value,
-      input_type: (target as HTMLInputElement).type || undefined,
-      value_length: value.length,
+      input_type: inputType || undefined,
+      value_length: valueLength,
       field_name: name || undefined,
       placeholder: placeholder || undefined,
     },
@@ -206,18 +225,28 @@ export function captureInput(event: Event): CaptureResult {
   };
 }
 
-export function captureScroll(): CaptureResult {
+export function captureScroll(event?: Event): CaptureResult {
   const page = getPageContext();
+  const payload: Record<string, unknown> = {
+    scroll_x: Math.round(window.scrollX),
+    scroll_y: Math.round(window.scrollY),
+    viewport_height: window.innerHeight,
+    viewport_width: window.innerWidth,
+    document_height: document.documentElement.scrollHeight,
+  };
+
+  const target = event?.target as HTMLElement | null;
+  if (target && "scrollTop" in target) {
+    payload.scroll_target_tag = target.tagName.toLowerCase();
+    payload.scroll_target_id = target.id || undefined;
+    payload.scroll_target_classes = Array.from(target.classList);
+    payload.element_scroll_top = Math.round(target.scrollTop);
+    payload.element_scroll_left = Math.round(target.scrollLeft);
+  }
 
   return {
     event_type: "scroll",
-    payload: {
-      scroll_x: Math.round(window.scrollX),
-      scroll_y: Math.round(window.scrollY),
-      viewport_height: window.innerHeight,
-      viewport_width: window.innerWidth,
-      document_height: document.documentElement.scrollHeight,
-    },
+    payload,
     page_url: page.url,
     page_title: page.title,
     timestamp: new Date().toISOString(),

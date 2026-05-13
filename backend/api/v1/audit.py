@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends
@@ -11,6 +12,8 @@ from core.models.event import EventLog
 from services.audit import AuditService
 from services.execution_service import ExecutionService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
@@ -19,10 +22,12 @@ async def get_audit_trail(
     run_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info("Getting audit trail run_id=%s", run_id)
     svc = ExecutionService(db)
     try:
         run = await svc.get_run(run_id)
     except NotFoundError:
+        logger.warning("Run not found run_id=%s", run_id)
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": "Run not found"}},

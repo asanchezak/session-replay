@@ -1,8 +1,10 @@
-.venv
-__pycache__
+__pycache__/
+.venv/
+.pytest_cache/
+node_modules/
 *.pyc
-node_modules
-.git
+.git/
 .env
+*.md
 dist
 docker/volumes

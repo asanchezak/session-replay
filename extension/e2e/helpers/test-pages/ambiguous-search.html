@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+<head><title>Ambiguous results (S27)</title></head>
+<body>
+  <ul id="results">
+    <!-- 12 candidate cards that look identical -->
+    <script>
+      for (let i = 1; i <= 12; i++) {
+        document.write(`<li data-testid="result-${i}" class="card"><h3>Jane Doe ${i}</h3><p>Software Engineer</p></li>`);
+      }
+    </script>
+  </ul>
+</body>
+</html>

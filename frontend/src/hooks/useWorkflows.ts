@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useCallback } from "react";
 import { useApiData } from "./useApi";
 
 export interface WorkflowSummary {
@@ -11,12 +11,22 @@ export interface WorkflowSummary {
   created_at: string;
 }
 
-export function useWorkflows() {
+export function useWorkflows(pollInterval?: number) {
   const { data, loading, error, fetchData } = useApiData<WorkflowSummary[]>();
 
-  useEffect(() => {
+  const refetch = useCallback(() => {
     fetchData("GET", "/workflows");
-  }, []);
+  }, [fetchData]);
 
-  return { workflows: data || [], loading, error, refetch: () => fetchData("GET", "/workflows") };
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  useEffect(() => {
+    if (!pollInterval) return;
+    const id = setInterval(refetch, pollInterval);
+    return () => clearInterval(id);
+  }, [pollInterval, refetch]);
+
+  return { workflows: data || [], loading, error, refetch };
 }

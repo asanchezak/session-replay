@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from api.main import app
@@ -15,7 +16,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite://"
 
 # Disable rate limiting and lower API key requirement for tests
 settings.rate_limit_enabled = False
-settings.api_key = "dev-api-key-change-in-production"
+settings.api_key = SecretStr("dev-api-key-change-in-production")
 
 
 @pytest.fixture(scope="session")

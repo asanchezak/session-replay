@@ -34,7 +34,7 @@ typecheck-backend:
 test: test-backend test-extension test-e2e
 
 test-backend:
-	cd backend && uv run pytest tests/ -v --no-header --cov=. --cov-report=term-missing
+	cd backend && uv run pytest tests/ -v --no-header --cov=. --cov-report=term-missing --cov-report=html
 
 test-extension:
 	cd extension && npx vitest run
@@ -104,3 +104,35 @@ clean:
 	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
 	rm -f .coverage
+# ────────────────────────────────────────────────────────────────
+# Appended by tests-new/. Concatenate into the main Makefile after
+# `make test-scenarios` etc. are wired up.
+# ────────────────────────────────────────────────────────────────
+
+# Runs the new scenarios + new unit/integration tests. Skips real-AI and
+# Postgres-only tests (marked @pytest.mark.postgres or @pytest.mark.slow).
+test-scenarios:
+	cd backend && uv run pytest tests/scenarios/ tests/unit/test_audit_chain_tamper.py tests/unit/test_healing_confidence.py tests/unit/test_state_machine_concurrency.py tests/unit/test_state_machine_property.py tests/unit/test_selector_normalization.py tests/unit/test_workflow_service_delete.py tests/unit/test_pagination_bounds.py tests/unit/test_error_contract.py tests/unit/test_idempotency_scope.py tests/unit/test_ai_client.py tests/integration/test_odoo_adapter_mocked.py tests/integration/test_ai_provider_failures.py tests/integration/test_connectors_persistence.py tests/integration/test_debug_log_auth.py tests/integration/test_cors_csrf.py tests/integration/test_rate_limit.py tests/integration/test_generate_prompt.py tests/integration/test_auth_middleware.py tests/integration/test_events_idempotency.py -v -m "not postgres and not slow"
+
+# Runs the AI-backed tests against the real provider. Requires AI_API_KEY in env.
+test-real-ai:
+	@if [ -z "$$AI_API_KEY" ]; then echo "✗ AI_API_KEY not set; aborting"; exit 1; fi
+	cd backend && AI_API_KEY=$$AI_API_KEY uv run pytest tests/integration/test_ai_provider_failures.py -v -m "real_ai"
+
+# Runs the full suite against a real PostgreSQL container.
+# Requires `testcontainers[postgres]` and Docker.
+test-postgres:
+	cd backend && uv run pytest tests/integration/test_migrations_round_trip.py tests/scenarios/test_s49_migrations_round_trip.py -v -m "postgres or slow"
+
+# Run the new extension unit suite.
+test-extension-new:
+	cd extension && npx vitest run tests/test_capture_pii.test.ts tests/test_replay_controlled_inputs.test.ts tests/test_selectors_property.test.ts tests/test_intent.test.ts tests/test_replay_selectors.test.ts tests/test_healer.test.ts tests/test_detector.test.ts tests/test_orchestrator.test.ts tests/test_logger.test.ts
+
+# Run the new extension scenario specs (S01–S50 portion).
+test-extension-scenarios:
+	cd extension && npx playwright test e2e/scenarios/
+
+# Run the new frontend suite (unit + e2e).
+test-frontend-new:
+	cd frontend && npx vitest run
+	cd frontend && npx playwright test

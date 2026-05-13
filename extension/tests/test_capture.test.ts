@@ -61,8 +61,8 @@ describe("Capture utilities", () => {
     expect(result.payload.selector_chain).toBeDefined();
     expect(Array.isArray(result.payload.selector_chain)).toBe(true);
     expect(result.payload.selector_chain.length).toBeGreaterThanOrEqual(1);
-    expect(result.payload.selector_chain[0].type).toBe("css");
-    expect(result.payload.selector_chain[0].value).toContain("test-btn");
+    expect(result.payload.selector_chain[0].type).toBe("accessibility");
+    expect(result.payload.selector_chain[0].value).toContain("button");
   });
 
   it("should capture input event metadata", async () => {

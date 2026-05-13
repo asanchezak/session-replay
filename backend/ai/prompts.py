@@ -56,9 +56,9 @@ def build_classify_prompt(page_text: str, visible_elements: list[str]) -> str:
     )
 
 
-def build_extract_prompt(page_content: str, schema: dict) -> str:
+def build_extract_prompt(page_content: str, extraction_schema: dict) -> str:
     import json
     return (
         f"## Page content:\n{page_content[:3000]}\n"
-        f"## Expected schema:\n{json.dumps(schema, indent=2)}"
+        f"## Expected schema:\n{json.dumps(extraction_schema, indent=2)}"
     )

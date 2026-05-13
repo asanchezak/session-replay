@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head>
+  <title>Vue v-model (S13)</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body>
+  <div id="app">
+    <input id="q" v-model="text" />
+    <pre id="state-mirror">{{ text }}</pre>
+  </div>
+  <script>
+    Vue.createApp({ data() { return { text: "" }; } }).mount("#app");
+  </script>
+</body>
+</html>

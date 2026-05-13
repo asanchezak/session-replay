@@ -2,9 +2,13 @@ import { orchestrator } from "./orchestrator";
 import { apiClient } from "./api";
 import { createLogger } from "../shared/logger";
 import { stepHealer } from "./healer";
+import { detectChallenges } from "./detector";
+import type { ChallengeDetection } from "./detector";
 import type {
   ContentToBackgroundMessage,
   BackgroundToContentMessage,
+  DetectChallengesMessage,
+  ChallengesDetectedResponse,
 } from "../shared/messaging";
 
 const log = createLogger("service-worker");
@@ -21,6 +25,15 @@ chrome.runtime.onMessage.addListener(
     sender: chrome.runtime.MessageSender,
     sendResponse: (response: unknown) => void,
   ) => {
+    if (
+      "protocol_version" in message &&
+      message.protocol_version !== undefined &&
+      message.protocol_version !== 1
+    ) {
+      sendResponse({ type: "ERROR", code: "UNSUPPORTED_PROTOCOL_VERSION", received: message.protocol_version });
+      return;
+    }
+
     switch (message.type) {
       case "DEBUG_LOG": {
         const m = message as unknown as { level: string; message: string; source?: string };
@@ -31,8 +44,8 @@ chrome.runtime.onMessage.addListener(
       case "FETCH_WORKFLOWS": {
         apiClient.listWorkflows().then((workflows) => {
           sendResponse({ type: "WORKFLOWS", workflows });
-        }).catch(() => {
-          sendResponse({ type: "WORKFLOWS", workflows: [] });
+        }).catch((err) => {
+          sendResponse({ type: "WORKFLOWS_ERROR", error: err instanceof Error ? err.message : String(err) });
         });
         return true;
       }
@@ -103,6 +116,10 @@ chrome.runtime.onMessage.addListener(
           });
         return true;
       }
+
+      default:
+        sendResponse({ type: "ERROR", code: "UNKNOWN_MESSAGE", received: message.type });
+        break;
     }
   },
 );
@@ -119,11 +136,17 @@ async function waitForTabLoad(tabId: number, timeoutMs: number = 15000): Promise
   }
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Page load timed out")), timeoutMs);
+    function cleanup(): void {
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timeout);
+    }
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Page load timed out"));
+    }, timeoutMs);
     const listener = (_tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (_tabId === tabId && changeInfo.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(listener);
-        clearTimeout(timeout);
+        cleanup();
         resolve();
       }
     };
@@ -154,17 +177,34 @@ async function executeStepOnTab(
     return { success: false, error: "No active tab found" };
   }
 
+  let lastError = "Content script not available on this page. Navigate to the target page first.";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt - 1)));
+    }
+    try {
+      const response = await chrome.tabs.sendMessage(targetTabId, {
+        type: "EXECUTE_STEP",
+        step,
+      } as BackgroundToContentMessage);
+      return response as { success: boolean; error?: string };
+    } catch (err) {
+      lastError = "Content script not available on this page. Navigate to the target page first.";
+    }
+  }
+  return { success: false, error: lastError };
+}
+
+async function detectChallengesOnTab(tabId: number): Promise<ChallengeDetection[]> {
   try {
-    const response = await chrome.tabs.sendMessage(targetTabId, {
-      type: "EXECUTE_STEP",
-      step,
-    } as BackgroundToContentMessage);
-    return response as { success: boolean; error?: string };
-  } catch (err) {
-    return {
-      success: false,
-      error: "Content script not available on this page. Navigate to the target page first.",
-    };
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "DETECT_CHALLENGES",
+      protocol_version: 1,
+    } as DetectChallengesMessage);
+    const data = response as ChallengesDetectedResponse;
+    return (data.challenges || []) as ChallengeDetection[];
+  } catch {
+    return [];
   }
 }
 
@@ -181,6 +221,9 @@ async function executeWorkflowRun(
   log.log(`Executing ${steps.length} steps for ${workflow.name}`);
 
   orchestrator.notifyRunning(workflow.name, 0, steps.length, runId);
+
+  // Read configurable step delay from storage
+  const { stepDelay = 1000 } = await chrome.storage.session.get("stepDelay");
 
   // Pin the target tab — resolve once, use throughout
   let targetTabId = tabId;
@@ -205,6 +248,7 @@ async function executeWorkflowRun(
 
   let pendingNavigation = false;
   let allStepsSucceeded = true;
+  let statusOverride: string | null = null;
 
   for (let i = 0; i < steps.length && allStepsSucceeded; i++) {
     const step = steps[i];
@@ -233,6 +277,22 @@ async function executeWorkflowRun(
       log.error("Target tab was closed during execution");
       await reportStepFailure(runId, i, "Target tab was closed", actionType);
       allStepsSucceeded = false;
+      break;
+    }
+
+    // Challenge detection before step execution
+    const challenges = await detectChallengesOnTab(targetTabId);
+    if (challenges.length > 0) {
+      const c = challenges[0];
+      log.log(`Challenge detected: ${c.type} - ${c.description}`);
+      try {
+        await apiClient.pauseRun(runId, c.description || `${c.type} challenge`, i);
+      } catch (err) {
+        log.error("Failed to pause run for challenge:", err);
+      }
+      orchestrator.notifyWaiting(runId, c.description || `${c.type} challenge`);
+      allStepsSucceeded = false;
+      statusOverride = "waiting_for_user";
       break;
     }
 
@@ -268,6 +328,19 @@ async function executeWorkflowRun(
       }
     } catch {
       urlChanged = true;
+    }
+
+    // SPA URL change detection: poll for pushState-based navigation
+    if (!urlChanged && beforeUrl) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const afterUrl = (await chrome.tabs.get(targetTabId)).url;
+        if (beforeUrl !== afterUrl) {
+          urlChanged = true;
+        }
+      } catch {
+        // ignore polling failures
+      }
     }
 
     // Failure analysis
@@ -350,7 +423,7 @@ async function executeWorkflowRun(
     }
 
     // Small delay between steps
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, stepDelay));
   }
 
   // Final navigation wait for last step
@@ -374,13 +447,13 @@ async function executeWorkflowRun(
   orchestrator.notifyIdle();
   orchestrator.broadcastState();
 
-  return { id: runId, status: allStepsSucceeded ? "completed" : "failed", total_steps: steps.length };
+  return { id: runId, status: statusOverride || (allStepsSucceeded ? "completed" : "failed"), total_steps: steps.length };
 }
 
 chrome.alarms.create("keepAlive", { periodInMinutes: 4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "keepAlive") {
-    chrome.storage.session.get("keepAlive").catch(() => {});
+    fetch("http://localhost:8081/v1/health").catch(() => {});
   }
 });
 
@@ -392,3 +465,5 @@ chrome.action.onClicked.addListener(() => {
 if (typeof self !== "undefined") {
   (self as unknown as Record<string, unknown>).__executeWorkflowRun = executeWorkflowRun;
 }
+
+export { detectChallenges };
