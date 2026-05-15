@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 
 const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 test("create workflow via API and run it", async ({ context, extensionId, errors }) => {
   const ext = new (await import("./page-objects")).ExtensionHelper(context, extensionId);

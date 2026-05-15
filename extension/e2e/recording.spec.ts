@@ -2,6 +2,7 @@ import { test, expect } from "./fixtures";
 import { PopupPage, DashboardPage } from "./page-objects";
 
 const BACKEND = "http://localhost:8081";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 test("full human-like recording flow: open page → record → interact → stop → verify workflow",
   async ({ context, extensionId, errors }) => {
@@ -16,6 +17,9 @@ test("full human-like recording flow: open page → record → interact → stop
   const popup = await ext.openPopup();
   await popup.clickRecord();
   expect(await popup.isRecording()).toBeTruthy();
+  // Wait for content script to process SET_RECORDING before interacting
+  await testPage.bringToFront();
+  await testPage.waitForTimeout(800);
   await testPage.screenshot({ path: "test-results/recording-01-record-started.png" });
 
   await testPage.click("h1");
@@ -34,14 +38,14 @@ test("full human-like recording flow: open page → record → interact → stop
   await testPage.screenshot({ path: "test-results/recording-02-stopped.png" });
 
   const wfResp = await testPage.request.get(`${BACKEND}/v1/workflows`, {
-    headers: { "X-API-Key": "dev-api-key-change-in-production" },
+    headers: { "X-API-Key": API_KEY },
   });
   const workflows = await wfResp.json() as any[];
   const latestWf = workflows[0];
   expect(latestWf.status).toBe("draft");
 
   const detailResp = await testPage.request.get(`${BACKEND}/v1/workflows/${latestWf.id}`, {
-    headers: { "X-API-Key": "dev-api-key-change-in-production" },
+    headers: { "X-API-Key": API_KEY },
   });
   const detail = await detailResp.json() as any;
   expect(detail.steps.length).toBeGreaterThanOrEqual(2);

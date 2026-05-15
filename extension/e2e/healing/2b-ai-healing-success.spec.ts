@@ -3,7 +3,7 @@ import { serveTestPage, TEST_PAGE_URL, TEST_PAGE_URL_V2, pollRunStatus, getAudit
 import { DeterministicHealProvider } from "../helpers/heal-provider";
 
 const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 test("heals: AI-powered CSS selector healing", async ({ context, extensionId, errors }) => {
   const ext = new (await import("../page-objects")).ExtensionHelper(context, extensionId);
@@ -14,6 +14,7 @@ test("heals: AI-powered CSS selector healing", async ({ context, extensionId, er
     { event_type: "click", payload: { selector_chain: [{ type: "css", value: "#submit-btn-v1" }] } },
   ]);
   expect(wfId).toBeTruthy();
+  await ext.activateWorkflowViaAPI(wfId);
 
   const execPage = await context.newPage();
   await serveTestPage(execPage);
@@ -23,13 +24,15 @@ test("heals: AI-powered CSS selector healing", async ({ context, extensionId, er
 
   // Load V2 page where #submit-btn-v1 does NOT exist
   await execPage.goto(TEST_PAGE_URL_V2);
+  await execPage.bringToFront();
   await execPage.waitForTimeout(1500);
 
   const sw = await ext.getServiceWorker();
 
+  // Get tab ID via active tab (URL-pattern query requires host_permissions)
   const tabId = await sw.evaluate(() => {
     return new Promise<number | undefined>((resolve) => {
-      chrome.tabs.query({ url: "http://sr-test.local/*" }, (tabs) => resolve(tabs[0]?.id));
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs[0]?.id));
     });
   });
   expect(tabId).toBeDefined();

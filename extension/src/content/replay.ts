@@ -1,12 +1,141 @@
+import { captureDomSnippet } from "./dom";
+
+const DEFAULT_ACTION_TIMEOUT = 30000;
+const POLL_INTERVAL = 100;
+
+export type ErrorCode =
+  | "ELEMENT_NOT_FOUND"
+  | "ELEMENT_NOT_VISIBLE"
+  | "ELEMENT_NOT_ENABLED"
+  | "ELEMENT_NOT_EDITABLE"
+  | "ELEMENT_BLOCKED"
+  | "ELEMENT_UNSTABLE"
+  | "NAVIGATION_FAILURE"
+  | "PERMISSION_DENIED"
+  | "TAB_CLOSED"
+  | "NETWORK_ERROR"
+  | "EXECUTION_ERROR";
+
+export function checkVisibility(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none") return false;
+  if (style.visibility === "hidden") return false;
+  if (el.hasAttribute("hidden")) return false;
+  return true;
+}
+
+export function checkStability(el: Element): Promise<boolean> {
+  return new Promise((resolve) => {
+    let framesChecked = 0;
+    let prevRect: DOMRect | undefined;
+
+    function check() {
+      if (!(el instanceof HTMLElement)) { resolve(false); return; }
+      const rect = el.getBoundingClientRect();
+      if (prevRect &&
+          rect.x === prevRect.x && rect.y === prevRect.y &&
+          rect.width === prevRect.width && rect.height === prevRect.height) {
+        framesChecked++;
+        if (framesChecked >= 2) { resolve(true); return; }
+      } else {
+        framesChecked = 0;
+      }
+      prevRect = rect;
+      requestAnimationFrame(check);
+    }
+    check();
+  });
+}
+
+export function checkEnabled(el: Element): boolean {
+  if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement ||
+      el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+    if (el.disabled) return false;
+  }
+  let parent = el.parentElement;
+  while (parent) {
+    if (parent instanceof HTMLFieldSetElement && parent.disabled) return false;
+    parent = parent.parentElement;
+  }
+  return true;
+}
+
+export function checkEditable(el: Element): boolean {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    if (el.readOnly) return false;
+  }
+  if (el.hasAttribute("contenteditable")) return true;
+  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ||
+         el instanceof HTMLSelectElement;
+}
+
+export function checkNotOverlayed(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return true;
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return true;
+  try {
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const topEl = document.elementFromPoint(centerX, centerY);
+    return !!((topEl === el) || el.contains(topEl) || (topEl && topEl.contains(el)));
+  } catch {
+    return true;
+  }
+}
+
+export async function waitForElement(
+  el: Element | null,
+  options: { timeout?: number; force?: boolean; reduceMotion?: boolean } = {},
+): Promise<{ passed: boolean; reason?: string }> {
+  if (!el) return { passed: false, reason: "ELEMENT_NOT_FOUND" };
+
+  if (options.force) return { passed: true };
+
+  const timeout = options.timeout ?? DEFAULT_ACTION_TIMEOUT;
+  const start = Date.now();
+
+  if (!checkVisibility(el)) return { passed: false, reason: "ELEMENT_NOT_VISIBLE" };
+  if (!checkEnabled(el)) return { passed: false, reason: "ELEMENT_NOT_ENABLED" };
+
+  if (!options.reduceMotion) {
+    try {
+      const stable = await checkStability(el);
+      if (!stable) return { passed: false, reason: "ELEMENT_UNSTABLE" };
+    } catch {
+      // If rAF is not available (test env), skip stability check
+    }
+  }
+
+  if (checkNotOverlayed(el)) return { passed: true };
+
+  while (Date.now() - start < timeout) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    if (checkNotOverlayed(el)) return { passed: true };
+  }
+
+  return { passed: false, reason: "ELEMENT_BLOCKED" };
+}
+
 export interface SelectorSet {
   type: string;
   value: string;
+  score?: number;
+}
+
+export interface AnchorSelectorValue {
+  anchor_selector: string;
+  relation: string;
+  offset_x?: number;
+  offset_y?: number;
 }
 
 export interface StepToExecute {
   action_type: string;
   selector_chain: SelectorSet[];
   value?: string;
+  intent?: string;
+  force?: boolean;
 }
 
 export interface StepResult {
@@ -15,7 +144,8 @@ export interface StepResult {
 }
 
 function findElementBySelectors(chain: SelectorSet[]): Element | null {
-  for (const sel of chain) {
+  const sorted = [...chain].sort((a, b) => (b.score || 0) - (a.score || 0));
+  for (const sel of sorted) {
     try {
       let element: Element | null = null;
 
@@ -31,6 +161,9 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
           break;
         case "xpath":
           element = findElementByXPath(sel.value);
+          break;
+        case "anchor":
+          element = findElementByAnchor(sel.value);
           break;
       }
 
@@ -103,6 +236,33 @@ function findElementByXPath(xpath: string): Element | null {
     null,
   );
   return result.singleNodeValue as Element | null;
+}
+
+function findElementByAnchor(value: string): Element | null {
+  try {
+    const parsed: AnchorSelectorValue = JSON.parse(value);
+    const anchorEl = document.querySelector(parsed.anchor_selector);
+    if (!anchorEl) return null;
+
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const offsetX = parsed.offset_x || 0;
+    const offsetY = parsed.offset_y || 0;
+
+    const targetX = anchorRect.left + offsetX;
+    const targetY = anchorRect.top + offsetY;
+
+    let candidate = document.elementFromPoint(targetX + 1, targetY + 1);
+    if (candidate && candidate !== document.body && candidate !== document.documentElement) {
+      return candidate;
+    }
+    // Fallback: search inside the anchor element for the relation direction
+    if (parsed.relation === "inside") {
+      return anchorEl.querySelector("*:first-child");
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function simulateClick(element: Element): boolean {
@@ -202,8 +362,13 @@ function simulateSelect(element: Element, value?: string): boolean {
 }
 
 function simulateScroll(element: Element): boolean {
-  element.scrollIntoView({ behavior: "instant", block: "center" });
-  return true;
+  try {
+    (element as HTMLElement).scrollIntoView({ behavior: "instant", block: "center" });
+    return true;
+  } catch {
+    // scrollIntoView may not be available in all environments (JSDOM)
+    return true;
+  }
 }
 
 function simulateNavigate(value?: string): boolean {
@@ -221,124 +386,62 @@ function simulateNavigate(value?: string): boolean {
   return false;
 }
 
-const FRAMEWORK_ATTR_PREFIXES = ["data-react", "data-v-", "data-svelte-", "data-ng-", "data-debug", "data-server-rendered"];
-
-const PII_PATTERNS = [
-  // Standard email addresses
-  /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g,
-  // International email addresses (IDN - unicode domain names)
-  /\b[^\s@]+@[^\s@]+\.[^\s]{2,}\b/g,
-  // US phone numbers: xxx-xxx-xxxx formats
-  /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
-  // International phone numbers with + prefix
-  /\+\d{1,4}[-.\s]?\d{6,14}\b/g,
-  // 16-digit credit cards
-  /\b\d{4}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{4}\b/g,
-  // 15-digit AmEx credit cards (starts with 34 or 37)
-  /\b3[47]\d{2}[-.\s]?\d{6}[-.\s]?\d{5}\b/g,
-  // 13-digit Visa credit cards (starts with 4)
-  /\b4\d{2}[-.\s]?\d{4}[-.\s]?\d{4}[-.\s]?\d{1}\b/g,
-  // SSN (xxx-xx-xxxx)
-  /\b\d{3}-\d{2}-\d{4}\b/g,
-];
-
-function isFrameworkAttr(name: string): boolean {
-  return FRAMEWORK_ATTR_PREFIXES.some((p) => name.startsWith(p));
-}
-
-function sanitizeNode(node: Node, depth: number = 0): string {
-  if (depth > 10) return "";
-  if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.textContent || "";
-    return text.length > 200 ? text.slice(0, 200) + "..." : text;
-  }
-  if (node.nodeType !== Node.ELEMENT_NODE) return "";
-  const el = node as Element;
-  const tag = el.tagName.toLowerCase();
-  if (tag === "script" || tag === "style" || tag === "iframe") return "";
-
-  const attrs: string[] = [];
-  for (const attr of el.attributes) {
-    const n = attr.name;
-    if (n === "id" || n === "class" || n === "role" || n === "aria-label" ||
-        n === "data-testid" || n === "data-cy" || n === "data-qa" || n === "data-test" ||
-        n === "name" || n === "href" || n === "src" || n === "type" || n === "placeholder" ||
-        n.startsWith("aria-") || n.startsWith("data-test-")) {
-      if (n === "value") continue;
-      if (n === "href" || n === "src") {
-        try {
-          const url = new URL(attr.value, window.location.href);
-          if (url.origin !== window.location.origin) continue;
-        } catch { continue; }
-      }
-      attrs.push(`${n}="${attr.value.replace(/"/g, "&quot;")}"`);
-    }
-  }
-  let html = `<${tag}` + (attrs.length > 0 ? " " + attrs.join(" ") : "") + ">";
-  for (const child of el.childNodes) {
-    html += sanitizeNode(child, depth + 1);
-  }
-  html += `</${tag}>`;
-  return html;
-}
-
-function redactPII(text: string): string {
-  let result = text;
-  for (const pattern of PII_PATTERNS) {
-    result = result.replace(pattern, "[REDACTED]");
-  }
-  return result;
-}
-
-export function captureDomSnippet(selectorPattern: string): { html: string; url: string; title: string } {
-  let target: Element | null = null;
-  try {
-    target = document.querySelector(selectorPattern);
-  } catch {
-    // Invalid selector, try body
-  }
-  const root = target || document.body;
-  const html = redactPII(sanitizeNode(root));
-  return {
-    html: html.slice(0, 4000),
-    url: window.location.href,
-    title: document.title,
-  };
-}
-
-export function executeStep(step: StepToExecute): StepResult {
+export async function executeStep(step: StepToExecute): Promise<StepResult> {
   let element: Element | null = null;
 
-  if (step.action_type !== "navigate") {
+  if (step.action_type !== "navigate" && step.action_type !== "scroll") {
     element = findElementBySelectors(step.selector_chain);
     if (!element) {
       return {
         success: false,
-        error: `Element not found for step: ${step.action_type}`,
+        error: "ELEMENT_NOT_FOUND",
       };
+    }
+
+    const waitResult = await waitForElement(element, { force: step.force });
+    if (!waitResult.passed) {
+      return {
+        success: false,
+        error: waitResult.reason || "ELEMENT_NOT_FOUND",
+      };
+    }
+  } else if (step.action_type !== "navigate") {
+    element = findElementBySelectors(step.selector_chain);
+    if (!element) {
+      return { success: false, error: "ELEMENT_NOT_FOUND" };
     }
   }
 
   try {
     switch (step.action_type) {
-      case "click":
-        if (!simulateClick(element!))
+      case "click": {
+        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
+        if (!simulateClick(element))
           return { success: false, error: "Click was canceled by the page" };
         break;
-      case "type":
-        if (!simulateType(element!, step.value))
+      }
+      case "type": {
+        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
+        if (!simulateType(element, step.value))
           return { success: false, error: "Cannot type into this element" };
         break;
-      case "select":
-        if (!simulateSelect(element!, step.value))
+      }
+      case "select": {
+        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
+        if (!simulateSelect(element, step.value))
           return { success: false, error: "Cannot select on this element" };
         break;
-      case "scroll":
-        simulateScroll(element!);
+      }
+      case "scroll": {
+        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
+        simulateScroll(element);
         break;
-      case "hover":
+      }
+      case "hover": {
+        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
         (element as HTMLElement)?.focus();
         break;
+      }
       case "navigate":
         simulateNavigate(step.value);
         break;
@@ -350,7 +453,7 @@ export function executeStep(step: StepToExecute): StepResult {
   } catch (err) {
     return {
       success: false,
-      error: `Execution error: ${err instanceof Error ? err.message : String(err)}`,
+      error: `EXECUTION_ERROR: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }

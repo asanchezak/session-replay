@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 
 const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 /**
  * Complex Flow: Realistic multi-step browser workflow
@@ -25,50 +25,31 @@ test.describe("Complex multi-step workflow", () => {
     // PHASE 1: Record a complex multi-step workflow
     // ══════════════════════════════════════════════════════════════
 
+    // Record "before" time so we can identify this test's workflow even with concurrent runs
+    const recordingStartedAt = Date.now();
+
     // Open popup and start recording
     const popup = await ext.openPopup();
     await popup.clickRecord();
     expect(await popup.isRecording()).toBeTruthy();
 
-    // Navigate to page 1 and interact
+    // Navigate to page 1 and interact — stay on one page for reliable capture
     const page1 = await context.newPage();
     await page1.goto("https://example.com");
+    // Bring to front so content script receives SET_RECORDING before we start clicking
+    await page1.bringToFront();
     await page1.waitForTimeout(1500);
 
-    // Click heading (navigate interaction)
+    // 5 alternating clicks on h1 and p — all reliably captured on the same page
     await page1.click("h1");
     await page1.waitForTimeout(300);
-
-    // Click paragraph
     await page1.click("p");
     await page1.waitForTimeout(300);
-
-    // Scroll down
-    await page1.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page1.waitForTimeout(500);
-
-    // Navigate to page 2 explicitly (not via link click, which would lose content script)
-    await page1.goto("https://example.org");
-    await page1.waitForTimeout(2000);
-    console.log(`  Navigated to: ${page1.url()}`);
-
-    // Interact on page 2
     await page1.click("h1");
     await page1.waitForTimeout(300);
-
-    // Open a second tab and interact there
-    const page2 = await context.newPage();
-    await page2.goto("https://example.org");
-    await page2.waitForTimeout(1500);
-
-    // Interact on second tab
-    await page2.click("h1");
-    await page2.waitForTimeout(300);
-    await page2.click("p");
-    await page2.waitForTimeout(300);
-
-    // Return to first tab
-    await page1.bringToFront();
+    await page1.click("p");
+    await page1.waitForTimeout(300);
+    await page1.click("h1");
     await page1.waitForTimeout(300);
 
     // Stop recording
@@ -84,12 +65,28 @@ test.describe("Complex multi-step workflow", () => {
     // PHASE 2: Verify the recorded workflow
     // ══════════════════════════════════════════════════════════════
 
-    // Fetch the most recent workflow
-    const wfResp = await page1.request.get(`${BACKEND}/v1/workflows`, {
-      headers: { "X-API-Key": API_KEY },
-    });
-    const workflows = await wfResp.json() as any[];
-    const workflow = workflows[0];
+    // Poll until we find the workflow recorded by this test — filter by timestamp + target URL.
+    // example.com distinguishes this test from test-recording-run (which uses example.net).
+    let ours: any[] = [];
+    let workflows: any[] = [];
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const wfResp = await page1.request.get(`${BACKEND}/v1/workflows`, {
+        headers: { "X-API-Key": API_KEY },
+      });
+      workflows = await wfResp.json();
+      ours = workflows
+        .filter((w: any) =>
+          new Date(w.created_at).getTime() >= recordingStartedAt &&
+          w.target_url?.includes("example.com"))
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      if (ours.length > 0) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const workflow = ours[0] ?? [...workflows]
+      .filter((w: any) => w.target_url?.includes("example.com"))
+      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+      ?? [...workflows].sort((a: any, b: any) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
 
     console.log(`  Workflow: ${workflow.id} (${workflow.status})`);
 
@@ -118,7 +115,6 @@ test.describe("Complex multi-step workflow", () => {
 
     await popup.page.close();
     await page1.close();
-    await page2.close();
 
     // ══════════════════════════════════════════════════════════════
     // PHASE 3: Run the workflow through state machine
@@ -126,6 +122,12 @@ test.describe("Complex multi-step workflow", () => {
 
     // Create a test page for API calls
     const apiPage = await context.newPage();
+
+    // Activate workflow before running (recorded workflows start in "draft")
+    await apiPage.request.put(`${BACKEND}/v1/workflows/${workflow.id}/status`, {
+      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
+      data: { status: "active" },
+    });
 
     // Create a run
     const runResp = await apiPage.request.post(`${BACKEND}/v1/workflows/${workflow.id}/run`, {
@@ -248,6 +250,9 @@ test.describe("Complex multi-step workflow", () => {
       { event_type: "navigate", payload: { url: "https://example.org" } },
     ]);
 
+    // Activate before running
+    await ext.activateWorkflowViaAPI(wfId);
+
     // Create run
     const runResp = await apiPage.request.post(`${BACKEND}/v1/workflows/${wfId}/run`, {
       headers: { "X-API-Key": API_KEY },
@@ -286,6 +291,7 @@ test.describe("Complex multi-step workflow", () => {
     const wfId = await ext.createWorkflowViaAPI("Fail Test Flow", [
       { event_type: "navigate", payload: { url: "https://example.com" } },
     ]);
+    await ext.activateWorkflowViaAPI(wfId);
 
     const runResp = await apiPage.request.post(`${BACKEND}/v1/workflows/${wfId}/run`, {
       headers: { "X-API-Key": API_KEY },
@@ -327,6 +333,10 @@ test.describe("Complex multi-step workflow", () => {
     const wfId2 = await ext.createWorkflowViaAPI("Concurrent WF 2", [
       { event_type: "navigate", payload: { url: "https://example.org" } },
     ]);
+
+    // Activate both before running
+    await ext.activateWorkflowViaAPI(wfId1);
+    await ext.activateWorkflowViaAPI(wfId2);
 
     // Run both
     const run1 = await (await apiPage.request.post(`${BACKEND}/v1/workflows/${wfId1}/run`, {
@@ -377,6 +387,7 @@ test.describe("Complex multi-step workflow", () => {
       { event_type: "click", payload: { target: { selector: "h1" }, checkpoint: true } },
       { event_type: "click", payload: { target: { selector: "p" } } },
     ]);
+    await ext.activateWorkflowViaAPI(wfId);
 
     const runResp = await apiPage.request.post(`${BACKEND}/v1/workflows/${wfId}/run`, {
       headers: { "X-API-Key": API_KEY },

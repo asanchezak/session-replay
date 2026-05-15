@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter
@@ -39,7 +40,31 @@ async def suggest_recovery(req: RecoverySuggestRequest):
         intent=req.intent,
     )
     response = await provider.generate(prompt, system="You are a DOM analysis assistant.")
-    return {"suggestion": response.content, "confidence": response.confidence}
+
+    try:
+        result = json.loads(response.content)
+        confidence = float(result.get("confidence", response.confidence))
+        new_selectors = []
+        primary = result.get("selector")
+        if primary:
+            new_selectors.append(primary)
+        fallbacks = result.get("fallback_selectors", [])
+        for sel in fallbacks:
+            if sel not in new_selectors:
+                new_selectors.append(sel)
+        return {
+            "suggestion": result,
+            "new_selectors": new_selectors,
+            "confidence": confidence,
+            "explanation": result.get("explanation", ""),
+        }
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "suggestion": response.content,
+            "new_selectors": [],
+            "confidence": response.confidence,
+            "explanation": "AI returned unparseable response",
+        }
 
 
 @router.post("/classify")

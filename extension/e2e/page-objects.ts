@@ -1,7 +1,7 @@
 import type { Page, BrowserContext } from "@playwright/test";
 
 const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 export class PopupPage {
   constructor(
@@ -16,6 +16,13 @@ export class PopupPage {
 
   async clickRecord() {
     await this.page.click("text=Record Workflow");
+    // After clicking Record, the GoalInputView appears. Click Skip to start recording.
+    await this.page.waitForTimeout(500);
+    const skipBtn = this.page.getByText("Skip");
+    if (await skipBtn.isVisible().catch(() => false)) {
+      await skipBtn.click();
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async clickStop() {
@@ -115,8 +122,22 @@ export class ExtensionHelper {
     return body.id;
   }
 
+  async activateWorkflowViaAPI(workflowId: string): Promise<void> {
+    const page = await this.context.newPage();
+    await page.request.put(`${BACKEND}/v1/workflows/${workflowId}/status`, {
+      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
+      data: { status: "active" },
+    });
+    await page.close();
+  }
+
   async runWorkflowViaAPI(workflowId: string): Promise<string> {
     const page = await this.context.newPage();
+    // Activate the workflow first (required before running)
+    await page.request.put(`${BACKEND}/v1/workflows/${workflowId}/status`, {
+      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
+      data: { status: "active" },
+    });
     const resp = await page.request.post(`${BACKEND}/v1/workflows/${workflowId}/run`, {
       headers: { "X-API-Key": API_KEY },
     });

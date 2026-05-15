@@ -14,9 +14,12 @@ from core.models import Base
 
 TEST_DATABASE_URL = "sqlite+aiosqlite://"
 
-# Disable rate limiting and lower API key requirement for tests
+# Disable rate limiting and set a known API key for tests
 settings.rate_limit_enabled = False
 settings.api_key = SecretStr("dev-api-key-change-in-production")
+# Disable AI by default in tests so we don't hit the live provider. Tests that
+# exercise AI behavior should re-enable it explicitly via monkeypatch.
+settings.ai_api_key = ""
 
 
 @pytest.fixture(scope="session")

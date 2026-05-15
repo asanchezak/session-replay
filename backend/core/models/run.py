@@ -25,3 +25,9 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Phase 6: goal-first runtime cursor. Optional jsonb capturing phases
+    # completed/active/pending and intents satisfied/outstanding. The
+    # primary cursor will eventually be derived from this instead of
+    # current_step_index; both kept for now during the transition.
+    goal_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)

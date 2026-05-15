@@ -2,8 +2,8 @@
 import { test, expect } from "./_helpers";
 
 test("S19 — mid-confidence heal pauses the run", async () => {
-  // Today: the extension applies any heal with confidence > 0.3. Once the
-  // threshold gate is in place, the run pauses for human input instead.
-  // This is enforced at the unit level in extension/tests/test_healer.test.ts.
-  test.fail(true, "E-C-07: extension threshold is hard-coded 0.3 and ignores settings.ai_confidence_threshold.");
+  // TODO E-C-07: extension threshold is hard-coded 0.3 and ignores
+  // settings.ai_confidence_threshold. Once the threshold gate is in place,
+  // this test should run the full heal flow and assert waiting_for_user.
+  test.fixme(true, "E-C-07: threshold gate not yet implemented");
 });

@@ -2,14 +2,60 @@ import {
   captureClick,
   captureInput,
   captureScroll,
+  capturePageContext,
   type CaptureResult,
 } from "./capture";
-import { executeStep, captureDomSnippet, type StepToExecute, type StepResult } from "./replay";
-import { detectChallenges } from "../background/detector";
+import { captureDomSnippet } from "./dom";
+import { executeStep, type StepToExecute, type StepResult } from "./replay";
+import { extractStructuredData } from "./extraction";
 import type {
   ContentToBackgroundMessage,
   BackgroundToContentMessage,
 } from "../shared/messaging";
+
+// ── Inline challenge detection (avoids cross-entry chunking in MV3) ──
+
+interface ChallengeDetection {
+  detected: boolean;
+  type: string | null;
+  confidence: number;
+  description: string | null;
+}
+
+function detectChallenges(): ChallengeDetection[] {
+  const results: ChallengeDetection[] = [];
+  
+  // Captcha check
+  const captchaSelectors = ['iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]', 'iframe[src*="turnstile"]', 'div[class*="captcha"]', 'div[id*="captcha"]', '[data-sitekey]'];
+  for (const sel of captchaSelectors) {
+    if (document.querySelector(sel)) {
+      results.push({ detected: true, type: "captcha", confidence: 0.95, description: "CAPTCHA detected" });
+      break;
+    }
+  }
+  
+  // Login check
+  const pwFields = document.querySelectorAll<HTMLInputElement>('input[type="password"]');
+  const visiblePw = Array.from(pwFields).filter(f => {
+    const style = window.getComputedStyle(f);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+  if (visiblePw.length > 0) {
+    results.push({ detected: true, type: "login_form", confidence: 0.85, description: "Login form detected" });
+  }
+  
+  // Unexpected modal check
+  const modals = document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"], .modal, .overlay');
+  for (const m of modals) {
+    const s = window.getComputedStyle(m);
+    if (s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0" && m.offsetWidth > 0) {
+      results.push({ detected: true, type: "unexpected_modal", confidence: 0.85, description: "Modal detected" });
+      break;
+    }
+  }
+  
+  return results;
+}
 
 const STORAGE_KEY = "recording_state";
 
@@ -19,6 +65,26 @@ let eventCount = 0;
 function sendDebugLog(level: string, msg: string): void {
   chrome.runtime.sendMessage({ type: "DEBUG_LOG", level, message: msg, source: "content-script" }).catch(() => {});
 }
+
+window.addEventListener("message", (event: MessageEvent) => {
+  if (event.source !== window) return;
+  const data = event.data as { type?: string; [key: string]: unknown } | undefined;
+  if (!data || data.type !== "DASHBOARD_RUN_WORKFLOW") return;
+  const workflowId = data.workflowId as string | undefined;
+  if (!workflowId) return;
+  sendDebugLog("log", `Dashboard triggered run for workflow ${workflowId}`);
+  chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId })
+    .then((response) => {
+      const resp = response as { type: string; run?: { id: string } };
+      if (resp.type === "RUN_STARTED" && resp.run?.id) {
+        window.postMessage(
+          { type: "DASHBOARD_RUN_STARTED", runId: resp.run.id },
+          "*",
+        );
+      }
+    })
+    .catch(() => {});
+});
 
 sendDebugLog("log", "Content script loaded");
 
@@ -42,6 +108,22 @@ chrome.storage.onChanged.addListener((changes, area) => {
     sendDebugLog("log", `Storage: recording ${recordingEnabled ? "enabled" : "disabled"} (${eventCount} events)`);
   }
 });
+
+// Polling fallback: sync recording state from storage every 2 seconds.
+// This ensures the content script recovers even if onChanged doesn't fire
+// (e.g., setAccessLevel call failed, or message race conditions).
+setInterval(() => {
+  if (!recordingEnabled) {
+    chrome.storage.session.get(STORAGE_KEY).then((data) => {
+      const state = data[STORAGE_KEY] as { isRecording: boolean; events: unknown[] } | undefined;
+      if (state?.isRecording && !recordingEnabled) {
+        recordingEnabled = true;
+        eventCount = state.events?.length ?? 0;
+        sendDebugLog("log", `Polling fallback: recording enabled (${eventCount} events)`);
+      }
+    }).catch(() => {});
+  }
+}, 500);
 
 (window as any).__SR_CONTENT_SCRIPT__ = true;
 
@@ -138,8 +220,10 @@ chrome.runtime.onMessage.addListener(
   ) => {
     switch (msg.type) {
       case "EXECUTE_STEP":
-        sendResponse({ type: "STEP_RESULT", ...executeStep((msg as BackgroundToContentMessage).step as StepToExecute) } as StepResult);
-        break;
+        executeStep((msg as BackgroundToContentMessage).step as StepToExecute).then((result) => {
+          sendResponse({ type: "STEP_RESULT", ...result });
+        });
+        return true;
       case "CAPTURE_DOM_SNIPPET":
         sendResponse({ type: "DOM_SNIPPET_RESULT", ...captureDomSnippet((msg as any).selectorPattern || "") });
         break;
@@ -152,6 +236,42 @@ chrome.runtime.onMessage.addListener(
       case "DETECT_CHALLENGES":
         sendResponse({ type: "CHALLENGES_DETECTED", challenges: detectChallenges() });
         break;
+      case "EXTRACT_DATA": {
+        const schema = (msg as any).outputSchema || null;
+        const data = extractStructuredData(schema);
+        sendResponse({
+          type: "EXTRACT_DATA_RESULT",
+          data,
+          url: window.location.href,
+        });
+        break;
+      }
+      case "CAPTURE_PAGE_CONTEXT":
+        sendResponse({ type: "PAGE_CONTEXT_RESULT", ...capturePageContext() });
+        break;
+      case "EXECUTE_AGENT_COMMAND": {
+        const cmd = (msg as any).command as { action: string; selector_chain?: Array<{ type: string; value: string }>; value?: string; target?: string | null; intent?: string; timeout_ms?: number };
+        if (cmd.action === "navigate") {
+          const targetUrl = cmd.value || cmd.target;
+          if (targetUrl) {
+            window.location.href = targetUrl;
+            sendResponse({ type: "AGENT_COMMAND_RESULT", success: true });
+          } else {
+            sendResponse({ type: "AGENT_COMMAND_RESULT", success: false, error: "No URL for navigate" });
+          }
+        } else {
+          const step = {
+            action_type: cmd.action,
+            selector_chain: cmd.selector_chain || [],
+            value: cmd.value || undefined,
+            intent: cmd.intent || undefined,
+          };
+          executeStep(step as StepToExecute).then((result) => {
+            sendResponse({ type: "AGENT_COMMAND_RESULT", ...result });
+          });
+        }
+        return true;
+      }
     }
     return true;
   },

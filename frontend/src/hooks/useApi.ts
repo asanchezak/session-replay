@@ -1,7 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { logger } from "../lib/logger";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/v1";
 const API_KEY = import.meta.env.VITE_API_KEY;
+const LOADING_TIMEOUT_MS = 15000;
 
 if (!API_KEY) {
   if (import.meta.env.PROD) {
@@ -21,6 +23,7 @@ type ApiMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 export function useApi() {
   const request = useCallback(async <T>(method: ApiMethod, path: string, body?: unknown, signal?: AbortSignal): Promise<T> => {
+    const start = performance.now();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-API-Key": API_KEY!,
@@ -33,10 +36,19 @@ export function useApi() {
       signal,
     });
 
+    const elapsed = performance.now() - start;
     const data = await response.json();
+
+    logger.apiCall("useApi", method, path, response.status, elapsed);
 
     if (!response.ok) {
       const message = data?.error?.message || data?.detail?.error?.message || `Request failed: ${response.status}`;
+      logger.error("useApi", `${method} ${path}`, {
+        status_code: response.status,
+        error_code: data?.error?.code,
+        error_details: data?.error?.details,
+        response_body: JSON.stringify(data).slice(0, 500),
+      });
       throw new Error(message);
     }
 
@@ -50,23 +62,35 @@ export function useApiData<T>() {
   const [state, setState] = useState<ApiState<T>>({ data: null, loading: false, error: null });
   const { request } = useApi();
   const abortControllerRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
   }, []);
 
   const fetchData = useCallback(async (method: ApiMethod, path: string, body?: unknown) => {
     abortControllerRef.current?.abort();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
     const controller = new AbortController();
     abortControllerRef.current = controller;
     setState({ data: null, loading: true, error: null });
+
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+      setState(prev => prev.loading ? { data: null, loading: false, error: "Request timed out. Is the backend running?" } : prev);
+    }, LOADING_TIMEOUT_MS);
+    timeoutRef.current = timeoutId;
+
     try {
       const data = await request<T>(method, path, body, controller.signal);
+      clearTimeout(timeoutId);
       setState({ data, loading: false, error: null });
       return data;
     } catch (err) {
+      clearTimeout(timeoutId);
       if (err instanceof Error && err.name === "AbortError") return null;
       const message = err instanceof Error ? err.message : "Unknown error";
       setState({ data: null, loading: false, error: message });

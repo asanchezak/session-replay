@@ -40,7 +40,25 @@ test-extension:
 	cd extension && npx vitest run
 
 test-e2e:
-	cd extension && npx playwright test
+	@echo "Checking backend is running..."
+	@curl -s http://localhost:8081/v1/health | grep -q ok || (echo "✗ Backend not running. Start it with: make dev-backend" && exit 1)
+	cd extension && E2E_API_KEY="$(shell grep API_KEY .env | cut -d= -f2)" npx playwright test
+
+# ── Autonomy E2E (Phase 0 / 1 / 3 verification) ────────
+# Single command that proves the AI-driven autonomy fixes are wired in
+# end-to-end. Writes a Markdown report to test-results/.
+autonomy-e2e:
+	@echo "▶ Autonomy E2E — full verification"
+	@mkdir -p test-results
+	@echo "  [1/4] Backend unit tests (PlanUpdate + RecoverySupervisor + agent)"
+	@cd backend && uv run pytest tests/unit/test_plan_updates.py tests/unit/test_recovery_supervisor.py tests/unit/test_agent_service.py -q
+	@echo "  [2/4] Checking backend is running (required for live probe)"
+	@curl -s http://localhost:8081/v1/health | grep -q ok || (echo "✗ Backend not running. Start it with: make dev-backend" && exit 1)
+	@echo "  [3/4] Live HTTP probe — agent must ADAPT past a session-specific selector"
+	@python3 scripts/verify_autonomy.py
+	@echo "  [4/4] Generating report"
+	@python3 scripts/autonomy_report.py
+	@echo "✓ Report written to test-results/autonomy-report-latest.md"
 
 # ── Coverage ───────────────────────────────────────────
 coverage:
@@ -74,11 +92,22 @@ dev: dev-check-env dev-backend dev-frontend
 	@echo "  ✓ Backend:  http://localhost:8081"
 	@echo "  ✓ Frontend: http://localhost:5173"
 	@echo "  ✓ Health:   curl http://localhost:8081/v1/health"
+	@echo "  ✓ Logs:     http://localhost:8082 (Seq)"
 	@echo ""
+
+dev-logs:
+	@echo "  Starting Seq log server on :8082..."
+	@docker compose up -d 2>/dev/null; true
+	@sleep 3
+	@curl -s -o /dev/null http://localhost:8082 && echo "  ✓ Seq running on http://localhost:8082" || echo "  ✗ Seq failed to start"
+
+logs:
+	@open http://localhost:8082
 
 dev-check-env:
 	@test -f .env || cp .env.example .env 2>/dev/null; true
 	@echo "  ✓ .env ready"
+	@python3 scripts/check-config-consistency.py
 
 dev-backend:
 	@echo "  Starting backend on :8081..."
@@ -94,8 +123,34 @@ dev-frontend:
 	@sleep 3
 	@curl -s -o /dev/null http://localhost:5173 && echo "  ✓ Frontend running on :5173" || echo "  ✗ Frontend failed to start"
 
+# ── Smoke / Regression / Security / Chaos ─────────────
+test-smoke:
+	cd backend && uv run pytest tests/ -v --no-header -m "smoke" --no-header 2>/dev/null || true
+	cd extension && npx vitest run tests/test_capture.test.ts tests/test_replay_selectors.test.ts --reporter=verbose 2>/dev/null || true
+
+test-security:
+	cd backend && uv run pytest tests/ -v -m "security"
+	cd extension && npx vitest run tests/test_security.test.ts 2>/dev/null || true
+
+test-chaos:
+	cd extension && npx playwright test e2e/chaos.spec.ts
+
+test-performance:
+	cd backend && uv run pytest tests/ -v -m "performance"
+	cd extension && npx vitest run tests/test_performance.test.ts 2>/dev/null || true
+
+test-all:
+	cd backend && uv run pytest tests/ -v --no-header --cov=. --cov-report=term-missing
+	cd extension && npx vitest run
+	cd frontend && npx vitest run 2>/dev/null || true
+
+# ── Config Consistency ─────────────────────────────────
+check-config:
+	@echo "Checking cross-layer config consistency..."
+	@python3 scripts/check-config-consistency.py
+
 # ── Full Quality Gate ──────────────────────────────────
-check: lint typecheck test build
+check: check-config lint typecheck test build
 
 # ── Clean ──────────────────────────────────────────────
 clean:

@@ -1,13 +1,53 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
 import { useRuns, type RunSummary } from "../hooks/useRuns";
+import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
-import { Play } from "lucide-react";
+import { Play, Square } from "lucide-react";
+
+const CANCELABLE_STATUSES = ["running", "queued", "waiting_for_user", "recovering"];
 
 export default function RunsPage() {
-  const { runs, loading, error } = useRuns();
+  const { runs, loading, error, refetch, cancelRun } = useRuns();
+  const navigate = useNavigate();
+  const [canceling, setCanceling] = useState<Set<string>>(new Set());
+
+  const cancelableRuns = runs.filter((r) => CANCELABLE_STATUSES.includes(r.status));
+  const hasCancelable = cancelableRuns.length > 0;
+
+  const handleCancelAll = async () => {
+    setCanceling(new Set(cancelableRuns.map((r) => r.id)));
+    for (const r of cancelableRuns) {
+      try {
+        await cancelRun(r.id);
+      } catch (err) {
+        logger.error("RunsPage", "cancel_all", { run_id: r.id }, err instanceof Error ? err : undefined);
+      }
+    }
+    setCanceling(new Set());
+    refetch();
+    window.dispatchEvent(new CustomEvent("runs:updated"));
+  };
+
+  const handleCancel = async (runId: string) => {
+    setCanceling((prev) => new Set(prev).add(runId));
+    try {
+      await cancelRun(runId);
+    } catch (err) {
+      logger.error("RunsPage", "cancel_run", { run_id: runId }, err instanceof Error ? err : undefined);
+    }
+    setCanceling((prev) => {
+      const next = new Set(prev);
+      next.delete(runId);
+      return next;
+    });
+    refetch();
+    window.dispatchEvent(new CustomEvent("runs:updated"));
+  };
 
   if (loading) {
     return (
@@ -31,12 +71,27 @@ export default function RunsPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold mb-4 text-text-primary">Runs</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold text-text-primary">Runs</h1>
+        {hasCancelable && (
+          <button
+            onClick={handleCancelAll}
+            className="flex items-center gap-2 px-3 py-2 border border-error text-error text-sm rounded-md hover:bg-error/10 transition-colors"
+          >
+            <Square size={14} /> Cancel all ({cancelableRuns.length})
+          </button>
+        )}
+      </div>
       <Card padding="sm">
         <DataTable
           columns={[
             { key: "id", label: "Run", render: (r: RunSummary) => (
-              <span className="text-accent font-mono text-xs">#{r.id.slice(0, 8)}</span>
+              <span
+                className="text-accent font-mono text-xs cursor-pointer hover:text-accent-hover"
+                onClick={() => navigate(`/runs/${r.id}`)}
+              >
+                #{r.id.slice(0, 8)}
+              </span>
             )},
             { key: "status", label: "Status", render: (r: RunSummary) => (
               <StatusBadge status={r.status as any} size="sm" />
@@ -49,6 +104,17 @@ export default function RunsPage() {
             )},
             { key: "created", label: "Started", render: (r: RunSummary) => (
               <span className="text-text-secondary text-xs">{formatTime(r.created_at)}</span>
+            )},
+            { key: "actions", label: "", render: (r: RunSummary) => (
+              CANCELABLE_STATUSES.includes(r.status) ? (
+                <button
+                  onClick={() => handleCancel(r.id)}
+                  disabled={canceling.has(r.id)}
+                  className="px-2 py-1 text-xs text-error border border-error rounded-md hover:bg-error/10 transition-colors disabled:opacity-50"
+                >
+                  {canceling.has(r.id) ? "Canceling…" : "Cancel"}
+                </button>
+              ) : null
             )},
           ]}
           data={runs}

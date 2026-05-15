@@ -54,3 +54,7 @@ class WorkflowStep(Base, TimestampMixin, UUIDMixin):
     failure_condition: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ai_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
     checkpoint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Phase 5: selector stability — 1.0 = stable, 0.0 = always healed.
+    # Updated by learning_service after each terminal run.
+    selector_stability_score: Mapped[float | None] = mapped_column(nullable=True)
+    heal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

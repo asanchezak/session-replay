@@ -1,8 +1,7 @@
 """Unit tests for the AI provider abstraction.
 
-Pins B-N-05 (hardcoded confidence 0.0) — the test documents this as an xfail
-to be flipped once OpenAIProvider returns a meaningful confidence (e.g., parsed
-from a structured JSON response).
+Pins B-N-05 (hardcoded confidence 0.0) — now fixed: OpenAIProvider parses
+confidence from the JSON response content when available.
 """
 from __future__ import annotations
 
@@ -50,15 +49,9 @@ async def test_mock_provider_embed_returns_fixed_size():
     assert all(x == 0.0 for x in v)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="B-N-05: OpenAIProvider hardcodes confidence=0.0 instead of parsing it from the response.",
-)
 @pytest.mark.asyncio
 async def test_openai_provider_parses_confidence_from_response(monkeypatch):
-    """If the AI replies with a JSON-shaped content that contains `confidence`,
-    AIResponse.confidence should reflect it — not be hardcoded 0.0.
-    """
+    """OpenAIProvider parses confidence from the JSON response content."""
     respx = pytest.importorskip("respx")
     import httpx
 

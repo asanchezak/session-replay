@@ -56,6 +56,12 @@ test("service worker responds to START_RECORDING via popup", async ({ context, e
 
   await page.click("text=Record Workflow");
   await page.waitForTimeout(500);
+  // GoalInputView appears; click Skip to start recording
+  const skipBtn = page.getByText("Skip");
+  if (await skipBtn.isVisible().catch(() => false)) {
+    await skipBtn.click();
+    await page.waitForTimeout(500);
+  }
   await expect(page.getByText("Recording...").first()).toBeVisible();
 
   await page.click("text=Stop Recording");

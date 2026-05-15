@@ -39,8 +39,9 @@ export interface RecordedStep {
 }
 
 export interface SelectorSet {
-  type: "accessibility" | "css" | "text" | "xpath";
+  type: "accessibility" | "css" | "text" | "xpath" | "anchor";
   value: string;
+  score?: number;
 }
 
 export interface Workflow {
@@ -79,8 +80,10 @@ export type RunStatus =
 
 export type PopupState =
   | { type: "idle" }
+  | { type: "setting_goal" }
   | { type: "recording"; step_count: number }
   | { type: "running"; workflow_name: string; current_step: number; total_steps: number; run_id: string }
+  | { type: "running_parameterized"; workflow_name: string; current_step: number; total_steps: number; run_id: string; params: Record<string, string> }
   | { type: "recovering"; workflow_name: string; current_step: number; total_steps: number; run_id: string; error: string }
   | { type: "failed"; workflow_name: string; current_step: number; total_steps: number; run_id: string; error: string }
   | { type: "waiting_for_user"; reason: string; run_id: string }
@@ -90,4 +93,164 @@ export interface RecordEventResponse {
   id: string;
   hash: string;
   previous_hash: string;
+}
+
+export interface SemanticWorkflowInfo {
+  goal: string | null;
+  summary: string | null;
+  confidence: number;
+  parameters: WorkflowParameter[];
+  phases: SemanticPhase[];
+  outputSpec: OutputSpecification | null;
+  replayStrategy: string | null;
+}
+
+export interface WorkflowParameter {
+  key: string;
+  type: "string" | "number" | "boolean" | "list";
+  default: string | null;
+  description: string | null;
+  confidence: number;
+  required: boolean;
+}
+
+export interface SemanticPhase {
+  phase_index: number;
+  phase_name: string;
+  phase_goal: string | null;
+  start_step_index: number;
+  end_step_index: number;
+}
+
+export interface OutputSpecification {
+  type: string;
+  schema: Record<string, unknown> | null;
+  confidence: number;
+}
+
+export interface RuntimeParams {
+  [key: string]: string | number | boolean | string[];
+}
+
+export interface ExecutionPlan {
+  strategy: string;
+  mode: string;
+  steps?: RecordedStep[];
+  parameters?: Record<string, unknown>;
+  validation?: Record<string, unknown>;
+  reason?: string;
+}
+
+export interface ExtractedData {
+  step_index: number;
+  data: Record<string, unknown>[];
+  schema: Record<string, unknown> | null;
+  url: string;
+  timestamp: string;
+}
+
+export interface AgentCommandSelector {
+  type: string;
+  value: string;
+}
+
+export interface AgentCommand {
+  action: "navigate" | "click" | "type" | "select" | "scroll" | "extract";
+  target: string | null;
+  value: string | null;
+  selector_chain: AgentCommandSelector[];
+  intent: string | null;
+  methods: Array<{
+    action_type: string;
+    selector_chain: AgentCommandSelector[];
+    value?: string;
+  }>;
+  timeout_ms: number;
+  success_condition: Record<string, unknown> | null;
+}
+
+export interface AgentDecision {
+  decision:
+    | "EXECUTE"
+    | "SKIP"
+    | "RETRY"
+    | "HEAL"
+    | "ADAPT"
+    | "PAUSE"
+    | "COMPLETED";
+  confidence: number;
+  reasoning: string;
+  command: AgentCommand | null;
+  next_step_index: number | null;
+  pause_reason: string | null;
+  requires_human: boolean;
+}
+
+export interface PageContext {
+  url: string;
+  title: string;
+  dom_snippet: string;
+  accessibility_tree: string;
+  visible_text: string;
+  visible_elements: Array<{
+    tag: string;
+    id?: string;
+    classes: string[];
+    text: string;
+    role?: string;
+    aria_label?: string;
+    selector: string;
+    rect: { x: number; y: number; width: number; height: number };
+  }>;
+  is_blocking: boolean;
+  blocking_type: string | null;
+  page_unchanged: boolean;
+  // Phase 2: delta against the previous PageContext for this tab/run, computed
+  // by the service worker so the LLM sees what changed since the last poll.
+  page_diff?: PageDiff | null;
+}
+
+export interface PageDiff {
+  url_changed: boolean;
+  previous_url?: string;
+  added: Array<{ tag: string; role?: string; text: string }>;
+  removed: Array<{ tag: string; role?: string; text: string }>;
+  title_changed: boolean;
+  previous_title?: string;
+}
+
+export interface AgentPollRequest {
+  page_context: PageContext;
+  current_step_index: number | null;
+}
+
+export interface AgentPollResponse {
+  decision: string;
+  confidence: number;
+  reasoning: string;
+  command: AgentCommand | null;
+  next_step_index: number | null;
+  pause_reason: string | null;
+  requires_human: boolean;
+}
+
+export interface AgentResultRequest {
+  step_index: number;
+  success: boolean;
+  error: string | null;
+  page_context_after: PageContext | null;
+  error_context?: string;
+}
+
+export interface AgentResultResponse {
+  accepted: boolean;
+  decision: string | null;
+  next_step_index: number | null;
+  ai_analysis?: {
+    likely_cause: string;
+    analysis: string;
+    suggested_selectors: Array<{ type: string; value: string }>;
+    confidence: number;
+    should_retry: boolean;
+  } | null;
 }

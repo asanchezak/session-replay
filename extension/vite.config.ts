@@ -19,6 +19,9 @@ export default defineConfig({
         entryFileNames: "[name].js",
         chunkFileNames: "chunks/[name]-[hash].js",
         assetFileNames: "assets/[name]-[hash][extname]",
+        // Force no chunking — each entry gets its own self-contained bundle.
+        // This is required for MV3 content scripts which cannot use import().
+        manualChunks: () => null,
       },
     },
   },

@@ -15,6 +15,7 @@ globalThis.chrome = {
     sendMessage: vi.fn(),
     onInstalled: { addListener: vi.fn() },
     onMessage: { addListener: vi.fn() },
+    onMessageExternal: { addListener: vi.fn() },
   },
   tabs: {
     sendMessage: vi.fn(),

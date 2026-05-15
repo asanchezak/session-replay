@@ -40,6 +40,32 @@ describe("useApi", () => {
     const { result } = renderHook(() => useApi());
     await expect(result.current.request("GET", "/x")).rejects.toThrowError(/500/);
   });
+
+  it("401 auth error surfaces the UNAUTHORIZED message", async () => {
+    mockFetch(async () => ({
+      ok: false, status: 401, json: async () => ({
+        error: { code: "UNAUTHORIZED", message: "Invalid or missing API key" },
+      }),
+    } as Response));
+
+    const { result } = renderHook(() => useApi());
+    await expect(result.current.request("GET", "/workflows")).rejects.toThrowError(
+      /Invalid or missing API key/,
+    );
+  });
+
+  it("403 CORS error surfaces the FORBIDDEN message", async () => {
+    mockFetch(async () => ({
+      ok: false, status: 403, json: async () => ({
+        error: { code: "FORBIDDEN", message: "Origin not allowed" },
+      }),
+    } as Response));
+
+    const { result } = renderHook(() => useApi());
+    await expect(result.current.request("GET", "/workflows")).rejects.toThrowError(
+      /Origin not allowed/,
+    );
+  });
 });
 
 describe("useApiData", () => {

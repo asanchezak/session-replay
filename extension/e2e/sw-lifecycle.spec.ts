@@ -1,6 +1,8 @@
 import { test, expect } from "./fixtures";
 import { PopupPage } from "./page-objects";
 
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
+
 test("recording state persists after service worker termination", async ({ context, extensionId, errors }) => {
   const ext = new (await import("./page-objects")).ExtensionHelper(context, extensionId);
   const testPage = await context.newPage();
@@ -68,7 +70,7 @@ test("events captured before and after SW restart are preserved", async ({ conte
     await popup2.page.waitForTimeout(3000);
 
     const wfResp = await testPage.request.get("http://localhost:8081/v1/workflows", {
-      headers: { "X-API-Key": "dev-api-key-change-in-production" },
+      headers: { "X-API-Key": API_KEY },
     });
     const workflows = await wfResp.json() as any[];
     expect(workflows.length).toBeGreaterThan(0);

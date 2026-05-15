@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useApi } from "../hooks/useApi";
+import { logger } from "../lib/logger";
 
 interface InterventionModalProps {
   runId: string;
@@ -36,8 +37,10 @@ export default function InterventionModal({
     setError(null);
     try {
       await request("POST", `/runs/${runId}/resume`);
+      logger.info("InterventionModal", "resume_run", { run_id: runId, status: "success" });
       onResolved();
     } catch (err) {
+      logger.error("InterventionModal", "resume_run_failed", { run_id: runId }, err instanceof Error ? err : undefined);
       setError(err instanceof Error ? err.message : "Failed to resume");
     }
     setResuming(false);
@@ -52,8 +55,10 @@ export default function InterventionModal({
     setError(null);
     try {
       await request("POST", `/runs/${runId}/cancel`);
+      logger.info("InterventionModal", "cancel_run", { run_id: runId, status: "success" });
       onResolved();
     } catch (err) {
+      logger.error("InterventionModal", "cancel_run_failed", { run_id: runId }, err instanceof Error ? err : undefined);
       setError(err instanceof Error ? err.message : "Failed to cancel");
     }
     setCancelling(false);

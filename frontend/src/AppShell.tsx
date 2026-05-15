@@ -6,6 +6,7 @@ import InterventionModal from "./components/InterventionModal";
 import Breadcrumbs from "./components/Breadcrumbs";
 import RightDrawer from "./components/RightDrawer";
 import { useApi } from "./hooks/useApi";
+import { logger } from "./lib/logger";
 
 interface SearchResult {
   id: string;
@@ -18,28 +19,47 @@ export default function AppShell() {
   const [waitingRun, setWaitingRun] = useState<{
     id: string;
     workflow_id: string;
+    workflow_name?: string;
     current_step_index: number;
+    total_steps: number;
     pause_reason?: string;
+    error_summary?: string;
   } | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { request } = useApi();
   const navigate = useNavigate();
+  const location = window.location;
 
   const checkWaitingRuns = useCallback(async () => {
     try {
       const runs = await request<any[]>("GET", "/runs?status=waiting_for_user&limit=1");
       if (runs && runs.length > 0) {
         const r = runs[0];
+        let workflowName: string | undefined;
+        try {
+          const wf = await request<any>("GET", `/workflows/${r.workflow_id}`);
+          workflowName = wf.name;
+        } catch {}
         setWaitingRun({
           id: r.id,
           workflow_id: r.workflow_id,
+          workflow_name: workflowName,
           current_step_index: r.current_step_index,
+          total_steps: r.total_steps,
           pause_reason: r.pause_reason,
+          error_summary: r.error_summary,
+        });
+        logger.warn("AppShell", "intervention_modal_shown", {
+          run_id: r.id,
+          workflow_id: r.workflow_id,
+          step: r.current_step_index,
+          reason: r.pause_reason,
         });
       } else {
         setWaitingRun(null);
       }
     } catch {
+      // silent
     }
   }, [request]);
 
@@ -49,11 +69,15 @@ export default function AppShell() {
     return () => clearInterval(interval);
   }, [checkWaitingRuns]);
 
+  const dismissedRef = useRef<string | null>(null);
+  const onCurrentRunPage = waitingRun && location.pathname === `/runs/${waitingRun.id}`;
+  const isDismissed = waitingRun && dismissedRef.current === waitingRun.id;
+
   return (
     <div className="flex h-screen">
       <Sidebar />
       <div className="flex-1 flex flex-col">
-        <TopBar waitingRun={!!waitingRun} />
+        <TopBar waitingRun={!!waitingRun && !isDismissed} />
         <main className="flex-1 p-6 overflow-auto" role="main">
           <Breadcrumbs />
           <ErrorBoundary>
@@ -62,24 +86,25 @@ export default function AppShell() {
         </main>
       </div>
       <RightDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
-      {waitingRun && (
+      {waitingRun && !onCurrentRunPage && !isDismissed && (
         <InterventionModal
           runId={waitingRun.id}
-          runName={`Workflow ${waitingRun.workflow_id.slice(0, 8)}`}
+          runName={waitingRun.workflow_name || `Workflow ${waitingRun.workflow_id.slice(0, 8)}`}
           blockedStep={waitingRun.current_step_index + 1}
-          blockedStepName={waitingRun.pause_reason || "Unknown"}
-          explanation={waitingRun.pause_reason || "The system encountered a condition that requires your input."}
+          blockedStepName={waitingRun.error_summary || waitingRun.pause_reason || "Unknown step"}
+          explanation={waitingRun.error_summary || waitingRun.pause_reason || "The system encountered a condition that requires your input."}
           instructions={[
             "Review the current browser state.",
             "Complete any required action (e.g., CAPTCHA, form input).",
             "Click \"Continue Workflow\" to resume from where it paused.",
           ]}
-          onClose={() => setWaitingRun(null)}
+          onClose={() => { dismissedRef.current = waitingRun.id; setWaitingRun(null); }}
           onReview={() => {
             navigate(`/runs/${waitingRun.id}`);
+            dismissedRef.current = null;
             setWaitingRun(null);
           }}
-          onResolved={() => setWaitingRun(null)}
+          onResolved={() => { logger.info("AppShell", "intervention_modal_resolved", { run_id: waitingRun?.id }); dismissedRef.current = null; setWaitingRun(null); checkWaitingRuns(); }}
         />
       )}
     </div>
@@ -99,20 +124,26 @@ function Sidebar() {
   const { request } = useApi();
   const [runsCount, setRunsCount] = useState(0);
 
+  const fetchCounts = async () => {
+    try {
+      const runs = await request<any[]>("GET", "/runs?limit=100");
+      const active = runs.filter(
+        (r: any) => r.status === "running" || r.status === "waiting_for_user"
+      );
+      setRunsCount(active.length);
+    } catch {
+    }
+  };
+
   useEffect(() => {
-    const fetchCounts = async () => {
-      try {
-        const runs = await request<any[]>("GET", "/runs?limit=100");
-        const active = runs.filter(
-          (r: any) => r.status === "running" || r.status === "waiting_for_user"
-        );
-        setRunsCount(active.length);
-      } catch {
-      }
-    };
     fetchCounts();
     const interval = setInterval(fetchCounts, 30000);
-    return () => clearInterval(interval);
+    const handler = () => { fetchCounts(); };
+    window.addEventListener("runs:updated", handler);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("runs:updated", handler);
+    };
   }, [request]);
 
   return (
@@ -280,6 +311,22 @@ function TopBar({ waitingRun }: { waitingRun: boolean }) {
         <span className={`w-2 h-2 rounded-full ${waitingRun ? "bg-[#FDCB6E] animate-pulse" : "bg-[#00B894]"}`} />
         <span className="text-[#9AA0B0]">{waitingRun ? "Needs Attention" : "All Systems"}</span>
       </div>
+      <a
+        href="http://localhost:8082"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-1.5 text-xs text-[#6B7280] hover:text-[#6C5CE7] transition-colors ml-3"
+        title="Open centralized logs (Seq)"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+          <polyline points="10 9 9 9 8 9" />
+        </svg>
+        Logs
+      </a>
     </header>
   );
 }

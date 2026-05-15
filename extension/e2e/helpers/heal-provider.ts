@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
-const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const BACKEND = "http://localhost:8091";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 type Selector = { type: string; value: string };
 

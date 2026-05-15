@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getConfig } from "../src/background/api";
 
 const API_BASE = "http://localhost:8081/v1";
 const DASHBOARD_URL = "http://localhost:5173/dashboard";
@@ -26,9 +27,10 @@ function RecordingCompleteView({
   const savePrompt = async () => {
     setSaving(true);
     try {
+      const config = await getConfig();
       await fetch(`${API_BASE}/workflows/${workflowId}`, {
         method: "PUT",
-        headers: { "X-API-Key": "dev-api-key-change-in-production", "Content-Type": "application/json" },
+        headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
       });
     } catch {

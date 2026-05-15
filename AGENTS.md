@@ -32,6 +32,33 @@ make dev-frontend     # Start just the frontend (port 5173)
 
 Port 8000 conflict: `easy-recruit-workflow` Docker project uses 8000. If `make dev` fails or routes show `/api/v1/job-requests`, stop it with `docker compose -p easy-recruit-workflow down` first.
 
+## Centralized logging (Seq)
+
+All three layers log to Seq at `http://localhost:8082` (Docker container).
+
+| Layer | Source | How to view |
+|---|---|---|
+| Backend | API middleware, services, DB | Seq → filter `Layer = 'backend'` |
+| Frontend | Pages, components, hooks, useApi | Seq → filter `Layer = 'frontend'` |
+| Extension | Content script, SW, popup | Seq → filter `Layer = 'extension'` |
+
+```bash
+# Start Seq (required once)
+make dev-logs
+
+# Open Seq UI in browser
+make logs
+# or: open http://localhost:8082
+
+# Filter by layer in Seq query bar:
+Layer = 'backend'
+Layer = 'frontend'     
+Layer = 'extension'
+@Level = 'Error'
+```
+
+The dashboard top bar also has a **Logs** link (next to the status indicator).
+
 ## Debugging the extension
 
 Extension logs are automatically sent to `POST /v1/debug/log` (no API key needed). View them:
@@ -57,6 +84,7 @@ curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v
 | `make lint` | ruff (backend) + tsc --noEmit (extension + frontend) |
 | `make test` | pytest backend + vitest extension + playwright e2e |
 | `make test-e2e` | playwright e2e tests only (extension loaded in Chromium) |
+| `make autonomy-e2e` | Phase 0–6 autonomy gates + live HTTP probe + report (see `docs/autonomy-runbook.md`) |
 | `make coverage` | pytest with HTML coverage report |
 | `make coverage-e2e` | playwright with HTML report |
 | `make check` | lint + typecheck + test + build (quality gate) |
@@ -66,6 +94,8 @@ curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v
 | `cd extension && npx playwright test` | extension e2e tests |
 | `cd backend && uv run ruff check --fix .` | auto-fix lint |
 | `cd extension && npx tsc --noEmit` | extension typecheck |
+| `python3 scripts/verify_autonomy.py` | live probe — proves the AI is consulted on `cf7e5f3b` |
+| `python3 scripts/autonomy_report.py` | emit `test-results/autonomy-report-latest.md` decision-mix report |
 
 ## Backend conventions
 
@@ -105,6 +135,26 @@ curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v
 - **E2E tests**: Playwright tests in `extension/e2e/` load the full extension in Chromium via `launchPersistentContext`. Use `make test-e2e` or `cd extension && npx playwright test`.
 - **SW state persistence**: Recording state is stored in `chrome.storage.session` with `setAccessLevel('TRUSTED_AND_UNTRUSTED_CONTEXTS')` so content scripts can read it directly. The `chrome.storage.onChanged` listener in the content script replaces the SET_RECORDING message as the primary mechanism.
 - **Shadow DOM**: The content script's replay panel uses Shadow DOM (`mode: 'closed'`) for full CSS isolation from the host page.
+- **Autonomy default**: AI is consulted on every agent poll when `AI_API_KEY` is set. To disable for a test/debug run, clear the key (the system falls back to fast-path EXECUTE). See `docs/autonomy-runbook.md`.
+- **`DEV_DEFAULTS.apiBase`** in `extension/src/background/api.ts` and Vite proxy in `frontend/vite.config.ts` both point at the dev backend. Currently `http://localhost:8091`. Keep them in sync if you move the backend.
+- **Stuck runs auto-recover**: a backend `RecoverySupervisor` task wakes paused runs every 30 s and gives the LLM another shot. Capped at 5 attempts per run. Manually force a try with the dashboard's **Resume with AI** button.
+- **PlanUpdate ops** (INSERT/REMOVE/MODIFY/REORDER) mutate `run.workflow_snapshot.steps` atomically via `HealingService.apply_plan_update`. The extension mirrors the same ops locally so `currentStepIndex` stays aligned.
+
+## Autonomy stack (Phases 0–6)
+
+End-to-end AI-driven runtime. Architecture in `docs/autonomy-architecture-v2.md`; operations in `docs/autonomy-runbook.md`.
+
+| Layer | Files |
+|---|---|
+| L1 AI-first poll | `services/agent_service.py:_should_consult_ai`, `_consult_ai_for_step`, `_last_chance_recovery` |
+| L2 Goal-first cursor | `services/execution_service.py:_seed_goal_progress`, `_advance_goal_progress`; `core/models/run.py:goal_progress` |
+| L2 Page-state diff | `extension/src/background/command-executor.ts`; `extension/src/shared/types.ts:PageDiff` |
+| L3 PlanUpdate ops | `services/healing_service.py:apply_plan_update`; `services/agent_models.py:PlanUpdate` |
+| L4 Recovery supervisor | `services/recovery_supervisor.py`; `POST /v1/agent/{id}/resume` |
+| L5 Telemetry | `services/ai_outcome_service.py`; `core/models/ai_decision_outcome.py`; `GET /v1/agent/{id}/outcomes` |
+| L5 Learning | `services/learning_service.py` (called from `ExecutionService.transition` on terminal states) |
+
+Verification: `make autonomy-e2e` runs the full suite and emits `test-results/autonomy-report-latest.md`.
 
 ## Memory files
 

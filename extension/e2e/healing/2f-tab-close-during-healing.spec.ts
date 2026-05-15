@@ -10,6 +10,7 @@ test("heals: tab close during healing handled gracefully", async ({ context, ext
     { event_type: "click", payload: { selector_chain: [{ type: "css", value: "#submit-btn-v1" }] } },
   ]);
   expect(wfId).toBeTruthy();
+  await ext.activateWorkflowViaAPI(wfId);
 
   const execPage = await context.newPage();
   await serveTestPage(execPage);
@@ -19,13 +20,15 @@ test("heals: tab close during healing handled gracefully", async ({ context, ext
   await healProvider.injectForRun(execPage, "__all__", ["#submit-btn-v1"]);
 
   await execPage.goto(TEST_PAGE_URL);
+  await execPage.bringToFront();
   await execPage.waitForTimeout(1500);
 
   const sw = await ext.getServiceWorker();
 
+  // Get tab ID via active tab (URL-pattern query requires host_permissions)
   const tabId = await sw.evaluate(() => {
     return new Promise<number | undefined>((resolve) => {
-      chrome.tabs.query({ url: "http://sr-test.local/*" }, (tabs) => resolve(tabs[0]?.id));
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs[0]?.id));
     });
   });
   expect(tabId).toBeDefined();

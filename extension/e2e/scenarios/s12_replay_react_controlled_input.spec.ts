@@ -19,8 +19,10 @@ test("S12 — React controlled input updates state on replay", async ({ page }) 
   });
 
   const mirrored = await page.locator("#state-mirror").textContent({ timeout: 2000 });
+  // test.fail(condition) marks expected failure; the assertion below confirms it.
   test.fail(
     (mirrored || "") !== "Hello React",
     "BUG E-C-01: React did not see the value change because bare element.value= bypasses its setter shim",
   );
+  expect(mirrored).toBe("Hello React");
 });

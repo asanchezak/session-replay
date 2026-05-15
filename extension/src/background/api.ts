@@ -1,24 +1,25 @@
-import type { ActionEvent, RecordEventResponse, Workflow } from "../shared/types";
+import type { ActionEvent, RecordEventResponse, Workflow, AgentPollRequest, AgentPollResponse, AgentResultRequest, AgentResultResponse } from "../shared/types";
 
 const API_BASE_KEY = "apiBaseUrl";
 const API_KEY_KEY = "apiKey";
 const AI_API_KEY_KEY = "aiApiKey";
 
-async function getConfig(): Promise<{ apiBase: string; apiKey: string; aiApiKey: string }> {
-  const defaults = {
-    apiBase: "http://localhost:8081/v1",
-    apiKey: "dev-api-key-change-in-production",
-    aiApiKey: "",
-  };
+export const DEV_DEFAULTS = {
+  apiBase: "http://localhost:8091/v1",
+  apiKey: "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw",
+  aiApiKey: "",
+};
+
+export async function getConfig(): Promise<{ apiBase: string; apiKey: string; aiApiKey: string }> {
   try {
     const result = await chrome.storage.session.get([API_BASE_KEY, API_KEY_KEY, AI_API_KEY_KEY]);
     return {
-      apiBase: (result[API_BASE_KEY] as string) || defaults.apiBase,
-      apiKey: (result[API_KEY_KEY] as string) || defaults.apiKey,
-      aiApiKey: (result[AI_API_KEY_KEY] as string) || defaults.aiApiKey,
+      apiBase: (result[API_BASE_KEY] as string) || DEV_DEFAULTS.apiBase,
+      apiKey: (result[API_KEY_KEY] as string) || DEV_DEFAULTS.apiKey,
+      aiApiKey: (result[AI_API_KEY_KEY] as string) || DEV_DEFAULTS.aiApiKey,
     };
   } catch {
-    return defaults;
+    return DEV_DEFAULTS;
   }
 }
 
@@ -62,12 +63,13 @@ export class ApiClient {
     return response.json() as Promise<T>;
   }
 
-  async recordWorkflow(name: string, targetUrl: string | null, events: ActionEvent[]) {
+  async recordWorkflow(name: string, targetUrl: string | null, events: ActionEvent[], prompt?: string) {
     return this.request<{ id: string; name: string; status: string; step_count: number }>(
       "POST", "/workflows/record",
       {
         name,
         target_url: targetUrl,
+        prompt: prompt || null,
         events: events.map(e => ({
           event_type: e.event_type,
           payload: e.payload,
@@ -128,13 +130,23 @@ export class ApiClient {
     });
   }
 
-  async healStep(runId: string, stepIndex: number, domSnippet: string, oldSelectors: string[], intent?: string) {
+  async healStep(
+    runId: string, stepIndex: number, domSnippet: string,
+    oldSelectors: string[], intent?: string,
+    visibleText?: string, pageUrl?: string,
+  ) {
     const { aiApiKey } = await getConfig();
     const extraHeaders: Record<string, string> = {};
     if (aiApiKey) extraHeaders["X-AI-API-Key"] = aiApiKey;
+    const body: Record<string, unknown> = {
+      step_index: stepIndex, dom_snippet: domSnippet,
+      old_selectors: oldSelectors, intent,
+    };
+    if (visibleText) body.visible_text = visibleText;
+    if (pageUrl) body.page_url = pageUrl;
     return this.request<{ step_index: number; new_selectors: Array<{ type: string; value: string }>; confidence: number; explanation: string }>(
       "POST", `/runs/${runId}/heal-step`,
-      { step_index: stepIndex, dom_snippet: domSnippet, old_selectors: oldSelectors, intent },
+      body,
       extraHeaders,
     );
   }
@@ -146,10 +158,12 @@ export class ApiClient {
     );
   }
 
-  async recoverRun(runId: string, stepIndex: number, error: string) {
+  async recoverRun(runId: string, stepIndex: number, error: string, domSnippet?: string) {
+    const body: Record<string, unknown> = { step_index: stepIndex, error };
+    if (domSnippet) body.dom_snippet = domSnippet;
     return this.request<{ id: string; status: string; current_step_index: number }>(
       "POST", `/runs/${runId}/recover`,
-      { step_index: stepIndex, error },
+      body,
     );
   }
 
@@ -186,6 +200,102 @@ export class ApiClient {
 
   async getEvent(eventId: string) {
     return this.request("GET", `/events/${eventId}`);
+  }
+
+  async getWorkflowAnalysis(workflowId: string) {
+    return this.request<{
+      workflow_goal: string | null;
+      workflow_summary: string | null;
+      confidence_overall: number;
+      replay_strategy: string | null;
+      is_user_edited: boolean;
+      parameters: Array<{
+        key: string;
+        type: string;
+        default: string | null;
+        description: string | null;
+        confidence: number;
+        required: boolean;
+      }>;
+      phases: Array<{
+        phase_index: number;
+        phase_name: string;
+        phase_goal: string | null;
+        start_step_index: number;
+        end_step_index: number;
+      }>;
+      output_spec: {
+        type: string;
+        schema: unknown;
+        confidence: number;
+      };
+    }>("GET", `/workflows/${workflowId}/analysis`);
+  }
+
+  async analyzeWorkflow(workflowId: string) {
+    const { aiApiKey } = await getConfig();
+    const extraHeaders: Record<string, string> = {};
+    if (aiApiKey) extraHeaders["X-AI-API-Key"] = aiApiKey;
+    return this.request<{
+      workflow_goal: string | null;
+      confidence_overall: number;
+      replay_strategy: string | null;
+      parameters: Array<Record<string, unknown>>;
+    }>("POST", `/workflows/${workflowId}/analyze`, undefined, extraHeaders);
+  }
+
+  async runWithParams(workflowId: string, params: Record<string, unknown>) {
+    return this.request<{
+      id: string;
+      status: string;
+      current_step_index: number;
+      total_steps: number;
+      execution_plan: { strategy: string; mode: string; steps?: Array<Record<string, unknown>>; parameters?: Record<string, unknown>; reason?: string };
+    }>("POST", `/workflows/${workflowId}/run-with-params`, {
+      runtime_params: params,
+    });
+  }
+
+  async getWorkflowTemplate(workflowId: string) {
+    return this.request<{
+      version: number;
+      is_active: boolean;
+      template_data: Record<string, unknown>;
+    }>("GET", `/workflows/${workflowId}/template`);
+  }
+
+  async reportExtraction(runId: string, stepIndex: number, data: Record<string, unknown>[]) {
+    return this.request<{ status: string; records: number }>(
+      "POST", `/runs/${runId}/extraction`,
+      { step_index: stepIndex, data, schema: null, url: null },
+    );
+  }
+
+  async agentPoll(runId: string, req: AgentPollRequest) {
+    return this.request<AgentPollResponse>(
+      "POST", `/agent/${runId}/poll`,
+      req,
+    );
+  }
+
+  async agentResult(runId: string, req: AgentResultRequest) {
+    return this.request<AgentResultResponse>(
+      "POST", `/agent/${runId}/result`,
+      req,
+    );
+  }
+
+  async agentDecisions(runId: string) {
+    return this.request<Array<{ id: string; payload: Record<string, unknown>; hash: string; created_at: string }>>(
+      "GET", `/agent/${runId}/decisions`,
+    );
+  }
+
+  async agentAction(runId: string, action: string) {
+    return this.request<{ accepted: boolean; pending_action: string | null }>(
+      "POST", `/agent/${runId}/action`,
+      { action },
+    );
   }
 }
 

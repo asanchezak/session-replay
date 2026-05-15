@@ -7,7 +7,7 @@ type RunStatus =
 type WorkflowStatus = "draft" | "active" | "archived";
 
 interface StatusBadgeProps {
-  status: RunStatus | WorkflowStatus;
+  status: RunStatus | WorkflowStatus | string;
   size?: "sm" | "md";
 }
 
@@ -30,12 +30,22 @@ const workflowConfig: Record<WorkflowStatus, { color: string; label: string }> =
   archived: { color: "var(--color-text-gray)", label: "Archived" },
 };
 
+// Short aliases produced by RunDetailPage's getStepStatus()
+const stepStatusAlias: Record<string, RunStatus> = {
+  waiting: "waiting_for_user",
+  pending: "queued",
+};
+
+const fallbackConfig = { color: "var(--color-text-gray)", label: "Unknown", icon: Circle };
+
 export default function StatusBadge({ status, size = "md" }: StatusBadgeProps) {
   const fontSize = size === "sm" ? "11px" : "12px";
   const iconSize = size === "sm" ? 10 : 12;
 
-  if (status in runConfig) {
-    const cfg = runConfig[status as RunStatus];
+  const resolvedRunStatus = (stepStatusAlias[status as string] || status) as RunStatus;
+
+  if (resolvedRunStatus in runConfig) {
+    const cfg = runConfig[resolvedRunStatus];
     const Icon = cfg.icon;
     return (
       <span
@@ -48,7 +58,7 @@ export default function StatusBadge({ status, size = "md" }: StatusBadgeProps) {
     );
   }
 
-  const cfg = workflowConfig[status as WorkflowStatus];
+  const cfg = workflowConfig[status as WorkflowStatus] || fallbackConfig;
   return (
     <span
       style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize, color: cfg.color, fontWeight: 500 }}

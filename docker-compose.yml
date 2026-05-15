@@ -1,34 +1,16 @@
 services:
-  api:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8081:8081"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./backend:/app
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8081 --reload
-
-  postgres:
-    image: postgres:16-alpine
+  seq:
+    image: datalust/seq:latest
+    container_name: sr-logs
     environment:
-      POSTGRES_DB: workflow
-      POSTGRES_USER: workflow
-      POSTGRES_PASSWORD: workflow
+      - ACCEPT_EULA=Y
+      - SEQ_FIRSTRUN_NOAUTHENTICATION=true
     ports:
-      - "5432:5432"
+      - "8082:80"    # Web UI
+      - "5341:5341"  # Ingestion API
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U workflow"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      - seq-data:/data
+    restart: unless-stopped
 
 volumes:
-  pgdata:
+  seq-data:

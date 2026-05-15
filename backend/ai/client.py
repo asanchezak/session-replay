@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -85,14 +86,21 @@ class OpenAIProvider(AIProvider):
         data = resp.json()
 
         choice = data["choices"][0]
+        content = choice["message"]["content"]
+        confidence = 0.0
+        try:
+            parsed = json.loads(content)
+            confidence = float(parsed.get("confidence", 0.0))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
         return AIResponse(
-            content=choice["message"]["content"],
+            content=content,
             model=data["model"],
             usage={
                 "prompt_tokens": data["usage"]["prompt_tokens"],
                 "completion_tokens": data["usage"]["completion_tokens"],
             },
-            confidence=0.0,
+            confidence=confidence,
         )
 
     async def embed(self, text: str) -> list[float]:
@@ -139,9 +147,8 @@ class FallbackProvider(AIProvider):
 
 def get_ai_provider(api_key_override: str | None = None) -> AIProvider:
     effective_key = api_key_override or settings.ai_api_key
-    if settings.ai_provider == "openai":
-        if effective_key:
-            return OpenAIProvider(api_key=effective_key, model=settings.ai_model)
+    if settings.ai_provider == "openai" and effective_key:
+        return OpenAIProvider(api_key=effective_key, model=settings.ai_model)
         # Fallback: when no API key is available, use MockProvider.
         # FallbackProvider can be extended to support additional providers
         # (e.g., Anthropic, Google, local models) in priority order.

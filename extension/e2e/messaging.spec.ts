@@ -1,5 +1,7 @@
 import { test, expect } from "./fixtures";
 
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
+
 test("popup sends GET_STATE to service worker and receives response", async ({ context, extensionId, errors }) => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/dist/popup.html`);
@@ -14,8 +16,11 @@ test("extension responds to START_RECORDING via popup", async ({ context, extens
   await page.goto(`chrome-extension://${extensionId}/dist/popup.html`);
   await page.waitForTimeout(1000);
 
-  // Click record — this sends START_RECORDING to SW
+  // Click record — goes through GoalInputView, then Skip to start recording
   await page.click("text=Record Workflow");
+  await page.waitForTimeout(500);
+  const skipBtn = page.getByText("Skip");
+  if (await skipBtn.isVisible().catch(() => false)) await skipBtn.click();
   await page.waitForTimeout(1000);
   await expect(page.getByText("Recording...").first()).toBeVisible();
   expect(errors.filter(e => e.type === "console")).toHaveLength(0);
@@ -49,7 +54,7 @@ test("recording events via content script creates workflow", async ({ context, e
 
   // Verify workflow created
   const wfResp = await testPage.request.get("http://localhost:8081/v1/workflows", {
-    headers: { "X-API-Key": "dev-api-key-change-in-production" },
+    headers: { "X-API-Key": API_KEY },
   });
   const workflows = await wfResp.json() as any[];
   const hasNewWorkflow = workflows.some((w: any) => w.status === "draft");
@@ -66,6 +71,9 @@ test("STOP_RECORDING via popup returns to idle state", async ({ context, extensi
   await page.waitForTimeout(1000);
 
   await page.click("text=Record Workflow");
+  await page.waitForTimeout(500);
+  const skipBtn2 = page.getByText("Skip");
+  if (await skipBtn2.isVisible().catch(() => false)) await skipBtn2.click();
   await page.waitForTimeout(500);
   await expect(page.getByText("Recording...").first()).toBeVisible();
 

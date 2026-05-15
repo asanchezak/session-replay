@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import type { PopupState } from "../src/shared/types";
 import { IdleView } from "./IdleView";
+import { GoalInputView } from "./GoalInputView";
 import { RecordingView } from "./RecordingView";
 import { RunningView } from "./RunningView";
 import { WaitingView } from "./WaitingView";
 import { ErrorView } from "./ErrorView";
+import { getConfig, DEV_DEFAULTS } from "../src/background/api";
 
 const API_BASE = "http://localhost:8081/v1";
 
@@ -75,25 +77,40 @@ function App() {
   };
 
   const toggleRecording = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
+    const [tab] = await chrome.tabs.query({ url: ["*://*/*", "file://*/*"] });
+    const activeTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    if (!activeTab?.id) return;
 
     if (state.type === "recording") {
       chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
-      chrome.tabs.sendMessage(tab.id, { type: "SET_RECORDING", enabled: false });
+      chrome.tabs.sendMessage(activeTab.id, { type: "SET_RECORDING", enabled: false }).catch(() => {});
       setState({ type: "idle" });
     } else {
-      chrome.runtime.sendMessage({ type: "START_RECORDING" });
-      chrome.tabs.sendMessage(tab.id, { type: "SET_RECORDING", enabled: true });
-      setState({ type: "recording", step_count: 0 });
+      // Show goal input first, then start recording
+      setState({ type: "setting_goal" });
     }
   };
 
+  const startRecordingWithGoal = async (goal: string) => {
+    const [tab] = await chrome.tabs.query({ url: ["*://*/*", "file://*/*"] });
+    const activeTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    if (!activeTab?.id) return;
+    if (goal) chrome.runtime.sendMessage({ type: "SET_RECORDING_GOAL", goal });
+    chrome.runtime.sendMessage({ type: "START_RECORDING" });
+    chrome.tabs.sendMessage(activeTab.id, { type: "SET_RECORDING", enabled: true }).catch(() => {});
+    setState({ type: "recording", step_count: 0 });
+  };
+
+  const startRecordingWithoutGoal = () => {
+    startRecordingWithGoal("");
+  };
+
   const handleStopRecording = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab.id) return;
+    const [tab] = await chrome.tabs.query({ url: ["*://*/*", "file://*/*"] });
+    const activeTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    if (!activeTab?.id) return;
     chrome.runtime.sendMessage({ type: "STOP_RECORDING" });
-    chrome.tabs.sendMessage(tab.id, { type: "SET_RECORDING", enabled: false });
+    chrome.tabs.sendMessage(activeTab.id, { type: "SET_RECORDING", enabled: false }).catch(() => {});
     setState({ type: "idle" });
 
     // Fetch latest workflow in background for potential prompt editing
@@ -104,9 +121,10 @@ function App() {
         const wf = resp.workflows[0];
         setLastRecordedId(wf.id);
         try {
+          const config = await getConfig();
           const promptResp = await fetch(`${API_BASE}/workflows/${wf.id}/generate-prompt`, {
             method: "POST",
-            headers: { "X-API-Key": "dev-api-key-change-in-production" },
+            headers: { "X-API-Key": config.apiKey },
           });
           if (promptResp.ok) {
             const data = await promptResp.json();
@@ -172,7 +190,13 @@ function App() {
           onRun={loadWorkflows}
           lastRecordedId={lastRecordedId}
           recordedPrompt={recordedPrompt}
-          onShowPrompt={() => setLastRecordedId(null)} // dismissed
+          onShowPrompt={() => setLastRecordedId(null)}
+        />
+      )}
+      {state.type === "setting_goal" && (
+        <GoalInputView
+          onStart={(goal) => startRecordingWithGoal(goal)}
+          onSkip={() => startRecordingWithoutGoal()}
         />
       )}
       {state.type === "idle" && showWorkflows && (
@@ -329,7 +353,7 @@ function SettingsView({ onClose }: { onClose: () => void }) {
       if (r.apiBaseUrl) setApiUrl(r.apiBaseUrl as string);
       else setApiUrl("http://localhost:8081/v1");
       if (r.apiKey) setAuthKey(r.apiKey as string);
-      else setAuthKey("dev-api-key-change-in-production");
+      else setAuthKey(DEV_DEFAULTS.apiKey);
     });
   }, []);
 

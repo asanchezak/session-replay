@@ -44,6 +44,12 @@ ignore = ["B008", "UP042"]
 "migrations/*" = ["E501"]
 "ai/client.py" = ["ARG002"]
 "ai/prompts.py" = ["E501"]
+"services/semantic_analysis_service.py" = ["E501"]
+"services/template_service.py" = ["E501"]
+"api/v1/analysis.py" = ["E501"]
+"tests/unit/test_semantic_analysis_service.py" = ["E501"]
+"tests/unit/test_template_service.py" = ["E501"]
+"tests/integration/test_analysis_api.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -54,8 +60,13 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
-    "postgres: requires a real PostgreSQL instance (Docker + testcontainers)",
+    "smoke: critical path, runs on every commit",
+    "regression: full suite, runs nightly/CI",
     "slow: takes longer than 30 seconds",
+    "security: security and injection tests, separate pipeline",
+    "chaos: destructive tests targeting service worker lifecycle",
+    "performance: benchmark assertions with time budgets",
+    "postgres: requires a real PostgreSQL instance (Docker + testcontainers)",
     "real_ai: requires a real AI API key",
 ]
 
@@ -65,7 +76,9 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "croniter>=6.2.2",
     "hypothesis>=6.152.7",
+    "pytz>=2026.2",
     "respx>=0.23.1",
     "testcontainers>=4.14.2",
 ]

@@ -45,7 +45,7 @@ export class StepHealer {
 
     // 3. Transition to RECOVERING
     try {
-      await apiClient.recoverRun(runId, stepIndex, domError || "Step failed");
+      await apiClient.recoverRun(runId, stepIndex, domError || "Step failed", domSnippet);
     } catch (err) {
       log.error("Failed to transition to recovering:", err);
       return { success: false, error: "Failed to enter recovery state" };

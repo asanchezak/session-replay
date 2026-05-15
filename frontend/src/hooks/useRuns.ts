@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useApiData } from "./useApi";
+import { useApi, useApiData } from "./useApi";
 
 export interface RunSummary {
   id: string;
@@ -14,14 +14,19 @@ export interface RunSummary {
 
 export function useRuns(workflowId?: string) {
   const { data, loading, error, fetchData } = useApiData<RunSummary[]>();
+  const { request } = useApi();
 
   useEffect(() => {
     const params = workflowId ? `?workflow_id=${workflowId}` : "";
     fetchData("GET", `/runs${params}`);
   }, [workflowId]);
 
+  const cancelRun = async (runId: string) => {
+    await request("POST", `/runs/${runId}/cancel`);
+  };
+
   return { runs: data || [], loading, error, refetch: () => {
     const params = workflowId ? `?workflow_id=${workflowId}` : "";
     fetchData("GET", `/runs${params}`);
-  }};
+  }, cancelRun };
 }

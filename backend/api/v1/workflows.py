@@ -12,6 +12,8 @@ from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
 from core.state_machine import RunStatus
 from services.execution_service import ExecutionService
+from services.semantic_analysis_service import SemanticAnalysisService
+from services.template_service import TemplateService
 from services.workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,7 @@ class RecordEventInput(BaseModel):
 class RecordWorkflowRequest(BaseModel):
     name: str
     target_url: str | None = None
+    prompt: str | None = None
     events: list[RecordEventInput] = []
 
 
@@ -94,6 +97,7 @@ async def record_workflow(
     workflow = await svc.create(
         name=req.name,
         target_url=req.target_url,
+        prompt=req.prompt,
     )
     for i, ev in enumerate(req.events):
         payload = ev.payload
@@ -132,6 +136,16 @@ async def record_workflow(
             methods=methods,
         )
     steps = await svc.get_steps(str(workflow.id))
+
+    analysis = None
+    # Auto-analyze workflow after recording
+    try:
+        analysis_svc = SemanticAnalysisService(db)
+        analysis = await analysis_svc.analyze_workflow(str(workflow.id))
+        logger.info("Auto-analysis complete for workflow=%s confidence=%.2f", workflow.id, analysis.confidence_overall)
+    except Exception as exc:
+        logger.warning("Auto-analysis failed for workflow=%s: %s", workflow.id, exc)
+
     return {
         "id": str(workflow.id),
         "name": workflow.name,
@@ -139,6 +153,10 @@ async def record_workflow(
         "version": workflow.version,
         "step_count": len(steps),
         "created_at": workflow.created_at.isoformat(),
+        "analysis": {
+            "goal": analysis.workflow_goal if analysis else None,
+            "confidence": analysis.confidence_overall if analysis else 0.0,
+        },
     }
 
 
@@ -202,6 +220,56 @@ async def get_workflow(
         return _not_found("Workflow not found")
 
     steps = await svc.get_steps(workflow_id)
+
+    # Include semantic analysis data if available
+    analysis_data = None
+    try:
+        analysis_svc = SemanticAnalysisService(db)
+        analysis = await analysis_svc.get_analysis(workflow_id)
+        if analysis:
+            phases = await analysis_svc.get_phases(workflow_id)
+            params = await analysis_svc.get_parameters(workflow_id)
+            output_spec = await analysis_svc.get_output_spec(workflow_id)
+            template = await analysis_svc.get_template(workflow_id)
+            analysis_data = {
+                "workflow_goal": analysis.workflow_goal,
+                "workflow_summary": analysis.workflow_summary,
+                "domain_context": analysis.domain_context,
+                "confidence_overall": analysis.confidence_overall,
+                "replay_strategy": analysis.replay_strategy,
+                "is_user_edited": analysis.is_user_edited,
+                "ambiguity_notes": analysis.ambiguity_notes,
+                "phases": [
+                    {
+                        "phase_index": p.phase_index,
+                        "phase_name": p.phase_name,
+                        "phase_goal": p.phase_goal,
+                        "start_step_index": p.start_step_index,
+                        "end_step_index": p.end_step_index,
+                    }
+                    for p in phases
+                ],
+                "parameters": [
+                    {
+                        "key": p.parameter_key,
+                        "type": p.parameter_type,
+                        "default": p.default_value,
+                        "description": p.description,
+                        "confidence": p.confidence,
+                        "required": p.is_required,
+                    }
+                    for p in params
+                ],
+                "output_spec": {
+                    "type": output_spec.output_type if output_spec else "unknown",
+                    "schema": output_spec.output_schema if output_spec else None,
+                    "confidence": output_spec.schema_confidence if output_spec else 0.0,
+                },
+                "template_version": template.template_version if template else 0,
+            }
+    except Exception:
+        pass
+
     return {
         "id": str(workflow.id),
         "name": workflow.name,
@@ -222,6 +290,7 @@ async def get_workflow(
             }
             for s in steps
         ],
+        "analysis": analysis_data,
     }
 
 
@@ -458,4 +527,48 @@ async def run_workflow(
         "status": run.status,
         "current_step_index": run.current_step_index,
         "total_steps": run.total_steps,
+    }
+
+
+class RunWithParamsRequest(BaseModel):
+    runtime_params: dict = Field(default_factory=dict, description="key-value pairs for parameter substitution")
+
+
+@router.post("/{workflow_id}/run-with-params")
+async def run_workflow_with_parameters(
+    workflow_id: str,
+    req: RunWithParamsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    logger.info("Running workflow with params workflow_id=%s params=%s", workflow_id, req.runtime_params)
+    wf_svc = WorkflowService(db)
+    try:
+        workflow = await wf_svc.get(workflow_id)
+    except NotFoundError:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+
+    steps = await wf_svc.get_steps(workflow_id)
+    if len(steps) < 1:
+        return JSONResponse(status_code=400, content={"error": {"code": "EMPTY_WORKFLOW", "message": "Workflow has no steps"}})
+
+    if workflow.status != "active":
+        return JSONResponse(status_code=409, content={"error": {"code": "INVALID_STATUS", "message": f"Workflow status is '{workflow.status}', must be 'active'"}})
+
+    template_svc = TemplateService(db)
+    execution_plan = await template_svc.build_execution_plan(workflow_id, req.runtime_params)
+
+    svc = ExecutionService(db)
+    try:
+        run = await svc.create_run(workflow_id=workflow_id)
+        run = await svc.transition(str(run.id), RunStatus.RUNNING)
+    except NotFoundError:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+
+    return {
+        "id": str(run.id),
+        "workflow_id": run.workflow_id,
+        "status": run.status,
+        "current_step_index": run.current_step_index,
+        "total_steps": run.total_steps,
+        "execution_plan": execution_plan,
     }

@@ -2,7 +2,7 @@ import { test, expect } from "../fixtures";
 import { serveTestPage, TEST_PAGE_URL, pollRunStatus, getAudit, setAiApiKey } from "../helpers";
 
 const BACKEND = "http://localhost:8081";
-const API_KEY = "dev-api-key-change-in-production";
+const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 test("heals: deterministic failure path (no AI key)", async ({ context, extensionId, errors }) => {
   const ext = new (await import("../page-objects")).ExtensionHelper(context, extensionId);
@@ -13,20 +13,22 @@ test("heals: deterministic failure path (no AI key)", async ({ context, extensio
     { event_type: "click", payload: { selector_chain: [{ type: "css", value: "#non-existent-element" }] } },
   ]);
   expect(wfId).toBeTruthy();
+  await ext.activateWorkflowViaAPI(wfId);
 
   const execPage = await context.newPage();
   await serveTestPage(execPage);
   await execPage.goto(TEST_PAGE_URL);
+  await execPage.bringToFront();
   await execPage.waitForTimeout(1500);
 
   // Ensure no AI key
   const sw = await ext.getServiceWorker();
   await setAiApiKey(sw, "");
 
-  // Get tab ID
+  // Get tab ID via active tab (URL-pattern query requires host_permissions)
   const tabId = await sw.evaluate(() => {
     return new Promise<number | undefined>((resolve) => {
-      chrome.tabs.query({ url: "http://sr-test.local/*" }, (tabs) => resolve(tabs[0]?.id));
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs[0]?.id));
     });
   });
   expect(tabId).toBeDefined();

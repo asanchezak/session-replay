@@ -1,4 +1,4 @@
-import type { ActionEvent } from "./types";
+import type { ActionEvent, AgentCommand } from "./types";
 
 export interface ContentToBackgroundMessage {
   type: "RECORD_EVENT";
@@ -69,15 +69,63 @@ export interface ChallengesDetectedResponse {
   }>;
 }
 
+export interface ExtractDataMessage {
+  type: "EXTRACT_DATA";
+  outputSchema: Record<string, unknown> | null;
+  protocol_version?: number;
+}
+
+export interface ExtractDataResponse {
+  type: "EXTRACT_DATA_RESULT";
+  data: Record<string, unknown>[];
+  url: string;
+  error?: string;
+}
+
+export interface CapturePageContextMessage {
+  type: "CAPTURE_PAGE_CONTEXT";
+  protocol_version?: number;
+}
+
+export interface PageContextResponse {
+  type: "PAGE_CONTEXT_RESULT";
+  url: string;
+  title: string;
+  dom_snippet: string;
+  accessibility_tree: string;
+  visible_text: string;
+  visible_elements: Array<Record<string, unknown>>;
+  is_blocking: boolean;
+  blocking_type: string | null;
+}
+
+export interface ExecuteAgentCommandMessage {
+  type: "EXECUTE_AGENT_COMMAND";
+  command: AgentCommand;
+  protocol_version?: number;
+}
+
+export interface AgentCommandResultResponse {
+  type: "AGENT_COMMAND_RESULT";
+  success: boolean;
+  error?: string;
+}
+
 export type ExtensionMessage =
   | ContentToBackgroundMessage
   | BackgroundToContentMessage
   | ContentScriptReadyMessage
   | CaptureDomSnippetMessage
-  | DetectChallengesMessage;
+  | DetectChallengesMessage
+  | ExtractDataMessage
+  | CapturePageContextMessage
+  | ExecuteAgentCommandMessage;
 
 export type ExtensionResponse =
   | ContentToBackgroundResponse
   | BackgroundToContentResponse
   | DomSnippetResponse
-  | ChallengesDetectedResponse;
+  | ChallengesDetectedResponse
+  | ExtractDataResponse
+  | PageContextResponse
+  | AgentCommandResultResponse;

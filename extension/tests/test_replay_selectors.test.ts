@@ -1,10 +1,3 @@
-/**
- * Selector-chain fallthrough tests.
- *
- * Pins E-C-05: priority order today is CSS → text → a11y → xpath; PRD §7.2
- * wants a11y first. We don't reorder here, but we assert that a chain with
- * a11y BEFORE css does succeed (chain order is honored).
- */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 if (typeof CSS === "undefined") (globalThis as any).CSS = {};
@@ -24,8 +17,10 @@ describe("Selector chain fallthrough", () => {
     const { executeStep } = await import("../src/content/replay");
     const btn = document.createElement("button");
     btn.textContent = "Save";
+    btn.style.width = "100px";
+    btn.style.height = "30px";
     document.body.appendChild(btn);
-    const r = executeStep({
+    const r = await executeStep({
       action_type: "click",
       selector_chain: [
         { type: "css", value: "#nonexistent" },
@@ -40,8 +35,10 @@ describe("Selector chain fallthrough", () => {
     const btn = document.createElement("button");
     btn.setAttribute("role", "button");
     btn.setAttribute("aria-label", "Submit");
+    btn.style.width = "100px";
+    btn.style.height = "30px";
     document.body.appendChild(btn);
-    const r = executeStep({
+    const r = await executeStep({
       action_type: "click",
       selector_chain: [
         { type: "css", value: "#nope" },
@@ -57,7 +54,7 @@ describe("Selector chain fallthrough", () => {
     const btn = document.createElement("button");
     wrapper.appendChild(btn);
     document.body.appendChild(wrapper);
-    const r = executeStep({
+    const r = await executeStep({
       action_type: "click",
       selector_chain: [
         { type: "css", value: "#nope" },
@@ -71,7 +68,7 @@ describe("Selector chain fallthrough", () => {
 
   it("returns failure on totally missing target", async () => {
     const { executeStep } = await import("../src/content/replay");
-    const r = executeStep({
+    const r = await executeStep({
       action_type: "click",
       selector_chain: [
         { type: "css", value: "#a" },
@@ -84,31 +81,30 @@ describe("Selector chain fallthrough", () => {
 
   it("E-C-05: chain respects a11y-before-css order (PRD §7.2)", async () => {
     const { executeStep } = await import("../src/content/replay");
-    // Two candidates: a CSS-stable but semantically wrong one, and an a11y-tagged correct one.
     const wrong = document.createElement("button");
     wrong.id = "primary";
+    wrong.style.width = "100px";
+    wrong.style.height = "30px";
     document.body.appendChild(wrong);
 
     const right = document.createElement("button");
     right.setAttribute("role", "button");
     right.setAttribute("aria-label", "Login");
     right.id = "wrong-id-but-correct-target";
+    right.style.width = "100px";
+    right.style.height = "30px";
     document.body.appendChild(right);
 
     let clickedOn: Element | null = null;
     document.addEventListener("click", (e) => { clickedOn = e.target as Element; });
 
-    executeStep({
+    await executeStep({
       action_type: "click",
       selector_chain: [
         { type: "accessibility", value: JSON.stringify(["button", "Login"]) },
         { type: "css", value: "#primary" },
       ],
     });
-    // Expected: the FIRST selector wins (currently CSS-first order is not what
-    // PRD wants; the chain priority must be source-authored). Today the
-    // executeStep loop iterates in chain order, so this should pass — but if
-    // the future reorders it, this becomes the canary.
     expect(clickedOn).toBe(right);
   });
 });

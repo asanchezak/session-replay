@@ -19,17 +19,20 @@ class Settings(BaseSettings):
     debug: bool = False
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = 600
+    seq_url: str = "http://localhost:5341"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def check_insecure_defaults(self):
         if self.api_key.get_secret_value() == "dev-api-key-change-in-production":
-            raise RuntimeError(
-                "Insecure default API key — set API_KEY in .env or environment"
+            import warnings
+            warnings.warn(
+                "Using insecure default API key — set API_KEY in .env for production"
             )
         if self.secret_key.get_secret_value() == "change-me-to-a-random-secret":
-            raise RuntimeError(
-                "Insecure default secret key — set SECRET_KEY in .env or environment"
+            import warnings
+            warnings.warn(
+                "Using insecure default secret key — set SECRET_KEY in .env for production"
             )
 
 

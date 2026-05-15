@@ -12,9 +12,11 @@ from core.models.run import ExecutionRun
 from core.state_machine import RunStatus, WorkflowStateMachine
 from core.utils import to_uuid
 from services.audit import AppendEvent, AuditService
+from services.log_service import get_logger
 from services.workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
+log = get_logger()
 
 
 class ExecutionService:
@@ -33,30 +35,42 @@ class ExecutionService:
 
         WorkflowStateMachine.transition(RunStatus.IDLE, RunStatus.QUEUED)
 
+        snapshot: dict = {
+            "workflow": {
+                "id": str(workflow.id),
+                "name": workflow.name,
+                "version": workflow.version,
+                "target_url": workflow.target_url,
+            },
+            "steps": [
+                {
+                    "step_index": s.step_index,
+                    "action_type": s.action_type,
+                    "intent": s.intent,
+                    "selector_chain": s.selector_chain,
+                    "value": s.value,
+                    "methods": s.methods,
+                }
+                for s in steps
+            ],
+        }
+
+        analysis_data = await self._load_analysis(workflow_id)
+        if analysis_data:
+            snapshot["analysis"] = analysis_data
+
+        # Phase 6: seed goal_progress from the workflow analysis (if any).
+        # phases come from semantic analysis; intents come from each step's
+        # recorded intent so the LLM can see "what still needs to happen."
+        goal_progress = _seed_goal_progress(analysis_data, snapshot["steps"])
+
         run = ExecutionRun(
             workflow_id=workflow_id,
-            workflow_snapshot={
-                "workflow": {
-                    "id": str(workflow.id),
-                    "name": workflow.name,
-                    "version": workflow.version,
-                    "target_url": workflow.target_url,
-                },
-                "steps": [
-                    {
-                        "step_index": s.step_index,
-                        "action_type": s.action_type,
-                        "intent": s.intent,
-                        "selector_chain": s.selector_chain,
-                        "value": s.value,
-                        "methods": s.methods,
-                    }
-                    for s in steps
-                ],
-            },
+            workflow_snapshot=snapshot,
             user_id=user_id,
             total_steps=len(steps),
             status="queued",
+            goal_progress=goal_progress,
         )
         self.session.add(run)
         await self.session.flush()
@@ -114,6 +128,12 @@ class ExecutionService:
         try:
             await self.session.flush()
             logger.info("Run %s transitioned %s -> %s", run_id, old_status, new_status.value)
+            log.backend("execution", "run_transition", status="success", details={
+                "run_id": run_id,
+                "from_status": old_status,
+                "to_status": new_status.value,
+                "current_step": run.current_step_index,
+            })
             await self.audit.append(AppendEvent(
                 event_type=f"run_{new_status.value}",
                 payload={
@@ -126,6 +146,22 @@ class ExecutionService:
         except Exception:
             await self.session.rollback()
             raise
+
+        # Phase 5: on terminal state, fold this run's outcome back into the
+        # workflow's stability scores. Best-effort; learning failures must
+        # not block run termination.
+        if new_status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED):
+            try:
+                from services.learning_service import LearningService
+                summary = await LearningService(self.session).record_run_outcome(run)
+                logger.info(
+                    "Learning recorded for run %s: steps=%d params=%d",
+                    run_id, summary.get("steps_updated", 0),
+                    summary.get("params_updated", 0),
+                )
+            except Exception:
+                logger.exception("Learning service failed for run %s", run_id)
+
         return run
 
     async def advance_step(self, run_id: str) -> ExecutionRun:
@@ -136,6 +172,13 @@ class ExecutionService:
                 f"Cannot advance step: run is '{run.status}', must be 'running'"
             )
         run.current_step_index += 1
+        # Phase 6: keep goal_progress in sync with the cursor
+        if run.goal_progress:
+            run.goal_progress = _advance_goal_progress(
+                run.goal_progress, run.current_step_index,
+            )
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(run, "goal_progress")
         if run.current_step_index >= run.total_steps:
             return await self.complete(run_id)
         await self.session.flush()
@@ -181,6 +224,48 @@ class ExecutionService:
         logger.info("Canceling run=%s", run_id)
         return await self.transition(run_id, RunStatus.CANCELED)
 
+    async def _load_analysis(self, workflow_id: str) -> dict | None:
+        """Load workflow analysis for the execution snapshot."""
+        from services.semantic_analysis_service import SemanticAnalysisService
+        try:
+            svc = SemanticAnalysisService(self.session)
+            phases = await svc.get_phases(workflow_id)
+            parameters = await svc.get_parameters(workflow_id)
+            analysis = await svc.get_analysis(workflow_id)
+            if not analysis and not phases:
+                return None
+            result: dict = {}
+            if analysis:
+                result["workflow_goal"] = analysis.workflow_goal
+                result["domain_context"] = analysis.domain_context
+                result["replay_strategy"] = analysis.replay_strategy
+                result["confidence_overall"] = analysis.confidence_overall
+            if phases:
+                result["phases"] = [
+                    {
+                        "name": p.phase_name,
+                        "goal": p.phase_goal,
+                        "start_step": p.start_step_index,
+                        "end_step": p.end_step_index,
+                    }
+                    for p in phases
+                ]
+            if parameters:
+                result["parameters"] = [
+                    {
+                        "key": p.parameter_key,
+                        "type": p.parameter_type,
+                        "default": p.default_value,
+                        "step_index": p.inferred_from_step,
+                        "description": p.description,
+                    }
+                    for p in parameters
+                ]
+            return result
+        except Exception:
+            logger.debug("No analysis available for workflow_id=%s", workflow_id)
+            return None
+
     async def list_runs(
         self, workflow_id: str | None = None, status: str | None = None,
         limit: int = 50, offset: int = 0,
@@ -211,3 +296,68 @@ class ExecutionService:
             }
             for r in runs
         ]
+
+
+# ── Phase 6: goal-first cursor helpers ─────────────────────────────────────
+
+def _seed_goal_progress(
+    analysis: dict | None,
+    steps: list[dict],
+) -> dict:
+    """Build the initial goal_progress payload from semantic analysis.
+
+    Always returns a usable structure even when analysis is missing — the
+    intents list is derived from each step's recorded `intent`, so the AI
+    can see what every step is supposed to accomplish.
+    """
+    intents = [
+        {"step_index": s.get("step_index", i), "intent": s.get("intent") or "", "status": "pending"}
+        for i, s in enumerate(steps)
+    ]
+    phases: list[dict] = []
+    if analysis and isinstance(analysis, dict):
+        for raw_phase in (analysis.get("phases") or []):
+            phases.append({
+                "name": raw_phase.get("name", "phase"),
+                "goal": raw_phase.get("goal", ""),
+                "start_step": int(raw_phase.get("start_step", 0)),
+                "end_step": int(raw_phase.get("end_step", 0)),
+                "status": "pending",
+            })
+    # Mark the first phase active so the LLM sees state from poll 1.
+    if phases:
+        phases[0]["status"] = "active"
+    return {
+        "workflow_goal": (analysis or {}).get("workflow_goal") if analysis else None,
+        "phases": phases,
+        "intents": intents,
+    }
+
+
+def _advance_goal_progress(progress: dict, new_step_index: int) -> dict:
+    """Update phase + intent statuses after the cursor moves forward."""
+    if not isinstance(progress, dict):
+        return progress
+    intents = list(progress.get("intents") or [])
+    for it in intents:
+        idx = it.get("step_index")
+        if isinstance(idx, int):
+            if idx < new_step_index and it.get("status") != "satisfied":
+                it["status"] = "satisfied"
+            elif idx == new_step_index:
+                it["status"] = "active"
+            elif idx > new_step_index and it.get("status") not in {"satisfied", "skipped"}:
+                it["status"] = "pending"
+
+    phases = list(progress.get("phases") or [])
+    for ph in phases:
+        start = ph.get("start_step", 0)
+        end = ph.get("end_step", 0)
+        if new_step_index > end:
+            ph["status"] = "done"
+        elif start <= new_step_index <= end:
+            ph["status"] = "active"
+        elif new_step_index < start:
+            ph["status"] = "pending"
+
+    return {**progress, "intents": intents, "phases": phases}

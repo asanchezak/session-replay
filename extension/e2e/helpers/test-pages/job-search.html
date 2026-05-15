@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Buscar Empleo — Costa Rica</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
+    .header { background: #001c40; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+    .header h1 { font-size: 18px; font-weight: 600; }
+    .search-bar { background: white; padding: 16px 24px; border-bottom: 1px solid #ddd; display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    .search-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 200px; }
+    .search-field label { font-size: 13px; font-weight: 500; color: #555; }
+    .search-field input { padding: 10px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+    .search-field input:focus { outline: none; border-color: #004c99; box-shadow: 0 0 0 2px rgba(0,76,153,0.15); }
+    .search-btn { padding: 10px 24px; background: #004c99; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .search-btn:hover { background: #003d7a; }
+    .results { max-width: 900px; margin: 0 auto; padding: 16px 24px; }
+    .results-header { margin-bottom: 12px; color: #666; font-size: 14px; }
+    .job-card { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 12px; display: flex; gap: 16px; align-items: flex-start; }
+    .job-card:hover { border-color: #004c99; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .job-left { flex: 1; }
+    .job-title { font-size: 16px; font-weight: 600; color: #004c99; margin-bottom: 4px; }
+    .job-company { font-size: 14px; color: #444; margin-bottom: 2px; }
+    .job-location { font-size: 13px; color: #777; margin-bottom: 8px; }
+    .job-desc { font-size: 13px; color: #555; line-height: 1.5; margin-bottom: 8px; }
+    .copy-btn { padding: 6px 14px; background: #f0f4ff; color: #004c99; border: 1px solid #b3d4ff; border-radius: 4px; font-size: 12px; cursor: pointer; }
+    .copy-btn:hover { background: #e0ecff; }
+    .pagination { display: flex; gap: 8px; justify-content: center; padding: 16px; }
+    .pagination button { padding: 8px 16px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; font-size: 13px; }
+    .pagination button.active { background: #004c99; color: white; border-color: #004c99; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🇨🇷 Empleos CR</h1>
+  </div>
+  <div class="search-bar">
+    <div class="search-field">
+      <label for="what-input">Qué</label>
+      <input id="what-input" type="text" name="q" data-testid="search-what" placeholder="puesto, palabra clave o empresa" />
+    </div>
+    <div class="search-field">
+      <label for="where-input">Dónde</label>
+      <input id="where-input" type="text" name="l" data-testid="search-where" placeholder="ciudad o provincia" />
+    </div>
+    <button class="search-btn" id="search-btn" data-testid="search-button">Buscar empleos</button>
+  </div>
+  <div class="results" id="results-container">
+    <p class="results-header">Usa la búsqueda para encontrar empleos.</p>
+  </div>
+  <div class="pagination hidden" id="pagination"></div>
+
+  <script>
+    const jobs = {
+      "sin experiencia": {
+        "Heredia": {
+          page1: [
+            { title: "Asistente Administrativo", company: "Grupo Purdy", location: "Heredia, Heredia", desc: "Se requiere asistente administrativo sin experiencia para apoyo en labores de oficina, manejo de correspondencia y atención telefónica. Horario de lunes a viernes de 8am a 5pm. Ofrecemos capacitación continua y ambiente laboral agradable." },
+            { title: "Mesero / Salonero", company: "Hotel Bougainvillea", location: "Santo Domingo, Heredia", desc: "Importante hotel busca personal sin experiencia para servicio de restaurante. Se ofrece entrenamiento completo en servicio al cliente, manejo de bandejas y protocolos de hospitalidad. Disponibilidad de horarios rotativos." },
+            { title: "Agente de Call Center", company: "Concentrix Costa Rica", location: "Heredia, Heredia", desc: "Buscamos agentes de servicio al cliente sin experiencia. Ofrecemos entrenamiento pago de 4 semanas, salario competitivo, bonos mensuales y plan de carrera. Inglés básico deseable. Trabajo 100% presencial en nuestro site en Heredia." },
+            { title: "Operario de Producción", company: "Coca-Cola FEMSA", location: "Heredia, Heredia", desc: "Planta embotelladora requiere operarios sin experiencia para línea de producción. Se ofrece capacitación en manejo de maquinaria, normas de seguridad industrial y control de calidad. Turnos rotativos disponibles." },
+            { title: "Repartidor / Motorizado", company: "Uber Eats", location: "Heredia Centro, Heredia", desc: "Se buscan repartidores con motocicleta propia. Sin experiencia necesaria. Horarios flexibles, pagos semanales y propinas incluidas. Debe contar con licencia A2 o A3 vigente y smartphone con datos móviles." },
+          ],
+          page2: [
+            { title: "Cajero / Cajera", company: "Walmart Costa Rica", location: "Heredia, Heredia", desc: "Walmart busca cajeros sin experiencia para sucursal en Heredia. Ofrecemos entrenamiento en manejo de punto de venta, atención al cliente y arqueo de caja. Beneficios de ley, asociación solidarista y descuentos en tienda." },
+            { title: "Auxiliar de Bodega", company: "Grupo Q", location: "Ulloa, Heredia", desc: "Se requiere auxiliar de bodega sin experiencia para manejo de inventario. Capacitación en sistema SAP, montacargas y control de entradas/salidas. Oportunidad de crecimiento dentro de la empresa. Licencia B1 deseable." },
+            { title: "Vendedor de Piso", company: "Gollo", location: "Heredia, Heredia", desc: "Tienda Gollo busca vendedor sin experiencia. Ofrecemos entrenamiento en ventas, comisiones atractivas y horario de tienda. Buscamos personas con actitud positiva y ganas de aprender. Beneficios de ley y comisiones sin tope." },
+          ],
+        },
+      },
+    };
+
+    let currentResults = [];
+    let currentPage = 0;
+
+    function performSearch() {
+      const what = document.getElementById('what-input').value.trim().toLowerCase();
+      const where = document.getElementById('where-input').value.trim();
+      const container = document.getElementById('results-container');
+      const pagination = document.getElementById('pagination');
+
+      currentResults = [];
+      currentPage = 0;
+
+      let matched = [];
+      Object.keys(jobs).forEach(w => {
+        if (!what || w.includes(what)) {
+          Object.keys(jobs[w]).forEach(l => {
+            if (!where || l.toLowerCase().includes(where.toLowerCase())) {
+              const data = jobs[w][l];
+              if (data.page1) matched = matched.concat(data.page1);
+              if (data.page2) matched = matched.concat(data.page2);
+            }
+          });
+        }
+      });
+
+      if (matched.length === 0) {
+        container.innerHTML = '<p class="results-header">No se encontraron empleos. Intenta con otros términos.</p>';
+        pagination.classList.add('hidden');
+        return;
+      }
+
+      currentResults = matched;
+      showPage(0);
+    }
+
+    function showPage(pageNum) {
+      const perPage = 5;
+      const start = pageNum * perPage;
+      const end = Math.min(start + perPage, currentResults.length);
+      const totalPages = Math.ceil(currentResults.length / perPage);
+      currentPage = pageNum;
+
+      const container = document.getElementById('results-container');
+      const pagination = document.getElementById('pagination');
+
+      let html = `<p class="results-header">${currentResults.length} empleos encontrados — Página ${pageNum + 1} de ${totalPages}</p>`;
+
+      for (let i = start; i < end; i++) {
+        const job = currentResults[i];
+        html += `<div class="job-card" data-testid="job-card-${i}">
+          <div class="job-left">
+            <div class="job-title" data-testid="job-title-${i}">${job.title}</div>
+            <div class="job-company" data-testid="job-company-${i}">${job.company}</div>
+            <div class="job-location" data-testid="job-location-${i}">${job.location}</div>
+            <div class="job-desc" data-testid="job-desc-${i}" id="desc-${i}">${job.desc}</div>
+          </div>
+        </div>
+        <div style="text-align: right; margin: -8px 12px 12px 0;">
+          <button class="copy-btn" data-testid="copy-btn-${i}" onclick="copyDescription(${i})" id="copy-btn-el-${i}">
+            📋 Copiar descripción
+          </button>
+        </div>`;
+      }
+
+      container.innerHTML = html;
+
+      let pagHtml = '';
+      for (let p = 0; p < totalPages; p++) {
+        pagHtml += `<button class="${p === pageNum ? 'active' : ''}" data-testid="page-btn-${p}" onclick="showPage(${p})">${p + 1}</button>`;
+      }
+      pagination.innerHTML = pagHtml;
+      pagination.classList.remove('hidden');
+    }
+
+    function copyDescription(index) {
+      const descEl = document.getElementById('desc-' + index);
+      if (!descEl) return;
+      const text = descEl.textContent || '';
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('copy-btn-el-' + index);
+        if (btn) {
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copiado';
+          btn.style.background = '#d4edda';
+          btn.style.color = '#155724';
+          btn.style.border = '1px solid #c3e6cb';
+          setTimeout(() => { btn.textContent = orig; btn.style.background = ''; btn.style.color = ''; btn.style.border = ''; }, 1500);
+        }
+      }).catch(() => {});
+    }
+
+    document.getElementById('search-btn').addEventListener('click', performSearch);
+
+    document.getElementById('what-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') performSearch();
+    });
+    document.getElementById('where-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') performSearch();
+    });
+  </script>
+</body>
+</html>

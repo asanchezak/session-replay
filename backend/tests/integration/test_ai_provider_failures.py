@@ -41,17 +41,20 @@ async def _suggest(db_session, with_ai_key):
 async def test_ai_503_does_not_crash(db_session, with_ai_key):
     with respx.mock(base_url="https://api.openai.com") as r:
         r.post("/v1/chat/completions").mock(return_value=httpx.Response(503, text="overloaded"))
-        with pytest.raises(Exception):
-            # Today: error bubbles up. Acceptable if caller catches it.
-            await _suggest(db_session, with_ai_key)
+        out = await _suggest(db_session, with_ai_key)
+    assert out["new_selectors"] == []
+    assert out["confidence"] == 0.0
+    assert "AI provider error" in out["explanation"] or "503" in out["explanation"]
 
 
 @pytest.mark.asyncio
 async def test_ai_400_does_not_crash(db_session, with_ai_key):
     with respx.mock(base_url="https://api.openai.com") as r:
         r.post("/v1/chat/completions").mock(return_value=httpx.Response(400, json={"error": "bad"}))
-        with pytest.raises(Exception):
-            await _suggest(db_session, with_ai_key)
+        out = await _suggest(db_session, with_ai_key)
+    assert out["new_selectors"] == []
+    assert out["confidence"] == 0.0
+    assert "AI provider error" in out["explanation"] or "400" in out["explanation"]
 
 
 @pytest.mark.asyncio
@@ -85,24 +88,17 @@ async def test_ai_missing_selector_field_returns_no_heal(db_session, with_ai_key
 async def test_ai_timeout_does_not_crash(db_session, with_ai_key):
     with respx.mock(base_url="https://api.openai.com") as r:
         r.post("/v1/chat/completions").mock(side_effect=httpx.TimeoutException("slow"))
-        with pytest.raises(Exception):
-            await _suggest(db_session, with_ai_key)
+        out = await _suggest(db_session, with_ai_key)
+    assert out["new_selectors"] == []
+    assert out["confidence"] == 0.0
+    assert "AI provider error" in out["explanation"] or "timeout" in out["explanation"].lower()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "B-C-01 / B-N-04: suggest_heal must wrap AI failures and return a structured "
-        "{new_selectors: [], confidence: 0.0, explanation: 'AI timeout'} envelope rather "
-        "than propagating httpx exceptions."
-    ),
-)
 @pytest.mark.asyncio
 async def test_ai_failures_return_envelope_not_exception(db_session, with_ai_key):
-    """The fix is to wrap the AI call in try/except inside `suggest_heal` and
-    return a graceful envelope. Until that happens, this xfails."""
+    """suggest_heal wraps AI failures and returns a structured envelope."""
     with respx.mock(base_url="https://api.openai.com") as r:
         r.post("/v1/chat/completions").mock(return_value=httpx.Response(503, text="overloaded"))
         out = await _suggest(db_session, with_ai_key)
     assert out["new_selectors"] == []
-    assert "503" in out["explanation"] or "AI error" in out["explanation"]
+    assert "503" in out["explanation"] or "AI provider error" in out["explanation"]

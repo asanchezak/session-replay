@@ -7,7 +7,12 @@ const STORAGE_KEY = "recording_state";
 
 // Allow content scripts to read recording state directly from storage
 // This eliminates the race between SET_RECORDING message and SW restart
-try { chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }); } catch { /* test env */ }
+try {
+  chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" });
+  log.log("Storage access level set: TRUSTED_AND_UNTRUSTED_CONTEXTS");
+} catch (e) {
+  log.warn("Failed to set storage access level:", e);
+}
 
 let _initPromise: Promise<void> | null = null;
 let _eventQueue: ActionEvent[] = [];
@@ -34,6 +39,7 @@ export class Orchestrator {
   eventBuffer: ActionEvent[] = [];
   private _isRecording = false;
   private _recordingName = "";
+  private _recordingGoal = "";
   private _ready = false;
 
   get isRecording(): boolean {
@@ -92,12 +98,12 @@ export class Orchestrator {
     }
   }
 
-  startRecording(): void {
+  async startRecording(): Promise<void> {
     this._isRecording = true;
     this.eventBuffer = [];
     this._recordingName = "";
+    await this.persist();
     this.broadcastState();
-    this.persist();
   }
 
   async stopRecording(): Promise<{ id: string; name: string; step_count: number } | null> {
@@ -113,9 +119,10 @@ export class Orchestrator {
 
     const name = this._recordingName || `Recording ${new Date().toLocaleString()}`;
     const targetUrl = events.find(e => e.page_url)?.page_url || null;
+    const goal = this._recordingGoal || undefined;
 
     try {
-      const result = await apiClient.recordWorkflow(name, targetUrl, events);
+      const result = await apiClient.recordWorkflow(name, targetUrl, events, goal);
       log.log(`Workflow recorded: ${result.id} (${result.step_count} steps)`);
       this.broadcastState();
       return result;
@@ -153,6 +160,10 @@ export class Orchestrator {
     this._recordingName = name;
   }
 
+  setRecordingGoal(goal: string): void {
+    this._recordingGoal = goal;
+  }
+
   broadcastState(state?: PopupState): void {
     const s = state || (this._isRecording
       ? { type: "recording", step_count: this.eventBuffer.length }
@@ -167,6 +178,23 @@ export class Orchestrator {
       current_step: currentStep,
       total_steps: totalSteps,
       run_id: runId,
+    });
+  }
+
+  notifyRunningParameterized(
+    workflowName: string,
+    currentStep: number,
+    totalSteps: number,
+    runId: string,
+    params: Record<string, string>,
+  ): void {
+    this.broadcastState({
+      type: "running_parameterized",
+      workflow_name: workflowName,
+      current_step: currentStep,
+      total_steps: totalSteps,
+      run_id: runId,
+      params,
     });
   }
 

@@ -70,10 +70,13 @@ class InterventionRequest(BaseModel):
     user_action: str | None = None
 
 
-def _error(code: str, message: str, status: int = 404):
+def _error(code: str, message: str, status: int = 404, details: dict | None = None):
+    body: dict = {"error": {"code": code, "message": message}}
+    if details:
+        body["error"]["details"] = details
     return JSONResponse(
         status_code=status,
-        content={"error": {"code": code, "message": message}},
+        content=body,
     )
 
 
@@ -142,6 +145,7 @@ async def get_run(
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "ended_at": run.ended_at.isoformat() if run.ended_at else None,
         "created_at": run.created_at.isoformat(),
+        "goal_progress": run.goal_progress,
     }
 
 
@@ -245,6 +249,17 @@ async def cancel_run(
         return _error("NOT_FOUND", "Run not found")
     except StateTransitionError as e:
         return _error("STATE_ERROR", str(e), status=409)
+    except ValueError as e:
+        return _error("VALIDATION_ERROR", str(e), status=422)
+    except Exception as e:
+        logger.exception("Failed to cancel run %s", run_id)
+        detail = {"exception_type": type(e).__name__, "exception": str(e)}
+        try:
+            run = await svc.get_run(run_id)
+            detail["current_status"] = run.status
+        except Exception:
+            pass
+        return _error("INTERNAL_ERROR", str(e), status=500, details=detail)
 
     return {"id": str(run.id), "status": run.status}
 
@@ -368,6 +383,8 @@ class HealStepRequest(BaseModel):
     dom_snippet: str
     old_selectors: list[str]
     intent: str | None = None
+    visible_text: str | None = None
+    page_url: str | None = None
 
 
 class HealResultRequest(BaseModel):
@@ -464,6 +481,7 @@ async def recover_run(
             run_id,
             step_index=body.get("step_index", 0),
             error=body.get("error", "Step failed — attempting recovery"),
+            dom_snippet=body.get("dom_snippet", ""),
         )
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
@@ -506,6 +524,8 @@ async def heal_step(
             old_selectors=req.old_selectors,
             intent=req.intent,
             ai_api_key=ai_api_key,
+            visible_text=req.visible_text,
+            page_url=req.page_url,
         )
 
     if result.get("below_threshold"):
@@ -590,3 +610,38 @@ async def record_intervention(
         "trigger_reason": intervention.trigger_reason,
         "paused_at": intervention.paused_at.isoformat(),
     }
+
+
+class ExtractionResultRequest(BaseModel):
+    step_index: int
+    data: list[dict] = []
+    output_schema: dict | None = None
+    url: str | None = None
+
+
+@router.post("/{run_id}/extraction")
+async def report_extraction(
+    run_id: str,
+    req: ExtractionResultRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    try:
+        await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    audit = AuditService(db)
+    await audit.append(AppendEvent(
+        event_type="extraction",
+        payload={
+            "step_index": req.step_index,
+            "data": req.data,
+            "output_schema": req.output_schema,
+            "url": req.url,
+        },
+        run_id=run_id,
+        actor_type="extension",
+    ))
+
+    return {"status": "recorded", "records": len(req.data)}

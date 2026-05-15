@@ -9,9 +9,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.v1.agent import router as agent_router
 from api.v1.ai import router as ai_router
+from api.v1.analysis import router as analysis_router
 from api.v1.artifacts import router as artifacts_router
 from api.v1.audit import router as audit_router
+from api.v1.client_logs import router as client_logs_router
 from api.v1.connectors import router as connectors_router
 from api.v1.debug import router as debug_router
 from api.v1.events import router as events_router
@@ -22,9 +25,11 @@ from api.v1.workflows import router as workflows_router
 from core.config import settings
 from core.database import engine
 from core.models import Base
+from services.log_service import get_logger
 from services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
+log = get_logger()
 
 _AUTH_EXEMPT = {"/v1/health"}
 
@@ -35,9 +40,14 @@ async def lifespan(_app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     OutboxService.start_processor(_app)
+    # Recovery supervisor — autonomously unsticks paused runs (Phase 3)
+    from services.recovery_supervisor import RecoverySupervisor
+    RecoverySupervisor.start_supervisor(_app)
     yield
     if hasattr(_app.state, "outbox_processor"):
         _app.state.outbox_processor.cancel()
+    if hasattr(_app.state, "recovery_supervisor"):
+        _app.state.recovery_supervisor.cancel()
     await engine.dispose()
 
 
@@ -64,6 +74,24 @@ async def request_id_middleware(request: Request, call_next):
     request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    elapsed = (time.time() - start) * 1000
+
+    path = request.url.path
+    if path.startswith("/v1/") and path != "/v1/health":
+        log.backend_request(
+            "api",
+            request.method,
+            path,
+            response.status_code,
+            elapsed,
+        )
     return response
 
 
@@ -158,6 +186,7 @@ async def global_exception_handler(_request: Request, exc: Exception):
     )
 
 
+app.include_router(agent_router, prefix="/v1")
 app.include_router(events_router, prefix="/v1")
 app.include_router(workflows_router, prefix="/v1")
 app.include_router(runs_router, prefix="/v1")
@@ -168,6 +197,8 @@ app.include_router(ai_router, prefix="/v1")
 app.include_router(settings_router, prefix="/v1")
 app.include_router(integrations_router, prefix="/v1")
 app.include_router(artifacts_router, prefix="/v1")
+app.include_router(client_logs_router, prefix="/v1")
+app.include_router(analysis_router, prefix="/v1")
 
 
 @app.get("/v1/health")

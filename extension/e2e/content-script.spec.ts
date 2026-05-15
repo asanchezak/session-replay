@@ -26,6 +26,9 @@ test("content script captures events during recording via popup", async ({ conte
   await popup.waitForTimeout(1000);
   await popup.click("text=Record Workflow");
   await popup.waitForTimeout(500);
+  // GoalInputView appears — skip goal entry to start recording immediately
+  await popup.click("text=Skip");
+  await popup.waitForTimeout(500);
 
   // Click on test page — content script captures
   await testPage.click("h1");
