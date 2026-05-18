@@ -164,7 +164,45 @@ async def test_result_success_advances_step(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_result_failure_retries_then_heals_then_pauses(db_session: AsyncSession, no_ai):
+async def test_result_success_from_recovering_transitions_then_advances(
+    db_session: AsyncSession,
+):
+    """An adapted/healed command can report success while the run is recovering."""
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Recover Advance WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    wf_id = str(workflow.id)
+
+    run = await svc.create_run(workflow_id=wf_id)
+    run.workflow_snapshot = _make_run_snapshot([
+        _make_step(0, "click"),
+        _make_step(1, "click"),
+    ])
+    run.total_steps = 2
+    run.status = "recovering"
+    run.pause_reason = "old pause"
+    run.error_summary = "old error"
+    await db_session.flush()
+    run_id = str(run.id)
+
+    agent = AgentService(db_session)
+    result = await agent.report_result(
+        run_id,
+        ResultRequest(step_index=0, success=True),
+    )
+
+    assert result.accepted is True
+    assert result.next_step_index == 1
+    await db_session.refresh(run)
+    assert run.status == "running"
+    assert run.current_step_index == 1
+    assert run.pause_reason is None
+    assert run.error_summary is None
+
+
+@pytest.mark.asyncio
+async def test_result_failure_requests_repoll(db_session: AsyncSession, no_ai):
     svc = ExecutionService(db_session)
     workflow = Workflow(name="FailLoop WF", status="draft")
     db_session.add(workflow)
@@ -179,42 +217,17 @@ async def test_result_failure_retries_then_heals_then_pauses(db_session: AsyncSe
 
     agent = AgentService(db_session)
 
-    r1 = await agent.report_result(
-        run_id, ResultRequest(step_index=0, success=False, error="Not found"),
-    )
-    assert r1.decision == DecisionType.RETRY
-
-    r2 = await agent.report_result(
-        run_id, ResultRequest(step_index=0, success=False, error="Still not found"),
-    )
-    assert r2.decision == DecisionType.RETRY
-
-    r3 = await agent.report_result(
-        run_id, ResultRequest(step_index=0, success=False, error="Still gone"),
-    )
-    assert r3.decision == DecisionType.RETRY
-
-    r4 = await agent.report_result(
+    result = await agent.report_result(
         run_id,
-        ResultRequest(step_index=0, success=False, error="Exhausted retries"),
+        ResultRequest(step_index=0, success=False, error="Not found"),
     )
-    assert r4.decision == DecisionType.HEAL
-
-    r5 = await agent.report_result(
-        run_id,
-        ResultRequest(step_index=0, success=False, error="Heal attempt 2"),
-    )
-    assert r5.decision == DecisionType.HEAL
-
-    r6 = await agent.report_result(
-        run_id,
-        ResultRequest(step_index=0, success=False, error="All exhausted"),
-    )
-    assert r6.decision == DecisionType.PAUSE
+    assert result.accepted is True
+    assert result.should_poll is True
+    assert result.decision is None
 
 
 @pytest.mark.asyncio
-async def test_result_success_resets_retry_counter(db_session: AsyncSession, no_ai):
+async def test_result_success_after_failure_advances_cleanly(db_session: AsyncSession, no_ai):
     svc = ExecutionService(db_session)
     workflow = Workflow(name="Reset WF", status="draft")
     db_session.add(workflow)
@@ -233,13 +246,13 @@ async def test_result_success_resets_retry_counter(db_session: AsyncSession, no_
     agent = AgentService(db_session)
 
     await agent.report_result(run_id, ResultRequest(step_index=0, success=False, error="Fail 1"))
-    await agent.report_result(run_id, ResultRequest(step_index=0, success=False, error="Fail 2"))
     await agent.report_result(run_id, ResultRequest(step_index=0, success=True))
 
     result = await agent.report_result(
         run_id, ResultRequest(step_index=1, success=False, error="New step fail"),
     )
-    assert result.decision == DecisionType.RETRY
+    assert result.should_poll is True
+    assert result.decision is None
 
 
 @pytest.mark.asyncio
@@ -292,6 +305,198 @@ async def test_agent_decision_audited(db_session: AsyncSession):
     assert len(decisions) >= 1
     assert decisions[0].payload["decision"] == "EXECUTE"
     assert decisions[0].actor_type == "ai"
+
+
+@pytest.mark.asyncio
+async def test_poll_returns_wait_keeps_run_running(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Wait WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    run.status = "running"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+
+    async def fake_consult(*_args, **_kwargs):
+        return {
+            "decision": "WAIT",
+            "confidence": 0.55,
+            "reasoning": "Results page still loading",
+            "wait_ms": 1800,
+            "thinking_steps": [],
+            "decision_context": {"attempt": 1, "strategy": "primary"},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", fake_consult)
+
+    response = await agent.poll(
+        str(run.id),
+        PollRequest(page_context=_make_context(), current_step_index=0),
+    )
+
+    await db_session.refresh(run)
+    assert response.decision == DecisionType.WAIT
+    assert response.wait_ms == 1800
+    assert run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_waits_escalate_to_pause(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Wait Budget WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    run.status = "running"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+
+    async def fake_consult(*_args, **_kwargs):
+        return {
+            "decision": "WAIT",
+            "confidence": 0.55,
+            "reasoning": "Still loading",
+            "wait_ms": 1500,
+            "thinking_steps": [],
+            "decision_context": {"attempt": 1, "strategy": "primary"},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", fake_consult)
+
+    response = None
+    for _ in range(SAFETY_LIMITS["max_consecutive_waits_per_step"] + 1):
+        response = await agent.poll(
+            str(run.id),
+            PollRequest(page_context=_make_context(), current_step_index=0),
+        )
+    assert response is not None
+    assert response.decision == DecisionType.PAUSE
+
+
+@pytest.mark.asyncio
+async def test_poll_restart_restores_original_snapshot(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Restart WF", status="draft", target_url="https://example.com")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = {
+        **_make_run_snapshot([_make_step(0, "click"), _make_step(1, "type", value="x")]),
+        "original_steps": [_make_step(0, "click"), _make_step(1, "type", value="x")],
+    }
+    run.workflow_snapshot["steps"][0]["intent"] = "mutated step"
+    run.current_step_index = 1
+    run.total_steps = 2
+    run.status = "running"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+
+    async def fake_consult(*_args, **_kwargs):
+        return {
+            "decision": "RESTART",
+            "confidence": 0.8,
+            "reasoning": "Start over from target url",
+            "thinking_steps": [],
+            "decision_context": {"attempt": 1, "strategy": "primary"},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", fake_consult)
+
+    response = await agent.poll(
+        str(run.id),
+        PollRequest(page_context=_make_context(), current_step_index=1),
+    )
+
+    await db_session.refresh(run)
+    assert response.decision == DecisionType.RESTART
+    assert response.next_step_index == 0
+    assert run.current_step_index == 0
+    assert run.workflow_snapshot["steps"][0]["intent"] == "Step 0"
+
+
+@pytest.mark.asyncio
+async def test_poll_rollback_to_checkpoint(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    from services.audit import AppendEvent, AuditService
+
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Rollback WF", status="draft", target_url="https://example.com")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([
+        {**_make_step(0, "click"), "checkpoint": True},
+        _make_step(1, "type", value="x"),
+        _make_step(2, "click"),
+    ])
+    run.current_step_index = 2
+    run.total_steps = 3
+    run.status = "running"
+    await db_session.flush()
+
+    audit = AuditService(db_session)
+    await audit.append(AppendEvent(
+        event_type="checkpoint",
+        payload={"step_index": 0, "page_url": "https://example.com/checkpoint"},
+        run_id=str(run.id),
+    ))
+
+    agent = AgentService(db_session)
+
+    async def fake_consult(*_args, **_kwargs):
+        return {
+            "decision": "ROLLBACK",
+            "confidence": 0.78,
+            "reasoning": "Return to known-good checkpoint",
+            "rollback_to": 0,
+            "thinking_steps": [],
+            "decision_context": {"attempt": 1, "strategy": "primary"},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", fake_consult)
+
+    response = await agent.poll(
+        str(run.id),
+        PollRequest(page_context=_make_context(), current_step_index=2),
+    )
+
+    await db_session.refresh(run)
+    assert response.decision == DecisionType.ROLLBACK
+    assert response.next_step_index == 0
+    assert response.command is not None
+    assert response.command.value == "https://example.com/checkpoint"
+    assert run.current_step_index == 0
 
 
 @pytest.mark.asyncio
@@ -401,8 +606,7 @@ async def test_last_chance_recovery_adapts_instead_of_pausing(
     agent = AgentService(db_session)
 
     # Stub the AI: return nothing-actionable on normal calls, return a real
-    # adaptation only when last_chance=True. This exercises the path where
-    # retries+heals exhaust and the system falls into the last-chance consult.
+    # adaptation only when last_chance=True.
     async def fake_analyze(_run, _step_idx, _err, _ctx=None, last_chance=False):
         if last_chance:
             return {
@@ -430,25 +634,17 @@ async def test_last_chance_recovery_adapts_instead_of_pausing(
 
     agent._analyze_failure = AsyncMock(side_effect=fake_analyze)
 
-    # Walk through retries + heals so we hit the last-chance path
-    for _ in range(SAFETY_LIMITS["max_retries_per_step"]):
-        await agent.report_result(
-            run_id, ResultRequest(step_index=0, success=False, error="fail"),
-        )
-    for _ in range(SAFETY_LIMITS["max_heal_attempts_per_step"]):
-        await agent.report_result(
-            run_id, ResultRequest(step_index=0, success=False, error="fail"),
-        )
-    final = await agent.report_result(
-        run_id, ResultRequest(step_index=0, success=False, error="final"),
+    final = await agent._last_chance_recovery(
+        run,
+        0,
+        "final",
+        None,
+        0,
     )
 
-    # The fake analysis was returned at least once.
     assert agent._analyze_failure.await_count >= 1
-    # And the last call was the last-chance one.
     last_call = agent._analyze_failure.await_args_list[-1]
     assert last_call.kwargs.get("last_chance") is True
-    # The run should adapt or skip — NOT pause.
     assert final.decision in (DecisionType.ADAPT, DecisionType.SKIP)
 
 

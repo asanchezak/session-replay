@@ -45,7 +45,7 @@ class AddStepRequest(BaseModel):
     step_index: int
     action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract"]
     intent: str | None = None
-    selector_chain: dict | None = None
+    selector_chain: list[dict] | None = None
     value: str | None = None
     methods: list[MethodDef] | None = None
 
@@ -145,6 +145,30 @@ async def record_workflow(
         logger.info("Auto-analysis complete for workflow=%s confidence=%.2f", workflow.id, analysis.confidence_overall)
     except Exception as exc:
         logger.warning("Auto-analysis failed for workflow=%s: %s", workflow.id, exc)
+
+    # Generate a meaningful workflow name using AI if a key is configured
+    if settings.ai_api_key and steps:
+        try:
+            step_lines = "; ".join(
+                f"{s.action_type} {s.intent or s.value or ''}".strip()
+                for s in steps[:10]
+            )
+            target_label = req.target_url or "a website"
+            ai_name_prompt = (
+                f"A browser automation workflow recorded on {target_label} "
+                f"with {len(steps)} steps: {step_lines}.\n\n"
+                "Generate a concise, descriptive workflow name (4-6 words, title case, no quotes, no punctuation)."
+            )
+            provider = get_ai_provider()
+            name_response = await provider.generate(ai_name_prompt, max_tokens=30)
+            ai_name = name_response.content.strip().strip('"').strip("'").rstrip(".")
+            if ai_name and len(ai_name) < 100:
+                svc2 = WorkflowService(db)
+                await svc2.update_workflow(workflow_id=str(workflow.id), name=ai_name)
+                workflow.name = ai_name
+                logger.info("AI-generated name for workflow=%s: %s", workflow.id, ai_name)
+        except Exception as exc:
+            logger.warning("AI name generation failed for workflow=%s: %s", workflow.id, exc)
 
     return {
         "id": str(workflow.id),
@@ -532,6 +556,7 @@ async def run_workflow(
 
 class RunWithParamsRequest(BaseModel):
     runtime_params: dict = Field(default_factory=dict, description="key-value pairs for parameter substitution")
+    execution_goal: str | None = Field(default=None, description="Optional per-run goal override")
 
 
 @router.post("/{workflow_id}/run-with-params")
@@ -540,7 +565,12 @@ async def run_workflow_with_parameters(
     req: RunWithParamsRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    logger.info("Running workflow with params workflow_id=%s params=%s", workflow_id, req.runtime_params)
+    logger.info(
+        "Running workflow with params workflow_id=%s params=%s goal=%s",
+        workflow_id,
+        req.runtime_params,
+        bool(req.execution_goal),
+    )
     wf_svc = WorkflowService(db)
     try:
         workflow = await wf_svc.get(workflow_id)
@@ -555,11 +585,32 @@ async def run_workflow_with_parameters(
         return JSONResponse(status_code=409, content={"error": {"code": "INVALID_STATUS", "message": f"Workflow status is '{workflow.status}', must be 'active'"}})
 
     template_svc = TemplateService(db)
-    execution_plan = await template_svc.build_execution_plan(workflow_id, req.runtime_params)
+    plan_params = dict(req.runtime_params)
+    if req.execution_goal:
+        plan_params["__execution_goal__"] = req.execution_goal
+    execution_plan = await template_svc.build_execution_plan(workflow_id, plan_params)
+    if execution_plan.get("mode") == "confirmation_required":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "GOAL_REQUIRED",
+                    "message": execution_plan.get("reason", "Execution goal required"),
+                    "details": {
+                        "ambiguity_notes": execution_plan.get("ambiguity_notes", []),
+                        "questions": execution_plan.get("questions", []),
+                    },
+                }
+            },
+        )
 
     svc = ExecutionService(db)
     try:
-        run = await svc.create_run(workflow_id=workflow_id)
+        run = await svc.create_run(
+            workflow_id=workflow_id,
+            execution_plan=execution_plan,
+            execution_goal=req.execution_goal,
+        )
         run = await svc.transition(str(run.id), RunStatus.RUNNING)
     except NotFoundError:
         return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
@@ -571,4 +622,91 @@ async def run_workflow_with_parameters(
         "current_step_index": run.current_step_index,
         "total_steps": run.total_steps,
         "execution_plan": execution_plan,
+    }
+
+
+@router.get("/{workflow_id}/analyze")
+async def analyze_workflow_blueprint(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return a blueprint health report for the workflow.
+
+    Analyzes each step's selector stability, detects redundant steps, and
+    provides an overall completion-probability estimate based on historical runs.
+    No AI call required — uses the learning data already stored in the DB.
+    """
+    wf_svc = WorkflowService(db)
+    try:
+        workflow = await wf_svc.get(workflow_id)
+    except NotFoundError:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+
+    steps = await wf_svc.get_steps(workflow_id)
+
+    # Build per-step risk analysis using selector_stability_score (Phase 5 EMA).
+    step_risks = []
+    stability_scores = []
+    previous_navigate_url: str | None = None
+
+    for s in steps:
+        score = s.selector_stability_score  # None = no history yet
+        stability_scores.append(score)
+
+        # Determine risk level.
+        if score is None:
+            risk = "unknown"
+            risk_note = "No execution history — risk is unknown for this step"
+        elif score >= 0.8:
+            risk = "low"
+            risk_note = f"Reliable selector ({int(score * 100)}% stable across prior runs)"
+        elif score >= 0.5:
+            risk = "medium"
+            risk_note = f"Selector occasionally needs healing ({int(score * 100)}% stable)"
+        else:
+            risk = "high"
+            risk_note = f"Fragile selector — fails frequently ({int(score * 100)}% stable); ADAPT will be needed"
+
+        # Detect redundant consecutive navigate steps.
+        is_redundant = False
+        if s.action_type == "navigate":
+            current_url = (s.value or "").split("#")[0]  # normalize hash
+            if previous_navigate_url and current_url == previous_navigate_url:
+                is_redundant = True
+                risk_note = "REDUNDANT — navigates to same URL as the previous navigate step; consider removing"
+            previous_navigate_url = current_url
+        else:
+            previous_navigate_url = None  # reset on non-navigate steps
+
+        step_risks.append({
+            "step_index": s.step_index,
+            "action_type": s.action_type,
+            "intent": s.intent,
+            "risk": risk,
+            "stability_score": score,
+            "redundant": is_redundant,
+            "note": risk_note,
+        })
+
+    # Overall health score: average stability of known steps (ignore unknowns).
+    known_scores = [sc for sc in stability_scores if sc is not None]
+    health_score = round(sum(known_scores) / len(known_scores), 3) if known_scores else None
+
+    # Completion probability estimate: high_risk steps each subtract 15%.
+    high_risk_count = sum(1 for sr in step_risks if sr["risk"] == "high")
+    redundant_count = sum(1 for sr in step_risks if sr["redundant"])
+    est_completion = max(0.0, 1.0 - (high_risk_count * 0.15) - (redundant_count * 0.05))
+
+    return {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow.name,
+        "total_steps": len(steps),
+        "health_score": health_score,
+        "estimated_completion_probability": round(est_completion, 2),
+        "high_risk_steps": high_risk_count,
+        "redundant_steps": redundant_count,
+        "recommendations": [
+            sr for sr in step_risks if sr["risk"] in ("high", "medium") or sr["redundant"]
+        ],
+        "step_analysis": step_risks,
     }

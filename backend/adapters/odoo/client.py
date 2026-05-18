@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -34,75 +35,96 @@ class OdooClient:
             self._uid = 2
             return self._uid
 
-        timeout = httpx.Timeout(connect=5, read=20, write=5, pool=5)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.url}/jsonrpc",
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "call",
-                    "params": {
-                        "service": "common",
-                        "method": "login",
-                        "args": [self.database, self.username, self.password],
-                    },
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._uid = data["result"]
-            return self._uid
-
-    async def call(
-        self, model: str, method: str, args: list | None = None
-    ) -> Any:
-        if self._uid is None and method != "login":
-            await self.authenticate()
-        return await self._request_with_reauth(model, method, args or [])
-
-    async def _request(self, model: str, method: str, args: list) -> Any:
-        timeout = httpx.Timeout(connect=5, read=20, write=5, pool=5)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            payload = {
+        data = await self._post_json(
+            {
                 "jsonrpc": "2.0",
                 "method": "call",
                 "params": {
-                    "service": "object",
-                    "method": "execute_kw",
-                    "args": [
-                        self.database,
-                        self._uid or 2,
-                        self.api_key or self.password or "",
-                        model,
-                        method,
-                        args,
-                    ],
+                    "service": "common",
+                    "method": "login",
+                    "args": [self.database, self.username, self.password],
                 },
             }
-            resp = await client.post(
-                f"{self.url}/jsonrpc",
-                json=payload,
+        )
+        self._uid = data["result"]
+        return self._uid
+
+    async def call(
+        self,
+        model: str,
+        method: str,
+        args: list | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        if self._uid is None and method != "login":
+            await self.authenticate()
+        return await self._request_with_reauth(model, method, args or [], kwargs or {})
+
+    async def _request(
+        self,
+        model: str,
+        method: str,
+        args: list,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "service": "object",
+                "method": "execute_kw",
+                "args": [
+                    self.database,
+                    self._uid or 2,
+                    self.api_key or self.password or "",
+                    model,
+                    method,
+                    args,
+                ],
+                "kwargs": kwargs,
+            },
+        }
+        data = await self._post_json(payload)
+        if "error" in data:
+            error = data["error"]
+            error_data = error.get("data") or {}
+            error_msg = (
+                error_data.get("message")
+                or error.get("message")
+                or str(error)
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if "error" in data:
-                error_msg = data["error"].get("message", str(data["error"]))
-                if "AccessError" in error_msg or "Access Denied" in error_msg:
-                    raise AccessError(error_msg)
-                raise Exception(f"Odoo RPC error: {error_msg}")
-            return data["result"]
+            if "AccessError" in error_msg or "Access Denied" in error_msg:
+                raise AccessError(error_msg)
+            raise Exception(f"Odoo RPC error: {error_msg}")
+        return data["result"]
+
+    async def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
+        timeout = httpx.Timeout(connect=5, read=20, write=5, pool=5)
+
+        def _send() -> dict[str, Any]:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(f"{self.url}/jsonrpc", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+        return await asyncio.to_thread(_send)
 
     async def _request_with_reauth(
-        self, model: str, method: str, args: list, retry: bool = True
+        self,
+        model: str,
+        method: str,
+        args: list,
+        kwargs: dict[str, Any],
+        retry: bool = True,
     ) -> Any:
         try:
-            return await self._request(model, method, args)
+            return await self._request(model, method, args, kwargs)
         except AccessError:
             if not retry:
                 raise
             self._uid = None
             await self.authenticate()
-            return await self._request(model, method, args)
+            return await self._request(model, method, args, kwargs)
 
     async def search_read(
         self,
@@ -115,7 +137,7 @@ class OdooClient:
         kwargs: dict[str, Any] = {"limit": limit, "offset": offset}
         if fields:
             kwargs["fields"] = fields
-        result = await self.call(model, "search_read", [domain, kwargs])
+        result = await self.call(model, "search_read", [domain], kwargs)
         if isinstance(result, list):
             return result
         return []

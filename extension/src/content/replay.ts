@@ -1,6 +1,8 @@
 import { captureDomSnippet } from "./dom";
 
-const DEFAULT_ACTION_TIMEOUT = 30000;
+// Keep well below the command-executor's 15 s hard timeout so the content
+// script can return ELEMENT_BLOCKED rather than letting the executor time out.
+const DEFAULT_ACTION_TIMEOUT = 10_000;
 const POLL_INTERVAL = 100;
 
 export type ErrorCode =
@@ -27,10 +29,12 @@ export function checkVisibility(el: Element): boolean {
 
 export function checkStability(el: Element): Promise<boolean> {
   return new Promise((resolve) => {
+    const deadline = Date.now() + 2_000; // give up and assume stable after 2 s
     let framesChecked = 0;
     let prevRect: DOMRect | undefined;
 
     function check() {
+      if (Date.now() >= deadline) { resolve(true); return; } // animation-stuck guard
       if (!(el instanceof HTMLElement)) { resolve(false); return; }
       const rect = el.getBoundingClientRect();
       if (prevRect &&
@@ -107,6 +111,13 @@ export async function waitForElement(
     }
   }
 
+  // Scroll element into viewport so elementFromPoint works for off-screen elements
+  // (e.g. sidebar items below the fold). Use "nearest" to minimise jump.
+  try {
+    (el as HTMLElement).scrollIntoView({ behavior: "instant", block: "nearest" });
+    await new Promise((r) => setTimeout(r, 80));
+  } catch { /* no-op in envs without scrollIntoView */ }
+
   if (checkNotOverlayed(el)) return { passed: true };
 
   while (Date.now() - start < timeout) {
@@ -176,19 +187,36 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
 }
 
 function findElementByText(text: string): Element | null {
-  const elements = document.querySelectorAll<HTMLElement>(
-    "a, button, span, label, div, h1, h2, h3, h4, h5, h6, p, li, td, th",
-  );
   const lowerText = text.toLowerCase().replace(/[\n\t]/g, " ").trim();
 
-  for (const el of elements) {
-    if ((el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim() === lowerText) {
-      return el;
-    }
-  }
-  for (const el of elements) {
-    if ((el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim().includes(lowerText)) {
-      return el;
+  // Prefer interactive elements (a, button) — clicking them triggers navigation
+  // and form submission handlers correctly, unlike clicking a parent container.
+  const { innerWidth: vw, innerHeight: vh } = window;
+  const inViewport = (el: Element): boolean => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 &&
+      r.left >= 0 && r.top >= 0 && r.right <= vw && r.bottom <= vh;
+  };
+  const matches = (el: HTMLElement): boolean =>
+    (el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim() === lowerText;
+  const includes = (el: HTMLElement): boolean =>
+    (el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim().includes(lowerText);
+
+  const interactive = Array.from(document.querySelectorAll<HTMLElement>("a, button"));
+  const all = Array.from(document.querySelectorAll<HTMLElement>(
+    "a, button, span, label, div, h1, h2, h3, h4, h5, h6, p, li, td, th",
+  ));
+
+  // Priority: interactive in-viewport → all in-viewport → interactive off-screen → all off-screen
+  // Within each tier: exact match before includes match.
+  for (const subset of [interactive, all]) {
+    const inView = subset.filter(inViewport);
+    const offScreen = subset.filter(el => !inViewport(el));
+    for (const pool of [inView, offScreen]) {
+      const exactHit = pool.find(matches);
+      if (exactHit) return exactHit;
+      const includesHit = pool.find(includes);
+      if (includesHit) return includesHit;
     }
   }
   return null;
@@ -272,27 +300,41 @@ function simulateClick(element: Element): boolean {
   // like requestFullscreen. For future: consider using chrome.debugger API
   // (E-M-12) to produce trusted events.
 
+  // Ensure element is in the viewport so clientX/Y coords are valid.
+  try { element.scrollIntoView({ behavior: "instant", block: "nearest" }); } catch { /* no-op */ }
+
   const rect = element.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
   const y = rect.top + rect.height / 2;
 
-  const events = [
-    new PointerEvent("pointerdown", {
-      bubbles: true, cancelable: true, clientX: x, clientY: y,
-    }),
+  const events: Event[] = [];
+  if (typeof PointerEvent !== "undefined") {
+    events.push(
+      new PointerEvent("pointerdown", {
+        bubbles: true, cancelable: true, clientX: x, clientY: y,
+      }),
+    );
+  }
+  events.push(
     new MouseEvent("mousedown", {
       bubbles: true, cancelable: true, clientX: x, clientY: y,
     }),
-    new PointerEvent("pointerup", {
-      bubbles: true, cancelable: true, clientX: x, clientY: y,
-    }),
+  );
+  if (typeof PointerEvent !== "undefined") {
+    events.push(
+      new PointerEvent("pointerup", {
+        bubbles: true, cancelable: true, clientX: x, clientY: y,
+      }),
+    );
+  }
+  events.push(
     new MouseEvent("mouseup", {
       bubbles: true, cancelable: true, clientX: x, clientY: y,
     }),
     new MouseEvent("click", {
       bubbles: true, cancelable: true, clientX: x, clientY: y,
     }),
-  ];
+  );
 
   for (const event of events) {
     const dispatched = element.dispatchEvent(event);
@@ -333,7 +375,8 @@ function simulateType(element: Element, value?: string): boolean {
 
   element.dispatchEvent(new InputEvent("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
-  element.blur();
+  // Intentionally no blur() — it closes Odoo many2one dropdowns before options render.
+  // The change event already signals value commitment to framework listeners.
 
   return true;
 }
@@ -371,23 +414,42 @@ function simulateScroll(element: Element): boolean {
   }
 }
 
+function simulatePageScroll(): boolean {
+  try {
+    window.scrollBy({ top: window.innerHeight || 800, left: 0, behavior: "instant" });
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 function simulateNavigate(value?: string): boolean {
   if (!value) return false;
 
-  if (value.startsWith("./") || value.startsWith("../") || value.startsWith("?") || value.startsWith("#")) {
-    window.location.href = new URL(value, window.location.href).href;
-    return true;
-  }
+  try {
+    if (value.startsWith("./") || value.startsWith("../") || value.startsWith("?") || value.startsWith("#")) {
+      window.location.href = new URL(value, window.location.href).href;
+      return true;
+    }
 
-  if (value.startsWith("http") || value.startsWith("/")) {
-    window.location.href = value;
-    return true;
+    if (value.startsWith("http") || value.startsWith("/")) {
+      window.location.href = value;
+      return true;
+    }
+  } catch (err) {
+    // JSDOM throws for full-document navigation; treat the assignment as
+    // logically accepted so replay tests can verify command routing.
+    if (err instanceof Error && err.message.includes("Not implemented: navigation")) {
+      return true;
+    }
+    throw err;
   }
   return false;
 }
 
 export async function executeStep(step: StepToExecute): Promise<StepResult> {
   let element: Element | null = null;
+  const hasSelectorChain = Array.isArray(step.selector_chain) && step.selector_chain.length > 0;
 
   if (step.action_type !== "navigate" && step.action_type !== "scroll") {
     element = findElementBySelectors(step.selector_chain);
@@ -405,7 +467,7 @@ export async function executeStep(step: StepToExecute): Promise<StepResult> {
         error: waitResult.reason || "ELEMENT_NOT_FOUND",
       };
     }
-  } else if (step.action_type !== "navigate") {
+  } else if (step.action_type === "scroll" && hasSelectorChain) {
     element = findElementBySelectors(step.selector_chain);
     if (!element) {
       return { success: false, error: "ELEMENT_NOT_FOUND" };
@@ -424,6 +486,24 @@ export async function executeStep(step: StepToExecute): Promise<StepResult> {
         if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
         if (!simulateType(element, step.value))
           return { success: false, error: "Cannot type into this element" };
+
+        // Many2one auto-select: if the input is inside a many2one/autocomplete widget,
+        // wait up to 1.5s for dropdown options to appear and click the first real one.
+        // This collapses the fragile type → wait → click-option pattern into one step.
+        const m2oParent = (element as HTMLElement).closest(
+          ".o_field_many2one, .o_autocomplete, [role='combobox']",
+        );
+        if (m2oParent) {
+          const deadline = Date.now() + 1_500;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 80));
+            const opt = document.querySelector<HTMLElement>(
+              ".o_dropdown_menu .o_menu_item:not(.o_no_records):not([aria-disabled='true']), " +
+              ".dropdown-menu .dropdown-item:not(.disabled):not(.o_no_records)",
+            );
+            if (opt) { opt.click(); break; }
+          }
+        }
         break;
       }
       case "select": {
@@ -433,7 +513,10 @@ export async function executeStep(step: StepToExecute): Promise<StepResult> {
         break;
       }
       case "scroll": {
-        if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
+        if (!element) {
+          simulatePageScroll();
+          break;
+        }
         simulateScroll(element);
         break;
       }

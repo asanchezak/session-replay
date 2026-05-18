@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from adapters.odoo.adapter import OdooAdapter
 from adapters.registry import get_adapter
 from core.database import get_db
 from core.models.connector import ConnectorConfig
@@ -108,16 +109,28 @@ async def test_connector(
     try:
         adapter_cls = get_adapter(connector.connector_type)
     except ValueError:
-        return {"status": "error", "message": f"No adapter found for type '{connector.connector_type}'"}
+        if connector.connector_type == "odoo":
+            adapter_cls = OdooAdapter
+        else:
+            return {"status": "error", "message": f"No adapter found for type '{connector.connector_type}'"}
 
     try:
-        adapter = adapter_cls(connector.config)
-        healthy = await adapter.health()
-        connector.config["healthy"] = healthy
+        adapter = adapter_cls()
+        await adapter.initialize(connector.config)
+        health = await adapter.health_check()
+        connector.config["healthy"] = health.status == "healthy"
+        connector.config["last_error"] = health.last_error
         await db.flush()
-        return {"status": "ok" if healthy else "error", "healthy": healthy}
+        await adapter.dispose()
+        return {
+            "status": "ok" if health.status == "healthy" else "error",
+            "healthy": health.status == "healthy",
+            "latency_ms": health.latency_ms,
+            "error": health.last_error,
+        }
     except Exception as e:
         connector.config["healthy"] = False
+        connector.config["last_error"] = str(e)
         await db.flush()
         return {"status": "error", "message": str(e)}
 

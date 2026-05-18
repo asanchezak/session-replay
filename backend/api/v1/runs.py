@@ -5,14 +5,22 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
+from core.models.ai_decision_outcome import AIDecisionOutcome
+from core.models.ai_reasoning_chain import AIReasoningChain
+from core.models.artifact import Artifact
 from core.models.event import EventLog
 from core.models.intervention import HumanIntervention
+from core.models.page_state_snapshot import PageStateSnapshot
+from core.models.recovery_attempt_trace import RecoveryAttemptTrace
+from core.models.run import ExecutionRun
+from core.models.run_summary import RunSummary
 from services.artifact_service import ArtifactService
 from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
@@ -121,6 +129,28 @@ async def list_runs(
     return runs
 
 
+@router.delete("")
+async def delete_all_runs(db: AsyncSession = Depends(get_db)):
+    logger.info("Deleting all runs")
+    counts: dict[str, int] = {}
+    for model, key in [
+        (EventLog, "events"),
+        (HumanIntervention, "interventions"),
+        (Artifact, "artifacts"),
+        (RunSummary, "run_summaries"),
+        (AIDecisionOutcome, "ai_decisions"),
+        (AIReasoningChain, "ai_reasoning_chains"),
+        (PageStateSnapshot, "page_snapshots"),
+        (RecoveryAttemptTrace, "recovery_traces"),
+        (ExecutionRun, "runs"),
+    ]:
+        resp = await db.execute(sa.delete(model))
+        counts[key] = resp.rowcount
+    await db.commit()
+    logger.info("delete_all_runs complete: %s", counts)
+    return {"deleted": counts}
+
+
 @router.get("/{run_id}")
 async def get_run(
     run_id: str,
@@ -146,6 +176,7 @@ async def get_run(
         "ended_at": run.ended_at.isoformat() if run.ended_at else None,
         "created_at": run.created_at.isoformat(),
         "goal_progress": run.goal_progress,
+        "extracted_data": run.extracted_data or [],
     }
 
 
@@ -627,7 +658,7 @@ async def report_extraction(
 ):
     svc = ExecutionService(db)
     try:
-        await svc.get_run(run_id)
+        run = await svc.get_run(run_id)
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
 
@@ -643,5 +674,10 @@ async def report_extraction(
         run_id=run_id,
         actor_type="extension",
     ))
+
+    run.extracted_data = [*(run.extracted_data or []), *req.data]
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(run, "extracted_data")
+    await db.flush()
 
     return {"status": "recorded", "records": len(req.data)}

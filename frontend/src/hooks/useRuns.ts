@@ -25,8 +25,12 @@ export function useRuns(workflowId?: string) {
     await request("POST", `/runs/${runId}/cancel`);
   };
 
+  const deleteAllRuns = async () => {
+    await request("DELETE", "/runs");
+  };
+
   return { runs: data || [], loading, error, refetch: () => {
     const params = workflowId ? `?workflow_id=${workflowId}` : "";
     fetchData("GET", `/runs${params}`);
-  }, cancelRun };
+  }, cancelRun, deleteAllRuns };
 }

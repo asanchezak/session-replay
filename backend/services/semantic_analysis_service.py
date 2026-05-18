@@ -93,7 +93,9 @@ class SemanticAnalysisService:
             )
         else:
             logger.info("Falling back to heuristics for workflow_id=%s", workflow_id)
-            ai_result = self._fallback_synthesis(heuristic_actions, parameter_candidates, phase_boundaries, steps)
+            ai_result = self._fallback_synthesis(
+                wf, heuristic_actions, parameter_candidates, phase_boundaries, steps,
+            )
 
         # Persist everything
         analysis = await self._persist_analysis(workflow_id, ai_result, steps)
@@ -349,13 +351,18 @@ class SemanticAnalysisService:
             return result
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning("AI synthesis failed: %s — falling back to heuristics", e)
-            return self._fallback_synthesis(heuristic_actions, parameter_candidates, phase_boundaries, steps)
+            return self._fallback_synthesis(
+                wf, heuristic_actions, parameter_candidates, phase_boundaries, steps,
+            )
         except Exception as e:
             logger.warning("AI synthesis unexpected error: %s — falling back to heuristics", e)
-            return self._fallback_synthesis(heuristic_actions, parameter_candidates, phase_boundaries, steps)
+            return self._fallback_synthesis(
+                wf, heuristic_actions, parameter_candidates, phase_boundaries, steps,
+            )
 
     def _fallback_synthesis(
         self,
+        wf: Workflow,
         heuristic_actions: list[dict],
         parameter_candidates: list[dict],
         phase_boundaries: list[int],
@@ -366,8 +373,9 @@ class SemanticAnalysisService:
             t = a["semantic_type"]
             actions_by_type[t] = actions_by_type.get(t, 0) + 1
 
-        goal = "Automated browser workflow"
-        if actions_by_type.get("set_search_query"):
+        prompt_text = (wf.prompt or "").strip()
+        goal = prompt_text or "Automated browser workflow"
+        if not prompt_text and actions_by_type.get("set_search_query"):
             goal = "Search and extract structured data"
         elif actions_by_type.get("submit_form"):
             goal = "Fill and submit forms"
@@ -375,12 +383,21 @@ class SemanticAnalysisService:
             goal = "Extract structured data from pages"
 
         summary = f"A workflow with {len(steps)} steps"
+        if prompt_text:
+            summary = f"Goal-driven workflow recorded to: {prompt_text}"
         domain = "general"
         if actions_by_type.get("set_search_query") or actions_by_type.get("open_platform"):
             domain = "data_extraction"
 
         phases = self._build_phases(phase_boundaries, steps, heuristic_actions)
         output_spec = self._infer_output_spec(actions_by_type, heuristic_actions)
+        ambiguity_notes = self._detect_ambiguity_notes(steps, heuristic_actions, prompt_text)
+        replay_strategy = self._infer_replay_strategy(
+            prompt_text,
+            parameter_candidates,
+            actions_by_type,
+            ambiguity_notes,
+        )
 
         return {
             "workflow_goal": goal,
@@ -393,8 +410,8 @@ class SemanticAnalysisService:
             "output_spec": output_spec,
             "fixed_steps": [i for i, a in enumerate(heuristic_actions) if a.get("semantic_type") in ("open_platform", "open_page")],
             "variable_steps": [i for i, a in enumerate(heuristic_actions) if a.get("semantic_type") in ("set_search_query", "set_location", "apply_filter")],
-            "ambiguity_notes": {"note": "Heuristic analysis only — no AI synthesis available"},
-            "replay_strategy": "literal",
+            "ambiguity_notes": ambiguity_notes or [{"note": "Heuristic analysis only — no AI synthesis available", "confidence": 0.4}],
+            "replay_strategy": replay_strategy,
             "_ai_model": "heuristics-only",
             "_ai_confidence": 0.0,
         }
@@ -618,6 +635,68 @@ class SemanticAnalysisService:
             " " in value and
             not any(c in value for c in ("@", ":", "//"))
         )
+
+    @staticmethod
+    def _detect_ambiguity_notes(
+        steps: list[WorkflowStep],
+        heuristic_actions: list[dict],
+        prompt_text: str | None,
+    ) -> list[dict]:
+        if prompt_text:
+            return []
+
+        notes: list[dict] = []
+        scroll_steps = [
+            s for s in steps
+            if s.action_type == "scroll" and not s.selector_chain and not s.value
+        ]
+        copy_steps = [s for s in steps if s.action_type in {"copy", "paste"}]
+        generic_clicks = [
+            a for a in heuristic_actions
+            if a.get("semantic_type") == "interact" and (a.get("description") or "").startswith("click")
+        ]
+
+        if scroll_steps:
+            notes.append({
+                "note": "The recording includes exploratory scroll steps. A run goal should clarify whether these are needed or can be skipped.",
+                "step_index": scroll_steps[0].step_index,
+                "confidence": 0.82,
+                "requires_confirmation": True,
+            })
+        if copy_steps:
+            notes.append({
+                "note": "The workflow copies data from the page. Confirm whether the real goal is extraction rather than clipboard replay.",
+                "step_index": copy_steps[0].step_index,
+                "confidence": 0.86,
+                "requires_confirmation": True,
+            })
+        if generic_clicks:
+            notes.append({
+                "note": "Some clicks are generic interactions without a clear business goal. Add a goal before running to let the agent generalize safely.",
+                "step_index": generic_clicks[0].get("step_index", 0),
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            })
+        return notes
+
+    @staticmethod
+    def _infer_replay_strategy(
+        prompt_text: str | None,
+        parameter_candidates: list[dict],
+        actions_by_type: dict[str, int],
+        ambiguity_notes: list[dict],
+    ) -> str:
+        if prompt_text and (
+            actions_by_type.get("scroll_page")
+            or actions_by_type.get("extract_data")
+            or actions_by_type.get("open_detail")
+        ):
+            return "semantic"
+        if ambiguity_notes and any(note.get("requires_confirmation") for note in ambiguity_notes):
+            return "semantic"
+        if parameter_candidates:
+            return "parameterized"
+        return "literal"
 
     @staticmethod
     def _looks_like_location(value: str) -> bool:

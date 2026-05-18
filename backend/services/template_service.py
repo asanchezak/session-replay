@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,8 @@ class TemplateService:
         template = {
             "workflow_id": workflow_id,
             "version": (await analysis_svc.get_template(workflow_id)).template_version + 1 if await analysis_svc.get_template(workflow_id) else 1,
+            "workflow_goal": analysis.workflow_goal if analysis else None,
+            "ambiguity_notes": analysis.ambiguity_notes if analysis else [],
             "parameters": [
                 {
                     "key": p.parameter_key,
@@ -171,17 +174,44 @@ class TemplateService:
         analysis_svc = SemanticAnalysisService(self.session)
         analysis = await analysis_svc.get_analysis(workflow_id)
         template = await analysis_svc.get_template(workflow_id)
+        params = runtime_params or {}
+        execution_goal = str(params.pop("__execution_goal__", "") or "").strip()
 
         if not analysis:
             return {"strategy": "literal", "mode": "exact", "reason": "No analysis available — using literal replay"}
 
         strategy = analysis.replay_strategy or "literal"
-        params = runtime_params or {}
+        if not template or "steps" not in (template.template_data or {}):
+            generated = await self.generate_template(workflow_id)
+            template = await analysis_svc.get_template(workflow_id)
+            if not template:
+                return {"strategy": "literal", "mode": "exact", "reason": "Template generation failed"}
+            template_data = generated
+        else:
+            template_data = template.template_data
+
+        raw_notes = analysis.ambiguity_notes or []
+        ambiguity_notes = raw_notes if isinstance(raw_notes, list) else [raw_notes]
+        if (
+            strategy == "semantic"
+            and ambiguity_notes
+            and not execution_goal
+            and any(note.get("requires_confirmation") for note in ambiguity_notes if isinstance(note, dict))
+        ):
+            return {
+                "strategy": strategy,
+                "mode": "confirmation_required",
+                "reason": "Workflow needs an execution goal before it can generalize safely.",
+                "ambiguity_notes": ambiguity_notes,
+                "questions": [
+                    "What is the real outcome you want from this run?",
+                ],
+            }
 
         if strategy == "parameterized" and params and template:
             validation = await self.validate_parameters(workflow_id, params)
             if validation["valid"]:
-                substituted_steps = await self.substitute_parameters(template.template_data, params)
+                substituted_steps = await self.substitute_parameters(template_data, params)
                 return {
                     "strategy": "parameterized",
                     "mode": "substituted",
@@ -196,11 +226,64 @@ class TemplateService:
                     "validation": validation,
                 }
 
+        if strategy == "semantic" or execution_goal:
+            semantic_source_steps = template_data.get("steps", [])
+            substituted_steps = semantic_source_steps
+            if params:
+                substituted_steps = await self.substitute_parameters(template_data, params)
+            compacted_steps, omitted_steps = self._compact_semantic_steps(
+                substituted_steps,
+                execution_goal=execution_goal or analysis.workflow_goal,
+            )
+            return {
+                "strategy": "semantic",
+                "mode": "goal_driven",
+                "execution_goal": execution_goal or analysis.workflow_goal,
+                "parameters": params,
+                "steps": compacted_steps,
+                "omitted_steps": omitted_steps,
+                "original_template_version": template.template_version if template else None,
+            }
+
         return {
             "strategy": strategy,
             "mode": "literal" if strategy == "literal" else "default",
             "reason": "Using exact trace replay",
         }
+
+    def _compact_semantic_steps(
+        self,
+        steps: list[dict[str, Any]],
+        execution_goal: str | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        goal_text = (execution_goal or "").lower()
+        compacted: list[dict[str, Any]] = []
+        omitted: list[dict[str, Any]] = []
+
+        for raw_step in steps:
+            step = deepcopy(raw_step)
+            selector_chain = step.get("selector_chain") or []
+            is_bare_scroll = (
+                step.get("action_type") == "scroll"
+                and not selector_chain
+                and not step.get("value")
+            )
+            if is_bare_scroll and any(token in goal_text for token in ("extract", "description", "job", "search", "submit", "form")):
+                omitted.append({
+                    "step_index": step.get("step_index"),
+                    "action_type": step.get("action_type"),
+                    "reason": "Dropped exploratory scroll in goal-driven replay.",
+                })
+                continue
+            compacted.append(step)
+
+        if not compacted:
+            compacted = [deepcopy(step) for step in steps]
+
+        for index, step in enumerate(compacted):
+            step["step_index"] = index
+
+        return compacted, omitted
 
     async def _get_steps(self, workflow_id: str) -> list[WorkflowStep]:
         result = await self.session.execute(

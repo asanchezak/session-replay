@@ -40,10 +40,18 @@ globalThis.chrome = {
 describe("detector", () => {
   beforeEach(() => { document.body.innerHTML = ""; });
 
+  function makeVisible(el: HTMLElement, width = 304, height = 78): void {
+    Object.defineProperty(el, "getBoundingClientRect", {
+      value: () => ({ width, height, x: 0, y: 0, top: 0, left: 0, right: width, bottom: height }),
+      configurable: true,
+    });
+  }
+
   it("detects reCAPTCHA iframe", async () => {
     const { detectChallenges } = await import("../src/background/detector");
     const i = document.createElement("iframe");
     i.src = "https://www.google.com/recaptcha/api2/anchor";
+    makeVisible(i);
     document.body.appendChild(i);
     const out = detectChallenges();
     expect(out.some((c) => c.type === "captcha")).toBe(true);
@@ -53,8 +61,29 @@ describe("detector", () => {
     const { detectChallenges } = await import("../src/background/detector");
     const i = document.createElement("iframe");
     i.src = "https://newassets.hcaptcha.com/captcha/v1";
+    makeVisible(i);
     document.body.appendChild(i);
     expect(detectChallenges().some((c) => c.type === "captcha")).toBe(true);
+  });
+
+  it("does not detect hidden CAPTCHA plumbing as an active challenge", async () => {
+    const { detectChallenges } = await import("../src/background/detector");
+    const d = document.createElement("div");
+    d.id = "captcha-token";
+    d.style.display = "none";
+    d.textContent = "captcha";
+    document.body.appendChild(d);
+    expect(detectChallenges().some((c) => c.type === "captcha")).toBe(false);
+  });
+
+  it("does not detect captcha-named layout containers without challenge text", async () => {
+    const { detectChallenges } = await import("../src/background/detector");
+    const d = document.createElement("div");
+    d.className = "captcha-wrapper";
+    d.textContent = "Job title, keywords, or company";
+    makeVisible(d, 400, 80);
+    document.body.appendChild(d);
+    expect(detectChallenges().some((c) => c.type === "captcha")).toBe(false);
   });
 
   it("detects login form (high confidence with email + password)", async () => {

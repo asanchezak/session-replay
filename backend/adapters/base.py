@@ -30,7 +30,14 @@ class BaseAdapter(ABC):
         ...
 
     @abstractmethod
-    async def list(self, resource: str, filters: dict | None = None) -> list[dict]:
+    async def list(
+        self,
+        resource: str,
+        filters: dict | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        fields: list[str] | None = None,
+    ) -> list[dict]:
         ...
 
     @abstractmethod

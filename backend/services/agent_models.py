@@ -12,6 +12,9 @@ class DecisionType(str, Enum):
     RETRY = "RETRY"
     HEAL = "HEAL"
     ADAPT = "ADAPT"
+    WAIT = "WAIT"
+    RESTART = "RESTART"
+    ROLLBACK = "ROLLBACK"
     PAUSE = "PAUSE"
     COMPLETED = "COMPLETED"
 
@@ -92,6 +95,8 @@ class AgentDecision(BaseModel):
     command: AgentCommand | None = None
     plan_updates: list[PlanUpdate] = Field(default_factory=list)
     pause_reason: str | None = None
+    wait_ms: int | None = None
+    rollback_to: int | None = None
     requires_human: bool = False
 
 
@@ -107,6 +112,8 @@ class PollResponse(BaseModel):
     command: AgentCommand | None = None
     next_step_index: int | None = None
     pause_reason: str | None = None
+    wait_ms: int | None = None
+    rollback_to: int | None = None
     requires_human: bool = False
     plan_updates: list[PlanUpdate] = Field(default_factory=list)
 
@@ -124,6 +131,7 @@ class ResultResponse(BaseModel):
     decision: DecisionType | None = None
     next_step_index: int | None = None
     ai_analysis: dict[str, Any] | None = None
+    should_poll: bool = False
     plan_updates: list[PlanUpdate] = Field(default_factory=list)
 
 
@@ -142,6 +150,9 @@ CONFIDENCE_THRESHOLDS: dict[DecisionType, float] = {
     DecisionType.RETRY: 0.60,
     DecisionType.HEAL: 0.85,
     DecisionType.ADAPT: 0.90,
+    DecisionType.WAIT: 0.40,
+    DecisionType.RESTART: 0.70,
+    DecisionType.ROLLBACK: 0.70,
     DecisionType.PAUSE: 0.50,
 }
 
@@ -158,6 +169,13 @@ SAFETY_LIMITS = {
     # this can be generous — long workflows often need 10+ adaptations.
     "max_adapt_per_run": 25,
     "max_plan_updates_per_run": 15,
+    "max_consecutive_waits_per_step": 4,
+    "max_total_waits_per_run": 20,
+    "wait_min_ms": 500,
+    "wait_max_ms": 5000,
+    "max_restarts_per_run": 2,
+    "max_rollbacks_per_run": 3,
+    "max_ai_attempts_per_poll": 3,
     "max_consecutive_failures": 5,
     "max_loop_iterations": 200,
     "max_dom_snippet_bytes": 8192,

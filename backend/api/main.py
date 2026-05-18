@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import adapters  # noqa: F401
 from api.v1.agent import router as agent_router
 from api.v1.ai import router as ai_router
 from api.v1.analysis import router as analysis_router
@@ -203,4 +204,7 @@ app.include_router(analysis_router, prefix="/v1")
 
 @app.get("/v1/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "ai_enabled": bool(settings.ai_api_key and not settings.deterministic_only),
+    }

@@ -58,3 +58,4 @@ async def test_test_connection_returns_status_shape(api_client):
     body = t.json()
     # Be lenient: either shape is OK, but at least one of "status"/"healthy"/"error" exists.
     assert any(k in body for k in ("status", "healthy", "error"))
+    assert "No adapter found" not in str(body)

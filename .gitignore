@@ -13,3 +13,4 @@ docker/volumes/
 .e2e-profile/
 test-results/
 playwright-report/
+.local-e2e-sites/

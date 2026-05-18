@@ -187,10 +187,21 @@ export function captureInput(event: Event): CaptureResult {
     };
   }
 
-  const rawValue = target.value || target.textContent || "";
   const name = (target as HTMLInputElement).name || "";
   const placeholder = (target as HTMLInputElement).placeholder || "";
   const inputType = (target as HTMLInputElement).type || "";
+
+  // File inputs expose only "C:\fakepath\..." in .value for security.
+  // Read actual filenames from .files instead.
+  let rawValue: string;
+  if (inputType === "file") {
+    const files = (target as HTMLInputElement).files;
+    rawValue = files && files.length > 0
+      ? Array.from(files).map((f) => f.name).join(", ")
+      : "";
+  } else {
+    rawValue = target.value || target.textContent || "";
+  }
   const autoComplete = (target as HTMLInputElement).autocomplete || "";
   const sensitiveAutocomplete = ["current-password", "new-password", "cc-number", "cc-csc"];
   const isSensitive = inputType === "password" || sensitiveAutocomplete.includes(autoComplete);
@@ -395,13 +406,37 @@ function captureVisibleElements(): Array<Record<string, unknown>> {
 }
 
 function detectBlocking(): { is_blocking: boolean; blocking_type: string | null } {
+  const visible = (el: Element): boolean => {
+    const html = el as HTMLElement;
+    const style = window.getComputedStyle(html);
+    const rect = html.getBoundingClientRect();
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      rect.width >= 20 &&
+      rect.height >= 20
+    );
+  };
+
   const captchaSelectors = [
-    'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
-    'iframe[src*="turnstile"]', 'div[class*="captcha"]',
-    'div[id*="captcha"]', '[data-sitekey]',
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="hcaptcha"]',
+    'iframe[src*="turnstile"]',
+    '[data-sitekey]',
   ];
   for (const sel of captchaSelectors) {
-    if (document.querySelector(sel)) {
+    const el = document.querySelector(sel);
+    if (el && visible(el)) {
+      return { is_blocking: true, blocking_type: "captcha" };
+    }
+  }
+
+  const captchaContainers = document.querySelectorAll<HTMLElement>(
+    'div[class*="captcha" i], div[id*="captcha" i]',
+  );
+  for (const el of captchaContainers) {
+    if (visible(el) && /captcha|verify you are human|not a robot/i.test(el.innerText || "")) {
       return { is_blocking: true, blocking_type: "captcha" };
     }
   }

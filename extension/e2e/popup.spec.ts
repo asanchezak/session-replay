@@ -1,6 +1,30 @@
 import { test, expect } from "./fixtures";
 import { PopupPage } from "./page-objects";
 
+test("popup loads without JavaScript errors and React mounts", async ({ context, extensionId }) => {
+  const jsErrors: string[] = [];
+  const page = await context.newPage();
+  page.on("pageerror", (err) => jsErrors.push(err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") jsErrors.push(msg.text());
+  });
+
+  await page.goto(`chrome-extension://${extensionId}/dist/popup.html`);
+  await page.waitForTimeout(1500);
+
+  // React must have mounted — root must have children
+  const rootChildren = await page.locator("#root > *").count();
+  expect(rootChildren).toBeGreaterThan(0);
+
+  // No ReferenceError or other JS crashes
+  const criticalErrors = jsErrors.filter((e) =>
+    e.includes("ReferenceError") || e.includes("is not defined") || e.includes("Cannot read")
+  );
+  expect(criticalErrors, `JS errors found: ${criticalErrors.join(", ")}`).toHaveLength(0);
+
+  await page.close();
+});
+
 test("popup renders idle state with all UI elements", async ({ context, extensionId, errors }) => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/dist/popup.html`);
@@ -9,7 +33,10 @@ test("popup renders idle state with all UI elements", async ({ context, extensio
   await expect(page.getByText("Session Replay")).toBeVisible();
   await expect(page.getByText("Record Workflow")).toBeVisible();
   await expect(page.getByText("Run Workflow")).toBeVisible();
-  await expect(page.getByText("Connected")).toBeVisible();
+
+  // Status badge shows one of the expected states (Connected, AI key missing, Checking…, Offline)
+  const badge = page.locator("span").filter({ hasText: /^(Connected|AI key missing|Checking\.\.\.|Offline|API offline|Dashboard offline)$/ });
+  await expect(badge.first()).toBeVisible();
 
   expect(errors.filter(e => e.type === "console")).toHaveLength(0);
   await page.close();

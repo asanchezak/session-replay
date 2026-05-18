@@ -116,4 +116,17 @@ test.describe("API key integration (via Vite proxy)", () => {
     // Success — page loaded without auth errors
     await expect(page.getByRole("heading", { name: /workflows/i })).toBeVisible({ timeout: 2000 });
   });
+
+  test("dashboard leaves the loading state through the proxy", async ({ page }) => {
+    await page.goto("/dashboard");
+
+    await expect(page.getByText("Active Workflows")).toBeVisible();
+    await expect(page.getByText("Recent Runs")).toBeVisible();
+
+    await expect(page.getByText("Loading...")).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("Unable to load dashboard data")).not.toBeVisible({ timeout: 1000 });
+
+    const activeWorkflowsCard = page.locator("text=Active Workflows").locator("..").locator("..");
+    await expect(activeWorkflowsCard).not.toContainText("...");
+  });
 });

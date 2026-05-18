@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.exceptions import NotFoundError, StateTransitionError
 from core.models.run import ExecutionRun
@@ -27,7 +29,13 @@ class ExecutionService:
         self.audit = AuditService(session)
         self.workflows = WorkflowService(session)
 
-    async def create_run(self, workflow_id: str, user_id: str | None = None) -> ExecutionRun:
+    async def create_run(
+        self,
+        workflow_id: str,
+        user_id: str | None = None,
+        execution_plan: dict | None = None,
+        execution_goal: str | None = None,
+    ) -> ExecutionRun:
         """Create a new execution run for a workflow."""
         logger.info("Creating run for workflow_id=%s", workflow_id)
         workflow = await self.workflows.get(workflow_id)
@@ -50,10 +58,13 @@ class ExecutionService:
                     "selector_chain": s.selector_chain,
                     "value": s.value,
                     "methods": s.methods,
+                    # Phase 5: selector stability from EMA learning (None = no history yet)
+                    "selector_stability_score": s.selector_stability_score,
                 }
                 for s in steps
             ],
         }
+        snapshot["original_steps"] = deepcopy(snapshot["steps"])
 
         analysis_data = await self._load_analysis(workflow_id)
         if analysis_data:
@@ -75,12 +86,82 @@ class ExecutionService:
         self.session.add(run)
         await self.session.flush()
 
+        if execution_plan or execution_goal:
+            await self.apply_execution_plan(run, execution_plan or {}, execution_goal)
+
         await self.audit.append(AppendEvent(
             event_type="run_started",
-            payload={"workflow_id": workflow_id, "step_count": len(steps)},
+            payload={"workflow_id": workflow_id, "step_count": run.total_steps},
             run_id=str(run.id),
         ))
         logger.info("Created run id=%s workflow_id=%s", run.id, workflow_id)
+        return run
+
+    async def apply_execution_plan(
+        self,
+        run: ExecutionRun,
+        execution_plan: dict,
+        execution_goal: str | None = None,
+    ) -> ExecutionRun:
+        snapshot = deepcopy(run.workflow_snapshot or {})
+        analysis = dict(snapshot.get("analysis") or {})
+        planned_steps = execution_plan.get("steps")
+
+        if isinstance(planned_steps, list) and planned_steps:
+            snapshot["steps"] = [
+                {
+                    "step_index": i,
+                    "action_type": step.get("action_type"),
+                    "intent": step.get("intent"),
+                    "selector_chain": step.get("selector_chain"),
+                    "value": step.get("value"),
+                    "methods": step.get("methods"),
+                }
+                for i, step in enumerate(planned_steps)
+            ]
+            run.total_steps = len(snapshot["steps"])
+        snapshot["original_steps"] = deepcopy(snapshot.get("steps", []))
+
+        if execution_goal:
+            analysis["workflow_goal"] = execution_goal
+        if execution_plan:
+            analysis["execution_plan"] = {
+                "strategy": execution_plan.get("strategy"),
+                "mode": execution_plan.get("mode"),
+            }
+        if analysis:
+            snapshot["analysis"] = analysis
+
+        run.workflow_snapshot = snapshot
+        run.goal_progress = _seed_goal_progress(snapshot.get("analysis"), snapshot.get("steps", []))
+        if execution_plan.get("mode") == "confirmation_required" and isinstance(run.goal_progress, dict):
+            run.goal_progress["confirmation_required"] = True
+
+        flag_modified(run, "workflow_snapshot")
+        flag_modified(run, "goal_progress")
+        await self.session.flush()
+        return run
+
+    async def reset_to_start(self, run_id: str) -> ExecutionRun:
+        """Reset a run to its original executable snapshot and step 0."""
+        run = await self.get_run(run_id)
+        snapshot = deepcopy(run.workflow_snapshot or {})
+        original_steps = deepcopy(snapshot.get("original_steps") or snapshot.get("steps") or [])
+        snapshot["steps"] = original_steps
+        for i, step in enumerate(snapshot.get("steps", [])):
+            step["step_index"] = i
+        run.workflow_snapshot = snapshot
+        run.current_step_index = 0
+        run.total_steps = len(snapshot.get("steps", []))
+        run.goal_progress = _seed_goal_progress(snapshot.get("analysis"), snapshot.get("steps", []))
+        flag_modified(run, "workflow_snapshot")
+        flag_modified(run, "goal_progress")
+        await self.session.flush()
+        await self.audit.append(AppendEvent(
+            event_type="run_restarted",
+            payload={"current_step_index": 0, "total_steps": run.total_steps},
+            run_id=run_id,
+        ))
         return run
 
     async def get_run(self, run_id: str) -> ExecutionRun:
@@ -162,6 +243,12 @@ class ExecutionService:
             except Exception:
                 logger.exception("Learning service failed for run %s", run_id)
 
+            try:
+                from services.ai_outcome_service import AIOutcomeService
+                await AIOutcomeService(self.session).finalize_run_summary(run)
+            except Exception:
+                logger.exception("RunSummary finalization failed for run %s", run_id)
+
         return run
 
     async def advance_step(self, run_id: str) -> ExecutionRun:
@@ -240,6 +327,7 @@ class ExecutionService:
                 result["domain_context"] = analysis.domain_context
                 result["replay_strategy"] = analysis.replay_strategy
                 result["confidence_overall"] = analysis.confidence_overall
+                result["goal_predicate"] = analysis.goal_predicate
             if phases:
                 result["phases"] = [
                     {

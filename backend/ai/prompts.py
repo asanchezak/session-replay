@@ -162,8 +162,10 @@ DECISIONS (return one):
 1. EXECUTE — recorded step looks fine, run it as-is
 2. ADAPT  — change selectors / action / value to fit the current page state
 3. SKIP   — step is unnecessary on this page (already done, or no longer applies)
-4. RETRY  — page seems to be still loading; brief retry is appropriate
-5. PAUSE  — only if no reasonable path forward exists (truly ambiguous, blocked)
+4. WAIT   — the page is transitional or still loading; wait 500-5000ms and re-poll
+5. RESTART — abandon the current path and restart from the workflow target URL
+6. ROLLBACK — return to a recorded checkpoint step K and continue from there
+7. PAUSE  — only if no reasonable path forward exists or the page truly needs a human
 
 For ADAPT you may change action_type entirely. Examples:
 - A broken "click search result" can become a "navigate" to the target site
@@ -171,7 +173,7 @@ For ADAPT you may change action_type entirely. Examples:
 
 Return ONLY valid JSON:
 {
-  "decision": "EXECUTE|ADAPT|SKIP|RETRY|PAUSE",
+  "decision": "EXECUTE|ADAPT|SKIP|WAIT|RESTART|ROLLBACK|PAUSE",
   "confidence": 0.0-1.0,
   "reasoning": "Brief explanation of your decision (one sentence).",
   "command": {
@@ -180,6 +182,8 @@ Return ONLY valid JSON:
     "value": "URL for navigate, text for type, etc.",
     "intent": "what this step accomplishes"
   },
+  "wait_ms": 1500,
+  "rollback_to": 0,
   "plan_updates": [
     {"operation": "INSERT|REMOVE|MODIFY|REORDER", "step_index": <int>,
      "new_step": {"action_type": "...", "selector_chain": [...], "value": "...", "intent": "..."},
@@ -191,6 +195,13 @@ Return ONLY valid JSON:
 The command field is REQUIRED for EXECUTE and ADAPT. For ADAPT the command should
 reflect the new approach (new selectors, possibly new action). Confidence 0.5+
 is enough to ADAPT — don't be overly cautious.
+
+WAIT should be preferred over PAUSE when the page looks mid-load, recently
+navigated, or key content is likely still rendering.
+RESTART should restore the run to the target URL when the current trajectory is
+globally bad but the workflow goal is still achievable.
+ROLLBACK is valid only when checkpoint steps are available. Always provide the
+target step index in `rollback_to`.
 
 `plan_updates` is OPTIONAL but powerful. Use it when the blueprint itself needs
 to change, not just the current step's parameters. Examples:
@@ -206,7 +217,23 @@ to change, not just the current step's parameters. Examples:
 
 You may emit `plan_updates` alongside any decision. They are applied BEFORE the
 decision's command runs, so the snapshot is updated even if the current step
-also has an ADAPT command."""
+also has an ADAPT command.
+
+REASONING PROTOCOL — include in every response:
+Add a "thinking_steps" array (3–5 entries) as a sibling to "decision". Each entry:
+  {"step": <int>, "question": "<what you asked yourself>",
+   "observation": "<what you saw in page/context>",
+   "conclusion": "<what you concluded>"}
+Example:
+[{"step":1,"question":"Is the recorded selector present?",
+  "observation":"#btn-xK9 not found in visible elements",
+  "conclusion":"Selector is stale, likely session-generated id"},
+ {"step":2,"question":"Is an equivalent element visible?",
+  "observation":"button[type=submit] with text 'Log in' is in interactive elements",
+  "conclusion":"Element exists; selector needs healing"},
+ {"step":3,"question":"What is the best decision?",
+  "observation":"Stable button[type=submit] available, confidence high",
+  "conclusion":"ADAPT with healed selector"}]"""
 
 
 def build_agent_decision_prompt(
@@ -225,6 +252,10 @@ def build_agent_decision_prompt(
     workflow_summary: str | None = None,
     page_diff: dict | None = None,
     goal_progress: dict | None = None,
+    run_memory: dict | None = None,
+    checkpoint_steps: list[int] | None = None,
+    step_stability_score: float | None = None,
+    workflow_expertise: str | None = None,
 ) -> str:
     parts = ["## Workflow Context"]
     if workflow_goal:
@@ -252,6 +283,36 @@ def build_agent_decision_prompt(
                 parts.append(
                     f"  · step {it.get('step_index')}: {it.get('intent', '')[:100]}"
                 )
+
+    if run_memory and isinstance(run_memory, dict):
+        decisions = list(run_memory.get("decisions") or [])
+        traces = list(run_memory.get("traces") or [])
+        if decisions or traces:
+            parts.append("\n## Run History (oldest to newest)")
+            for d in decisions[-10:]:
+                parts.append(
+                    f"  [step {d.get('step', '?')}] {d.get('decision', '?')} "
+                    f"(conf {float(d.get('confidence', 0.0)):.2f}) "
+                    f"-> {d.get('outcome') or '?'}: {str(d.get('summary', ''))[:120]}"
+                )
+            for t in traces[-5:]:
+                parts.append(
+                    f"  [step {t.get('step', '?')} recovery via {t.get('trigger', '?')}] "
+                    f"error: {str(t.get('error', ''))[:100]} -> "
+                    f"suggested {t.get('suggested_action') or '?'} -> "
+                    f"{t.get('outcome') or '?'}"
+                )
+            parts.append(
+                "Do not repeat strategies above that already failed. "
+                "If WAIT has already happened multiple times without progress, "
+                "escalate to ADAPT, plan_updates, ROLLBACK, or RESTART."
+            )
+
+    # Cross-run expertise: patterns learned from prior runs of this workflow.
+    # Use this to handle known-fragile steps proactively instead of reactively.
+    if workflow_expertise:
+        parts.append(f"\n{workflow_expertise}")
+
     parts.append(f"Step {step_index} (recorded action: {step_action})")
     if step_intent:
         parts.append(f"Intent: {step_intent}")
@@ -264,6 +325,24 @@ def build_agent_decision_prompt(
         ]
         parts.append("Recorded selectors (guidance only — verify against page):")
         parts.extend(sel_strs)
+
+    # Selector stability from historical runs (Phase 5 EMA learning).
+    # Use this to decide how aggressively to ADAPT vs. EXECUTE as-is.
+    if step_stability_score is not None:
+        pct = int(round(step_stability_score * 100))
+        if step_stability_score >= 0.8:
+            label = f"STABLE ({pct}%) — recorded selectors are reliable; prefer EXECUTE"
+        elif step_stability_score >= 0.5:
+            label = f"MODERATE ({pct}%) — selectors occasionally need healing; verify on page before executing"
+        else:
+            label = (
+                f"FRAGILE ({pct}%) — selectors fail frequently; "
+                "ADAPT proactively using text/role/aria selectors from the page"
+            )
+        parts.append(f"Historical selector stability: {label}")
+
+    if checkpoint_steps:
+        parts.append(f"Available checkpoint steps: {checkpoint_steps}")
 
     parts.append("\n## Current Page State (source of truth)")
     parts.append(f"URL: {page_url}")
@@ -313,17 +392,20 @@ def build_agent_decision_prompt(
             parts.append("\n## Page Diff (since last poll)")
             parts.extend(diff_parts)
             parts.append(
-                "If only minor elements changed and the recorded step still matches, "
-                "EXECUTE quickly. If the page navigated or replaced its content, "
-                "consider ADAPT or PlanUpdate.insert."
+                "If the page navigated or looks partially loaded, prefer WAIT "
+                "(1500-3000ms) before PAUSE. If the page replaced its content "
+                "and the recorded step no longer matches, consider ADAPT, "
+                "ROLLBACK to a checkpoint, or RESTART."
             )
 
     parts.append("\n## Decision Required")
     parts.append(
-        "Pick ONE of: EXECUTE, ADAPT, SKIP, RETRY, PAUSE. "
+        "Pick ONE of: EXECUTE, ADAPT, SKIP, WAIT, RESTART, ROLLBACK, PAUSE. "
         "Prefer ADAPT with stable selectors (role/text/data-testid) when the recorded "
         "selectors look session-specific or don't match the page. "
+        "Prefer WAIT over PAUSE for transitional pages. "
         "If the workflow goal can be reached more directly (e.g. navigate to a target URL "
-        "instead of clicking a stale link), use ADAPT with action=navigate."
+        "instead of clicking a stale link), use ADAPT with action=navigate. "
+        "Only PAUSE when the page truly requires a human or every bounded path is exhausted."
     )
     return "\n".join(parts)

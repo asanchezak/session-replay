@@ -136,7 +136,7 @@ curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v
 - **SW state persistence**: Recording state is stored in `chrome.storage.session` with `setAccessLevel('TRUSTED_AND_UNTRUSTED_CONTEXTS')` so content scripts can read it directly. The `chrome.storage.onChanged` listener in the content script replaces the SET_RECORDING message as the primary mechanism.
 - **Shadow DOM**: The content script's replay panel uses Shadow DOM (`mode: 'closed'`) for full CSS isolation from the host page.
 - **Autonomy default**: AI is consulted on every agent poll when `AI_API_KEY` is set. To disable for a test/debug run, clear the key (the system falls back to fast-path EXECUTE). See `docs/autonomy-runbook.md`.
-- **`DEV_DEFAULTS.apiBase`** in `extension/src/background/api.ts` and Vite proxy in `frontend/vite.config.ts` both point at the dev backend. Currently `http://localhost:8091`. Keep them in sync if you move the backend.
+- **`DEV_DEFAULTS.apiBase`** in `extension/src/background/api.ts` and Vite proxy in `frontend/vite.config.ts` both point at the dev backend. Currently `http://localhost:8081`. Keep them in sync if you move the backend.
 - **Stuck runs auto-recover**: a backend `RecoverySupervisor` task wakes paused runs every 30 s and gives the LLM another shot. Capped at 5 attempts per run. Manually force a try with the dashboard's **Resume with AI** button.
 - **PlanUpdate ops** (INSERT/REMOVE/MODIFY/REORDER) mutate `run.workflow_snapshot.steps` atomically via `HealingService.apply_plan_update`. The extension mirrors the same ops locally so `currentStepIndex` stays aligned.
 

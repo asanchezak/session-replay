@@ -6,12 +6,28 @@ import Banner from "../components/Banner";
 import DataTable from "../components/DataTable";
 import { useRuns, type RunSummary } from "../hooks/useRuns";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
-import { GitBranch, Play, AlertTriangle, Activity, Cable } from "lucide-react";
+import { logger } from "../lib/logger";
+import { GitBranch, Play, AlertTriangle, Activity, Cable, Trash2 } from "lucide-react";
 
 export default function DashboardPage() {
   const navigate = useNavigate();
-  const { workflows, loading: wfLoading } = useWorkflows();
-  const { runs, loading: runLoading } = useRuns();
+  const { workflows, loading: wfLoading, error: wfError } = useWorkflows();
+  const { runs, loading: runLoading, error: runError, refetch: refetchRuns, deleteAllRuns } = useRuns();
+  const [deletingRuns, setDeletingRuns] = useState(false);
+  const loadErrors = [wfError, runError].filter(Boolean) as string[];
+
+  const handleDeleteAllRuns = async () => {
+    if (!window.confirm(`Delete all ${runs.length} run(s)? This cannot be undone.`)) return;
+    setDeletingRuns(true);
+    try {
+      await deleteAllRuns();
+    } catch (err) {
+      logger.error("DashboardPage", "delete_all_runs", {}, err instanceof Error ? err : undefined);
+    }
+    setDeletingRuns(false);
+    refetchRuns();
+    window.dispatchEvent(new CustomEvent("runs:updated"));
+  };
 
   const activeWorkflows = workflows.filter((w) => w.status === "active").length;
   const failedRuns = runs.filter((r) => r.status === "failed");
@@ -77,6 +93,14 @@ export default function DashboardPage() {
         </Card>
       </div>
 
+      {loadErrors.length > 0 && (
+        <div className="mb-6">
+          <Banner type="error" title="Unable to load dashboard data">
+            {loadErrors.join(" ")}
+          </Banner>
+        </div>
+      )}
+
       {needsAttention.length > 0 && (
         <div className="mb-6">
           <Banner type="warning" title="Requires Attention">
@@ -99,7 +123,18 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-6">
         <Card>
-          <h2 className="text-sm font-medium text-text-primary mb-3">Recent Runs</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-text-primary">Recent Runs</h2>
+            {runs.length > 0 && (
+              <button
+                onClick={handleDeleteAllRuns}
+                disabled={deletingRuns}
+                className="flex items-center gap-1 px-2 py-1 text-xs border border-error text-error rounded-md hover:bg-error/10 transition-colors disabled:opacity-50"
+              >
+                <Trash2 size={11} /> {deletingRuns ? "Deleting…" : "Delete all"}
+              </button>
+            )}
+          </div>
           {runLoading ? (
             <div className="text-text-secondary text-sm">Loading...</div>
           ) : (
@@ -107,7 +142,7 @@ export default function DashboardPage() {
               {recentRuns.map((run) => (
                 <div
                   key={run.id}
-                  onClick={() => navigate(`/workflows/${run.workflow_id}`)}
+                  onClick={() => navigate(`/runs/${run.id}`)}
                   className="flex items-center justify-between py-2 px-3 rounded-md hover:bg-bg-elevated cursor-pointer transition-colors"
                 >
                   <span className="text-sm text-text-primary">

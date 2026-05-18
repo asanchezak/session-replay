@@ -73,6 +73,7 @@ export default function WorkflowDetailPage() {
   const { data, loading, error, fetchData } = useApiData<WorkflowDetail>();
   const [running, setRunning] = useState(false);
   const [showParamModal, setShowParamModal] = useState(false);
+  const [showGoalModal, setShowGoalModal] = useState(false);
   const [viewMode, setViewMode] = useState<"literal" | "semantic">("semantic");
   const [runError, setRunError] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
@@ -84,19 +85,94 @@ export default function WorkflowDetailPage() {
     if (workflowId) fetchData("GET", `/workflows/${workflowId}`);
   }, [workflowId]);
 
-  const waitForRunStarted = (): Promise<string | null> => {
+  const waitForRunStarted = (): Promise<
+    | { type: "started"; runId: string }
+    | { type: "failed"; error: string }
+    | { type: "timeout" }
+  > => {
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(null), 10000);
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve({ type: "timeout" });
+      }, 10000);
       const handler = (event: MessageEvent) => {
         if (event.source !== window) return;
         if (event.data?.type === "DASHBOARD_RUN_STARTED" && event.data.runId) {
           clearTimeout(timeout);
           window.removeEventListener("message", handler);
-          resolve(event.data.runId as string);
+          resolve({ type: "started", runId: event.data.runId as string });
+          return;
+        }
+        if (event.data?.type === "DASHBOARD_RUN_FAILED") {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve({
+            type: "failed",
+            error: typeof event.data.error === "string"
+              ? event.data.error
+              : "Failed to start run",
+          });
         }
       };
       window.addEventListener("message", handler);
     });
+  };
+
+  const startWorkflowRun = async (
+    params: Record<string, string> = {},
+    goal?: string,
+    failureMessage = "Failed to start run",
+  ) => {
+    if (!workflowId) return;
+    setRunError(null);
+    setRunning(true);
+    setShowGoalModal(false);
+    setShowParamModal(false);
+    // Open a placeholder run window immediately. Once the extension reports
+    // the run id, we point the same window at /runs/<id>. This is what keeps
+    // the run page open for the whole duration of the workflow.
+    const runWindow = window.open("/runs/pending", "session-replay-run", "noopener");
+    try {
+      const message: {
+        type: "DASHBOARD_RUN_WORKFLOW";
+        workflowId: string;
+        params?: Record<string, string>;
+        goal?: string;
+      } = { type: "DASHBOARD_RUN_WORKFLOW", workflowId };
+      if (Object.keys(params).length > 0) {
+        message.params = params;
+      }
+      if (goal) {
+        message.goal = goal;
+      }
+      window.postMessage(
+        message,
+        "*",
+      );
+      const outcome = await waitForRunStarted();
+      if (outcome.type === "started") {
+        if (runWindow && !runWindow.closed) {
+          runWindow.location.href = `/runs/${outcome.runId}`;
+        } else {
+          // Popup blocked or user closed it — fall back to navigating in place
+          navigate(`/runs/${outcome.runId}`);
+        }
+      } else if (outcome.type === "failed") {
+        if (runWindow && !runWindow.closed) {
+          runWindow.close();
+        }
+        setRunError(outcome.error);
+      } else {
+        if (runWindow && !runWindow.closed) {
+          runWindow.close();
+        }
+        setRunError("Run did not start. Confirm the extension is installed and connected.");
+      }
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : failureMessage);
+      if (runWindow && !runWindow.closed) runWindow.close();
+    }
+    setRunning(false);
   };
 
   const handleRun = async () => {
@@ -107,32 +183,7 @@ export default function WorkflowDetailPage() {
       setShowParamModal(true);
       return;
     }
-    setRunning(true);
-    // Open a placeholder run window immediately. Once the extension reports
-    // the run id, we point the same window at /runs/<id>. This is what keeps
-    // the run page open for the whole duration of the workflow.
-    const runWindow = window.open("/runs/pending", "session-replay-run", "noopener");
-    try {
-      window.postMessage(
-        { type: "DASHBOARD_RUN_WORKFLOW", workflowId },
-        "*",
-      );
-      const runId = await waitForRunStarted();
-      if (runId) {
-        if (runWindow && !runWindow.closed) {
-          runWindow.location.href = `/runs/${runId}`;
-        } else {
-          // Popup blocked or user closed it — fall back to navigating in place
-          navigate(`/runs/${runId}`);
-        }
-      } else if (runWindow && !runWindow.closed) {
-        runWindow.close();
-      }
-    } catch (e) {
-      setRunError(e instanceof Error ? e.message : "Failed to start run");
-      if (runWindow && !runWindow.closed) runWindow.close();
-    }
-    setRunning(false);
+    setShowGoalModal(true);
   };
 
   const handleActivate = async () => {
@@ -181,32 +232,8 @@ export default function WorkflowDetailPage() {
     setAnalyzing(false);
   };
 
-  const handleRunWithParams = async (params: Record<string, string>) => {
-    if (!workflowId) return;
-    setRunError(null);
-    setRunning(true);
-    setShowParamModal(false);
-    const runWindow = window.open("/runs/pending", "session-replay-run", "noopener");
-    try {
-      window.postMessage(
-        { type: "DASHBOARD_RUN_WORKFLOW", workflowId, params },
-        "*",
-      );
-      const runId = await waitForRunStarted();
-      if (runId) {
-        if (runWindow && !runWindow.closed) {
-          runWindow.location.href = `/runs/${runId}`;
-        } else {
-          navigate(`/runs/${runId}`);
-        }
-      } else if (runWindow && !runWindow.closed) {
-        runWindow.close();
-      }
-    } catch (e) {
-      setRunError(e instanceof Error ? e.message : "Failed to start parameterized run");
-      if (runWindow && !runWindow.closed) runWindow.close();
-    }
-    setRunning(false);
+  const handleRunWithParams = async (params: Record<string, string>, goal?: string) => {
+    await startWorkflowRun(params, goal, "Failed to start parameterized run");
   };
 
   if (loading) {
@@ -482,6 +509,27 @@ export default function WorkflowDetailPage() {
           onRun={handleRunWithParams}
           onCancel={() => setShowParamModal(false)}
           isRunning={running}
+          includeGoal
+          title="Run with Parameters"
+          description="Configure runtime parameters and an optional execution goal before executing this workflow."
+          goalLabel="Execution goal (optional)"
+          goalPlaceholder='e.g. "Use these parameters, then extract the top 10 matching results"'
+        />
+      )}
+      {showGoalModal && (
+        <RunParameterModal
+          parameters={[]}
+          onRun={(_, goal) => startWorkflowRun({}, goal)}
+          onSkip={() => startWorkflowRun()}
+          onCancel={() => setShowGoalModal(false)}
+          isRunning={running}
+          includeGoal
+          title="Run With Goal"
+          description="Optionally set a goal for this run, or run the workflow exactly as recorded."
+          goalLabel="What should this run accomplish?"
+          goalPlaceholder='e.g. "Extract the first 10 job descriptions from the current results page"'
+          startLabel="Run With Goal"
+          skipLabel="Run As Recorded"
         />
       )}
     </div>

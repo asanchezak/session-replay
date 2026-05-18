@@ -1,4 +1,6 @@
-const BACKEND_URL = "http://localhost:8081/v1/debug/log";
+import { API_BASE_URL } from "./constants";
+
+const BACKEND_URL = `${API_BASE_URL}/debug/log`;
 const LEVELS = { debug: 0, log: 1, warn: 2, error: 3 } as const;
 const MIN_LEVEL: number = typeof chrome !== "undefined" && chrome.runtime?.id ? 0 : 1;
 

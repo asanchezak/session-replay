@@ -2,6 +2,7 @@ import contextlib
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,6 +15,7 @@ from core.config import settings
 from core.exceptions import NotFoundError
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from core.models.workflow import WorkflowStep
 from core.state_machine import RunStatus, WorkflowStateMachine
 from core.utils import to_uuid
 from services.agent_models import (
@@ -39,6 +41,10 @@ _run_heal_attempts: dict[str, int] = {}
 _run_adapt_count: dict[str, int] = {}
 _run_plan_updates: dict[str, int] = {}
 _run_last_poll: dict[str, datetime] = {}
+_run_step_wait_count: dict[tuple[str, int], int] = {}
+_run_total_waits: dict[str, int] = {}
+_run_restart_count: dict[str, int] = {}
+_run_rollback_count: dict[str, int] = {}
 _pending_actions: dict[str, str] = {}
 
 
@@ -72,6 +78,7 @@ class AgentService:
                     {"ai_classification": ai_classification}
                     if ai_classification else None
                 ),
+                page_context=ctx,
             )
             with contextlib.suppress(Exception):
                 await self.execution.pause(
@@ -105,41 +112,78 @@ class AgentService:
                 next_step_index=step_index,
             )
 
+        # Goal-predicate early termination: check if the workflow objective is
+        # already satisfied on the current page before attempting the next step.
+        # This prevents over-execution when the goal is met before all steps run.
+        if await self._goal_predicate_satisfied(run, ctx):
+            with contextlib.suppress(Exception):
+                await self.execution.complete(run_id)
+            with contextlib.suppress(Exception):
+                await self._maybe_persist_plan_mutations(run)
+            await self._audit_decision(
+                run_id, DecisionType.COMPLETED, 0.99,
+                "Goal predicate satisfied — workflow objective achieved early",
+                page_context=ctx,
+            )
+            return PollResponse(
+                decision=DecisionType.COMPLETED,
+                confidence=0.99,
+                reasoning="Goal predicate satisfied — workflow objective achieved early",
+                next_step_index=step_index,
+            )
+
         step = steps[step_index]
         command = self._build_command(step)
 
-        should_use_ai = self._should_consult_ai(run_id, step, ctx)
-        if should_use_ai:
+        ai_decision: dict[str, Any] | None = None
+        applied_updates: list[dict[str, Any]] = []
+        if self._should_consult_ai(run_id, step, ctx):
             ai_decision = await self._consult_ai_for_step(
                 run, step_index, step, command, analysis, ctx,
             )
             if ai_decision:
-                decision_type = DecisionType(ai_decision.get("decision", "EXECUTE"))
-
-                # Apply any plan_updates the LLM proposed BEFORE acting on the
-                # decision — the snapshot may have shifted (insert/remove/reorder)
-                # so step_index needs to be re-evaluated.
                 applied_updates = await self._apply_plan_updates_from_ai(
                     run, ai_decision.get("plan_updates"),
                 )
+                snapshot = run.workflow_snapshot or {}
+                steps = snapshot.get("steps", [])
+                total_steps = len(steps)
+                if step_index >= total_steps:
+                    return PollResponse(
+                        decision=DecisionType.COMPLETED,
+                        confidence=0.99,
+                        reasoning="All steps completed after plan update",
+                        next_step_index=step_index,
+                    )
+                step = steps[step_index]
+                command = self._build_command(step)
+                decision_type = DecisionType(ai_decision.get("decision", "EXECUTE"))
 
+                if decision_type == DecisionType.WAIT:
+                    return await self._handle_wait_decision(
+                        run_id, step_index, ai_decision, ctx,
+                    )
                 if decision_type == DecisionType.ADAPT:
                     adapted_command = self._parse_adapted_command(
                         ai_decision.get("command", {}),
                     )
                     _run_adapt_count[run_id] = _run_adapt_count.get(run_id, 0) + 1
+                    _run_step_wait_count.pop((run_id, step_index), None)
                     await self._audit_decision(
-                        run_id, DecisionType.ADAPT,
+                        run_id,
+                        DecisionType.ADAPT,
                         ai_decision.get("confidence", 0.7),
                         ai_decision.get("reasoning", "AI-adapted step"),
                         command=adapted_command or command,
                         extra_payload={"plan_updates": applied_updates} if applied_updates else None,
+                        step_index=step_index,
+                        thinking_steps=ai_decision.get("thinking_steps"),
+                        page_context=ctx,
+                        decision_context=ai_decision.get("decision_context"),
                     )
-                    if run.status != "running":
-                        try:
+                    if run.status != RunStatus.RUNNING.value:
+                        with contextlib.suppress(Exception):
                             await self._transition_to_running(run)
-                        except Exception as e:
-                            logger.warning("Could not transition run %s to running: %s", run_id, e)
                     return PollResponse(
                         decision=DecisionType.ADAPT,
                         confidence=ai_decision.get("confidence", 0.7),
@@ -150,12 +194,18 @@ class AgentService:
                     )
                 if decision_type == DecisionType.SKIP:
                     await self._audit_decision(
-                        run_id, DecisionType.SKIP,
+                        run_id,
+                        DecisionType.SKIP,
                         ai_decision.get("confidence", 0.7),
                         ai_decision.get("reasoning", "AI recommends skipping"),
                         extra_payload={"plan_updates": applied_updates} if applied_updates else None,
+                        step_index=step_index,
+                        thinking_steps=ai_decision.get("thinking_steps"),
+                        page_context=ctx,
+                        decision_context=ai_decision.get("decision_context"),
                     )
                     await self.execution.advance_step(run_id)
+                    _run_step_wait_count.pop((run_id, step_index), None)
                     return PollResponse(
                         decision=DecisionType.SKIP,
                         confidence=ai_decision.get("confidence", 0.7),
@@ -163,13 +213,26 @@ class AgentService:
                         next_step_index=step_index + 1,
                         plan_updates=applied_updates,
                     )
+                if decision_type == DecisionType.RESTART:
+                    return await self._handle_restart_decision(
+                        run, step_index, ai_decision, ctx,
+                    )
+                if decision_type == DecisionType.ROLLBACK:
+                    return await self._handle_rollback_decision(
+                        run, step_index, ai_decision, ctx,
+                    )
                 if decision_type == DecisionType.PAUSE:
                     pause_reason = ai_decision.get("pause_reason", "AI recommends pausing")
                     await self._audit_decision(
-                        run_id, DecisionType.PAUSE,
+                        run_id,
+                        DecisionType.PAUSE,
                         ai_decision.get("confidence", 0.5),
                         ai_decision.get("reasoning", pause_reason),
                         pause_reason=pause_reason,
+                        step_index=step_index,
+                        thinking_steps=ai_decision.get("thinking_steps"),
+                        page_context=ctx,
+                        decision_context=ai_decision.get("decision_context"),
                     )
                     with contextlib.suppress(Exception):
                         await self.execution.pause(run_id, reason=pause_reason)
@@ -179,19 +242,27 @@ class AgentService:
                         reasoning=ai_decision.get("reasoning", pause_reason),
                         pause_reason=pause_reason,
                         requires_human=True,
+                        plan_updates=applied_updates,
                     )
+            else:
+                wait_response = await self._fallback_after_ai_failure(run_id, step_index, step, ctx)
+                if wait_response:
+                    return wait_response
 
-        # If we got here after a successful AI consult, the LLM returned EXECUTE
-        # (otherwise we'd have returned in the ADAPT/SKIP/PAUSE branches above).
-        # Distinguish that case from a true fast-path so the audit log + report
-        # show whether the AI was actually involved.
-        ai_confirmed = bool(should_use_ai and 'ai_decision' in locals() and ai_decision)
+        ai_confirmed = bool(ai_decision)
         reason_prefix = "AI confirmed EXECUTE" if ai_confirmed else "Fast path"
         ai_conf = (ai_decision or {}).get("confidence", 0.99) if ai_confirmed else 0.99
+        _run_step_wait_count.pop((run_id, step_index), None)
         await self._audit_decision(
-            run_id, DecisionType.EXECUTE, ai_conf,
+            run_id,
+            DecisionType.EXECUTE,
+            ai_conf,
             f"{reason_prefix}: execute step {step_index} ({step.get('action_type', '')})",
             command=command,
+            step_index=step_index,
+            thinking_steps=(ai_decision or {}).get("thinking_steps") if ai_confirmed else None,
+            page_context=ctx,
+            decision_context=(ai_decision or {}).get("decision_context"),
         )
 
         if run.status != "running":
@@ -248,22 +319,444 @@ class AgentService:
     def _should_consult_ai(
         self, run_id: str, step: dict[str, Any], _ctx: Any,
     ) -> bool:
-        """Decide whether to consult the LLM before executing this step.
+        """AI owns strategy when configured.
 
-        Philosophy: when AI is configured, it is the PRIMARY decision maker.
-        We only skip the consult when the step looks completely trivial
-        (e.g., navigate with a literal URL) or when we've run out of budget.
+        When AI IS configured, also consults for fragile selectors (session-specific
+        IDs, low-score chains) so the AI can choose a better approach before the step
+        fails — rather than burning through the retry/heal budget first.
+        Only triggers AI if the API key is available; fragile-selector detection
+        does NOT force AI consultation when no provider is configured.
         """
-        if not settings.ai_api_key:
-            return False
-        adapt_count = _run_adapt_count.get(run_id, 0)
-        if adapt_count >= SAFETY_LIMITS.get("max_adapt_per_run", 5):
-            return False
-        action_type = (step.get("action_type") or "").lower()
-        # Pure navigate steps with a literal URL value rarely need adaptation
-        if action_type == "navigate" and step.get("value", "").startswith(("http://", "https://")):
-            return False
+        _ = (run_id, _ctx)
+        if not bool(settings.ai_api_key and not settings.deterministic_only):
+            return False  # No AI provider — never consult
+        # With AI available: always consult (standard behavior)
         return True
+
+    @staticmethod
+    def _extract_thinking_steps(raw: dict, max_steps: int = 10) -> list[dict]:
+        """Extract and validate thinking_steps from an AI response dict.
+
+        Always returns a list (possibly empty). Caps length and field sizes to
+        bound storage. Never raises.
+        """
+        raw_steps = raw.get("thinking_steps")
+        if not isinstance(raw_steps, list):
+            return []
+        validated: list[dict] = []
+        for i, step in enumerate(raw_steps[:max_steps]):
+            if not isinstance(step, dict):
+                continue
+            validated.append({
+                "step": i + 1,
+                "question":    str(step.get("question", ""))[:500],
+                "observation": str(step.get("observation", ""))[:500],
+                "conclusion":  str(step.get("conclusion", ""))[:300],
+            })
+        return validated
+
+    @staticmethod
+    def _is_transitional_page(ctx: Any) -> bool:
+        page_diff = getattr(ctx, "page_diff", None) or {}
+        if page_diff.get("url_changed") or page_diff.get("title_changed"):
+            return True
+        added = page_diff.get("added") or []
+        visible_elements = getattr(ctx, "visible_elements", None) or []
+        visible_text = (getattr(ctx, "visible_text", "") or "").strip()
+        return bool(added) and len(visible_elements) <= 4 and len(visible_text) < 200
+
+    async def _fallback_after_ai_failure(
+        self,
+        run_id: str,
+        step_index: int,
+        step: dict[str, Any],
+        ctx: Any,
+    ) -> PollResponse | None:
+        if self._is_transitional_page(ctx):
+            return await self._handle_wait_decision(
+                run_id,
+                step_index,
+                {
+                    "confidence": 0.45,
+                    "reasoning": "AI attempts failed while the page still looks transitional",
+                    "wait_ms": 1500,
+                    "thinking_steps": [],
+                    "decision_context": {"origin": "ai-fallback"},
+                },
+                ctx,
+            )
+        pause_reason = f"AI could not produce a usable decision for step {step_index}"
+        await self._audit_decision(
+            run_id,
+            DecisionType.PAUSE,
+            0.55,
+            pause_reason,
+            pause_reason=pause_reason,
+            step_index=step_index,
+            page_context=ctx,
+            decision_context={"origin": "ai-fallback", "step_action": step.get("action_type")},
+        )
+        with contextlib.suppress(Exception):
+            await self.execution.pause(run_id, reason=pause_reason)
+        return PollResponse(
+            decision=DecisionType.PAUSE,
+            confidence=0.55,
+            reasoning=pause_reason,
+            pause_reason=pause_reason,
+            requires_human=True,
+        )
+
+    async def _handle_wait_decision(
+        self,
+        run_id: str,
+        step_index: int,
+        ai_decision: dict[str, Any],
+        ctx: Any,
+    ) -> PollResponse:
+        step_key = (run_id, step_index)
+        step_waits = _run_step_wait_count.get(step_key, 0)
+        total_waits = _run_total_waits.get(run_id, 0)
+        if (
+            step_waits >= SAFETY_LIMITS["max_consecutive_waits_per_step"]
+            or total_waits >= SAFETY_LIMITS["max_total_waits_per_run"]
+        ):
+            reason = "WAIT budget exhausted"
+            await self._audit_decision(
+                run_id,
+                DecisionType.PAUSE,
+                0.6,
+                reason,
+                pause_reason=reason,
+                step_index=step_index,
+                thinking_steps=ai_decision.get("thinking_steps"),
+                page_context=ctx,
+                decision_context=ai_decision.get("decision_context"),
+            )
+            with contextlib.suppress(Exception):
+                await self.execution.pause(run_id, reason=reason)
+            return PollResponse(
+                decision=DecisionType.PAUSE,
+                confidence=0.6,
+                reasoning=reason,
+                pause_reason=reason,
+                requires_human=True,
+            )
+        wait_ms = int(ai_decision.get("wait_ms") or 1500)
+        wait_ms = max(SAFETY_LIMITS["wait_min_ms"], min(wait_ms, SAFETY_LIMITS["wait_max_ms"]))
+        _run_step_wait_count[step_key] = step_waits + 1
+        _run_total_waits[run_id] = total_waits + 1
+        await self._audit_decision(
+            run_id,
+            DecisionType.WAIT,
+            ai_decision.get("confidence", 0.45),
+            ai_decision.get("reasoning", "Waiting for the page to settle"),
+            extra_payload={"wait_ms": wait_ms, "wait_count": _run_step_wait_count[step_key]},
+            step_index=step_index,
+            thinking_steps=ai_decision.get("thinking_steps"),
+            page_context=ctx,
+            decision_context=ai_decision.get("decision_context"),
+        )
+        return PollResponse(
+            decision=DecisionType.WAIT,
+            confidence=ai_decision.get("confidence", 0.45),
+            reasoning=ai_decision.get("reasoning", "Waiting for the page to settle"),
+            next_step_index=step_index,
+            wait_ms=wait_ms,
+        )
+
+    async def _handle_restart_decision(
+        self,
+        run: ExecutionRun,
+        step_index: int,
+        ai_decision: dict[str, Any],
+        ctx: Any,
+    ) -> PollResponse:
+        run_id = str(run.id)
+        restarts = _run_restart_count.get(run_id, 0)
+        if restarts >= SAFETY_LIMITS["max_restarts_per_run"]:
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+        _run_restart_count[run_id] = restarts + 1
+        await self.execution.reset_to_start(run_id)
+        target_url = ((run.workflow_snapshot or {}).get("workflow") or {}).get("target_url")
+        command = AgentCommand(action=CommandAction.NAVIGATE, value=target_url, target=target_url)
+        await self._audit_decision(
+            run_id,
+            DecisionType.RESTART,
+            ai_decision.get("confidence", 0.7),
+            ai_decision.get("reasoning", "Restarting from the target URL"),
+            command=command,
+            step_index=step_index,
+            thinking_steps=ai_decision.get("thinking_steps"),
+            page_context=ctx,
+            decision_context=ai_decision.get("decision_context"),
+        )
+        return PollResponse(
+            decision=DecisionType.RESTART,
+            confidence=ai_decision.get("confidence", 0.7),
+            reasoning=ai_decision.get("reasoning", "Restarting from the target URL"),
+            command=command,
+            next_step_index=0,
+        )
+
+    async def _handle_rollback_decision(
+        self,
+        run: ExecutionRun,
+        step_index: int,
+        ai_decision: dict[str, Any],
+        ctx: Any,
+    ) -> PollResponse:
+        run_id = str(run.id)
+        rollbacks = _run_rollback_count.get(run_id, 0)
+        if rollbacks >= SAFETY_LIMITS["max_rollbacks_per_run"]:
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+        rollback_to = ai_decision.get("rollback_to")
+        if not isinstance(rollback_to, int) or rollback_to >= step_index or rollback_to < 0:
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+        snapshot = run.workflow_snapshot or {}
+        steps = snapshot.get("steps", []) or []
+        if rollback_to >= len(steps) or not bool(steps[rollback_to].get("checkpoint")):
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+        checkpoint_url = await self._resolve_checkpoint_url(run, rollback_to)
+        if not checkpoint_url:
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+        run.current_step_index = rollback_to
+        await self.session.flush()
+        _run_rollback_count[run_id] = rollbacks + 1
+        command = AgentCommand(
+            action=CommandAction.NAVIGATE,
+            value=checkpoint_url,
+            target=checkpoint_url,
+        )
+        await self._audit_decision(
+            run_id,
+            DecisionType.ROLLBACK,
+            ai_decision.get("confidence", 0.7),
+            ai_decision.get("reasoning", f"Rolling back to checkpoint {rollback_to}"),
+            command=command,
+            step_index=step_index,
+            thinking_steps=ai_decision.get("thinking_steps"),
+            page_context=ctx,
+            decision_context=ai_decision.get("decision_context"),
+        )
+        return PollResponse(
+            decision=DecisionType.ROLLBACK,
+            confidence=ai_decision.get("confidence", 0.7),
+            reasoning=ai_decision.get("reasoning", f"Rolling back to checkpoint {rollback_to}"),
+            command=command,
+            next_step_index=rollback_to,
+            rollback_to=rollback_to,
+        )
+
+    async def _resolve_checkpoint_url(self, run: ExecutionRun, target_step_index: int) -> str | None:
+        result = await self.session.execute(
+            select(EventLog)
+            .where(EventLog.run_id == run.id)
+            .where(EventLog.event_type.in_(["checkpoint", "step_executed"]))
+            .order_by(EventLog.sequence_number.desc())
+        )
+        for ev in result.scalars().all():
+            payload = ev.payload or {}
+            if int(payload.get("step_index", -1)) != target_step_index:
+                continue
+            if payload.get("success") is False:
+                continue
+            if payload.get("page_url"):
+                return str(payload.get("page_url"))
+            if ev.page_url:
+                return ev.page_url
+        workflow = (run.workflow_snapshot or {}).get("workflow") or {}
+        return workflow.get("target_url")
+
+    async def _maybe_persist_plan_mutations(self, run: ExecutionRun) -> None:
+        """After a COMPLETED run, persist high-confidence AI plan_updates back to the
+        canonical workflow so future runs start with improved selectors.
+
+        Only MODIFY operations are persisted (not ADD/REMOVE which need human review).
+        Gates: run must be COMPLETED, confidence >= 0.85, mutated step must have
+        succeeded at least once in this run after the mutation.
+        """
+        try:
+            workflow_id_str = str((run.workflow_snapshot or {}).get("workflow", {}).get("id") or "")
+            if not workflow_id_str:
+                return
+
+            # Load all agent_decision events that included plan_updates.
+            events_result = await self.session.execute(
+                select(EventLog)
+                .where(EventLog.run_id == run.id)
+                .where(EventLog.event_type == "agent_decision")
+                .order_by(EventLog.sequence_number.asc())
+            )
+            events = events_result.scalars().all()
+
+            # Collect MODIFY mutations with confidence and their affected step_index.
+            candidate_mutations: list[dict[str, Any]] = []
+            for ev in events:
+                payload = ev.payload or {}
+                updates = payload.get("plan_updates") or []
+                confidence = float(payload.get("confidence", 0.0))
+                if confidence < 0.85:
+                    continue
+                for upd in updates:
+                    if isinstance(upd, dict) and upd.get("operation") in ("MODIFY", "SIMPLIFY"):
+                        candidate_mutations.append({
+                            "step_index": int(upd.get("step_index", -1)),
+                            "new_step": upd.get("new_step") or {},
+                            "confidence": confidence,
+                            "reason": upd.get("reason", ""),
+                        })
+
+            if not candidate_mutations:
+                return
+
+            # Verify each mutation: did the step succeed at least once AFTER the mutation?
+            step_success_events = await self.session.execute(
+                select(EventLog)
+                .where(EventLog.run_id == run.id)
+                .where(EventLog.event_type == "step_executed")
+                .order_by(EventLog.sequence_number.asc())
+            )
+            successful_steps: set[int] = set()
+            for ev in step_success_events.scalars().all():
+                p = ev.payload or {}
+                if p.get("success") and p.get("step_index") is not None:
+                    successful_steps.add(int(p["step_index"]))
+
+            # Apply validated mutations to the canonical WorkflowStep records.
+            for mutation in candidate_mutations:
+                step_idx = mutation["step_index"]
+                if step_idx < 0 or step_idx not in successful_steps:
+                    continue
+                new_step = mutation["new_step"]
+                new_selectors = new_step.get("selector_chain")
+                if not new_selectors:
+                    continue
+
+                # Find the canonical WorkflowStep for this workflow + step_index.
+                # workflow_id_str is stored as str in WorkflowStep; compare directly.
+                ws_result = await self.session.execute(
+                    select(WorkflowStep)
+                    .where(WorkflowStep.workflow_id == workflow_id_str)
+                    .where(WorkflowStep.step_index == step_idx)
+                )
+                ws = ws_result.scalar_one_or_none()
+                if ws is None:
+                    continue
+
+                # Persist the improved selector chain.
+                ws.selector_chain = new_selectors
+                if new_step.get("value"):
+                    ws.value = new_step["value"]
+
+                await self.audit.append(AppendEvent(
+                    event_type="workflow_evolved",
+                    payload={
+                        "step_index": step_idx,
+                        "confidence": mutation["confidence"],
+                        "reason": mutation["reason"],
+                        "run_id": str(run.id),
+                    },
+                    run_id=str(run.id),
+                ))
+                logger.info(
+                    "Persisted AI plan_update to workflow %s step %d (confidence=%.2f)",
+                    workflow_id_str, step_idx, mutation["confidence"],
+                )
+
+            await self.session.flush()
+        except Exception as exc:
+            logger.debug("Could not persist plan mutations for run %s: %s", run.id, exc)
+
+    async def _load_workflow_expertise(self, workflow_id: str, current_run_id: str) -> str | None:
+        """Aggregate step outcomes from the last 5 completed/failed runs of this workflow.
+
+        Returns a compact markdown block describing which steps are reliable vs.
+        problem-prone, or None if there is no useful history yet.
+        """
+        try:
+            # Find the last 5 terminal runs for this workflow (not the current run).
+            # workflow_id is stored as str in ExecutionRun; compare directly.
+            runs_result = await self.session.execute(
+                select(ExecutionRun)
+                .where(ExecutionRun.workflow_id == workflow_id)
+                .where(ExecutionRun.id != to_uuid(current_run_id))
+                .where(ExecutionRun.status.in_(["completed", "failed", "waiting_for_user"]))
+                .order_by(ExecutionRun.created_at.desc())
+                .limit(5)
+            )
+            prior_runs = runs_result.scalars().all()
+            if not prior_runs:
+                return None
+
+            # For each prior run, aggregate step_executed events by step_index.
+            step_stats: dict[int, dict[str, int]] = {}  # {step_index: {success, heal, fail}}
+            total_runs = len(prior_runs)
+            completed_runs = sum(1 for r in prior_runs if r.status == "completed")
+
+            for run in prior_runs:
+                events_result = await self.session.execute(
+                    select(EventLog)
+                    .where(EventLog.run_id == run.id)
+                    .where(EventLog.event_type.in_(["step_executed", "selector_healed", "plan_update_applied"]))
+                )
+                for ev in events_result.scalars().all():
+                    payload = ev.payload or {}
+                    step_idx = payload.get("step_index")
+                    if step_idx is None:
+                        continue
+                    step_idx = int(step_idx)
+                    if step_idx not in step_stats:
+                        step_stats[step_idx] = {"success": 0, "heal": 0, "fail": 0}
+                    if ev.event_type == "step_executed":
+                        if payload.get("success"):
+                            step_stats[step_idx]["success"] += 1
+                        else:
+                            step_stats[step_idx]["fail"] += 1
+                    elif ev.event_type in ("selector_healed", "plan_update_applied"):
+                        step_stats[step_idx]["heal"] += 1
+
+            if not step_stats:
+                return None
+
+            # Build a compact summary.
+            problem_steps = [
+                (idx, stats) for idx, stats in step_stats.items()
+                if stats["heal"] + stats["fail"] > 0
+            ]
+            problem_steps.sort(key=lambda x: x[1]["heal"] + x[1]["fail"], reverse=True)
+
+            lines = [
+                f"## Workflow Expertise ({total_runs} prior runs; {completed_runs} reached COMPLETED)"
+            ]
+            if problem_steps:
+                lines.append("Known problem steps (address proactively):")
+                for idx, stats in problem_steps[:5]:
+                    total = stats["success"] + stats["heal"] + stats["fail"]
+                    heal_rate = int(round((stats["heal"] + stats["fail"]) / total * 100)) if total else 0
+                    lines.append(
+                        f"  • Step {idx}: needed healing/recovery {stats['heal'] + stats['fail']}/{total} "
+                        f"times ({heal_rate}%) — prefer ADAPT or AI-assisted selectors upfront"
+                    )
+            reliable = [
+                idx for idx, stats in step_stats.items()
+                if stats["heal"] == 0 and stats["fail"] == 0 and stats["success"] >= 2
+            ]
+            if reliable:
+                lines.append(f"Reliable steps (100% success): {sorted(reliable)}")
+            return "\n".join(lines)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_ai_decision(result: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(result, dict):
+            return None
+        decision = str(result.get("decision", "EXECUTE")).upper()
+        valid = {"EXECUTE", "ADAPT", "SKIP", "WAIT", "RESTART", "ROLLBACK", "PAUSE"}
+        if decision not in valid:
+            return None
+        result["decision"] = decision
+        return result
 
     async def _consult_ai_for_step(
         self,
@@ -285,6 +778,21 @@ class AgentService:
         visible_text = getattr(ctx, "visible_text", "") or ""
 
         previous_failures = await self._load_previous_failures(run, step_index)
+        run_memory = await self.ai_outcomes.load_run_memory(str(run.id))
+        checkpoint_steps = [
+            idx for idx, raw_step in enumerate((run.workflow_snapshot or {}).get("steps", []) or [])
+            if bool(raw_step.get("checkpoint"))
+        ]
+
+        # Selector stability score: from learning service EMA stored in snapshot.
+        # None means no history yet (new step); provide it to the prompt so the
+        # AI can decide how aggressively to ADAPT before trying EXECUTE.
+        step_stability: float | None = step.get("selector_stability_score")
+
+        # Cross-run expertise: aggregate patterns from prior completed/failed runs.
+        # Injects known-problem steps so the AI handles them proactively.
+        workflow_id = str((run.workflow_snapshot or {}).get("workflow", {}).get("id") or "")
+        workflow_expertise = await self._load_workflow_expertise(workflow_id, str(run.id)) if workflow_id else None
 
         prompt = build_agent_decision_prompt(
             workflow_goal=analysis.get("workflow_goal"),
@@ -302,30 +810,52 @@ class AgentService:
             previous_failures=previous_failures,
             page_diff=getattr(ctx, "page_diff", None),
             goal_progress=run.goal_progress,
+            run_memory=run_memory,
+            checkpoint_steps=checkpoint_steps,
+            step_stability_score=step_stability,
+            workflow_expertise=workflow_expertise,
         )
 
         provider = get_ai_provider(api_key_override=ai_api_key)
-        try:
-            response = await provider.generate(
-                prompt,
-                system=AGENT_EXECUTOR_SYSTEM,
-                max_tokens=512,
-            )
+        prompts = [
+            prompt,
+            prompt + "\n\n## Repair\nYour previous answer may have been malformed or incomplete. "
+            "Return valid JSON only and do not change successful prior context.",
+            prompt + "\n\n## Recovery Reframe\nThe previous strategy was unusable or too passive. "
+            "Choose a different bounded approach that advances the goal from this page and do not repeat a failed strategy.",
+        ]
+        last_response: str | None = None
+        for attempt, attempt_prompt in enumerate(prompts[:SAFETY_LIMITS.get("max_ai_attempts_per_poll", 3)], start=1):
+            _ai_start = time.monotonic()
             try:
+                effective_prompt = attempt_prompt
+                if last_response:
+                    effective_prompt += f"\n\n## Previous AI output to avoid repeating\n{last_response[:1200]}"
+                response = await provider.generate(
+                    effective_prompt,
+                    system=AGENT_EXECUTOR_SYSTEM,
+                    max_tokens=1024,
+                )
+                last_response = response.content[:2000]
                 result = json.loads(response.content)
-                if not isinstance(result, dict):
-                    return None
-                decision = result.get("decision", "EXECUTE").upper()
-                if decision not in ("EXECUTE", "ADAPT", "SKIP", "PAUSE", "RETRY"):
-                    return None
-                result["decision"] = decision
+                result = self._normalize_ai_decision(result)
+                if not result:
+                    continue
+                if attempt < 3 and result["decision"] == "PAUSE" and not getattr(ctx, "is_blocking", False):
+                    continue
+                result["thinking_steps"] = self._extract_thinking_steps(result)
+                result["prompt_summary"] = prompt[:500]
+                result["latency_ms"] = int((time.monotonic() - _ai_start) * 1000)
+                result["decision_context"] = {
+                    "attempt": attempt,
+                    "strategy": "primary" if attempt == 1 else "repair" if attempt == 2 else "reframe",
+                }
                 return result
             except (json.JSONDecodeError, ValueError):
-                logger.warning("AI agent decision not valid JSON: %s", response.content[:200])
-                return None
-        except Exception as exc:
-            logger.warning("AI agent decision call failed: %s", exc)
-            return None
+                logger.warning("AI agent decision not valid JSON on attempt %s: %s", attempt, (last_response or "")[:200])
+            except Exception as exc:
+                logger.warning("AI agent decision call failed on attempt %s: %s", attempt, exc)
+        return None
 
     async def _apply_plan_updates_from_ai(
         self, run: ExecutionRun, raw: Any,
@@ -454,6 +984,28 @@ class AgentService:
         if req.success:
             _run_retries[run_id] = 0
             _run_heal_attempts[run_id] = 0
+            _run_step_wait_count.pop((run_id, req.step_index), None)
+            snapshot_steps = (run.workflow_snapshot or {}).get("steps", []) or []
+            action_type = snapshot_steps[req.step_index].get("action_type") if req.step_index < len(snapshot_steps) else None
+            if run.status != RunStatus.RUNNING.value:
+                try:
+                    await self._transition_to_running(run)
+                    await self.session.refresh(run)
+                except Exception as e:
+                    logger.warning("Could not transition run %s to running: %s", run_id, e)
+            run.pause_reason = None
+            run.error_summary = None
+            await self.session.flush()
+            await self.audit.append(AppendEvent(
+                event_type="step_executed",
+                payload={
+                    "step_index": req.step_index,
+                    "action_type": action_type,
+                    "success": True,
+                    "page_url": getattr(req.page_context_after, "url", None),
+                },
+                run_id=run_id,
+            ))
             await self._audit_decision(
                 run_id, DecisionType.EXECUTE, 0.99,
                 f"Step {req.step_index} succeeded",
@@ -462,147 +1014,100 @@ class AgentService:
             await self.execution.advance_step(run_id)
             await self.session.refresh(run)
 
-            if run.current_step_index >= run.total_steps:
+            if await self._goal_predicate_satisfied(run, req.page_context_after):
                 with contextlib.suppress(Exception):
                     await self.execution.complete(run_id)
+                with contextlib.suppress(Exception):
+                    await self._maybe_persist_plan_mutations(run)
                 return ResultResponse(
                     accepted=True,
                     decision=DecisionType.COMPLETED,
                     next_step_index=run.current_step_index,
+                    should_poll=False,
+                )
+
+            if run.current_step_index >= run.total_steps:
+                with contextlib.suppress(Exception):
+                    await self.execution.complete(run_id)
+                with contextlib.suppress(Exception):
+                    await self._maybe_persist_plan_mutations(run)
+                return ResultResponse(
+                    accepted=True,
+                    decision=DecisionType.COMPLETED,
+                    next_step_index=run.current_step_index,
+                    should_poll=False,
                 )
 
             return ResultResponse(
                 accepted=True,
                 next_step_index=run.current_step_index,
+                should_poll=False,
             )
 
-        retries = _run_retries.get(run_id, 0)
-        heal_attempts = _run_heal_attempts.get(run_id, 0)
-        adapt_count = _run_adapt_count.get(run_id, 0)
+        # Save page state on failure for observability.
+        if req.page_context_after is not None:
+            with contextlib.suppress(Exception):
+                await self.ai_outcomes.record_page_snapshot(
+                    run_id, req.step_index, "on_failure", req.page_context_after,
+                )
         error = req.error or "Step failed"
-
-        if adapt_count < SAFETY_LIMITS.get("max_adapt_per_run", 5):
-            ai_analysis = await self._analyze_failure(
-                run, req.step_index, error, req.error_context,
-            )
-            has_adaptation = bool(
-                ai_analysis and (
-                    ai_analysis.get("suggested_selectors")
-                    or ai_analysis.get("suggested_action") == "navigate"
-                    and ai_analysis.get("suggested_value")
-                )
-            )
-            if ai_analysis and ai_analysis.get("should_skip"):
-                _run_adapt_count[run_id] = adapt_count + 1
-                await self._audit_decision(
-                    run_id, DecisionType.SKIP,
-                    ai_analysis.get("confidence", 0.6),
-                    (
-                        f"AI recommends skipping step {req.step_index}: "
-                        f"{ai_analysis.get('analysis', error)}"
-                    ),
-                    extra_payload={"ai_analysis": ai_analysis},
-                )
-                await self.execution.advance_step(run_id)
-                await self.session.refresh(run)
-                return ResultResponse(
-                    accepted=True,
-                    decision=DecisionType.SKIP,
-                    next_step_index=run.current_step_index,
-                    ai_analysis=ai_analysis,
-                )
-            if has_adaptation:
-                _run_adapt_count[run_id] = adapt_count + 1
-                try:
-                    run = await self.execution.transition(run_id, RunStatus.RECOVERING)
-                    await self.session.flush()
-                except Exception:
-                    logger.warning("Could not transition run %s to recovering", run_id)
-
-                await self._audit_decision(
-                    run_id, DecisionType.ADAPT,
-                    ai_analysis.get("confidence", 0.7),
-                    (
-                        f"AI adaptation for step {req.step_index}: "
-                        f"{ai_analysis.get('analysis', error)}"
-                    ),
-                    extra_payload={"ai_analysis": ai_analysis},
-                )
-                return ResultResponse(
-                    accepted=True,
-                    decision=DecisionType.ADAPT,
-                    next_step_index=req.step_index,
-                    ai_analysis=ai_analysis,
-                )
-
-        if retries < SAFETY_LIMITS["max_retries_per_step"]:
-            _run_retries[run_id] = retries + 1
-            msg = (
-                f"Step {req.step_index} failed, retry {retries + 1}/"
-                f"{SAFETY_LIMITS['max_retries_per_step']}: {error}"
-            )
-            await self._audit_decision(
-                run_id, DecisionType.RETRY, 0.80, msg,
-            )
-            return ResultResponse(
-                accepted=True,
-                decision=DecisionType.RETRY,
-                next_step_index=req.step_index,
-            )
-
-        if heal_attempts < SAFETY_LIMITS["max_heal_attempts_per_step"]:
-            _run_heal_attempts[run_id] = heal_attempts + 1
-            msg = (
-                f"Step {req.step_index} failed after retries, "
-                f"heal {heal_attempts + 1}: {error}"
-            )
-            try:
-                run = await self.execution.transition(run_id, RunStatus.RECOVERING)
-                await self.session.flush()
-            except Exception:
-                logger.warning("Could not transition run %s to recovering", run_id)
-
-            ai_analysis = await self._analyze_failure(
-                run, req.step_index, error, req.error_context,
-            )
-
-            await self._audit_decision(
-                run_id, DecisionType.HEAL, 0.85, msg,
-                command=None,
-                extra_payload={"ai_analysis": ai_analysis},
-            )
-            return ResultResponse(
-                accepted=True,
-                decision=DecisionType.HEAL,
-                next_step_index=req.step_index,
-                ai_analysis=ai_analysis,
-            )
-
-        # Last-chance AI consult before pausing. By this point retries and
-        # heals are exhausted; instead of falling back on the human, give the
-        # LLM one final shot with the full failure history and ask it to make
-        # ANY decision other than pause if it can — adapt, skip, navigate.
-        last_chance = await self._last_chance_recovery(
-            run, req.step_index, error, req.error_context, adapt_count,
-        )
-        if last_chance:
-            return last_chance
-
-        _run_retries[run_id] = 0
-        _run_heal_attempts[run_id] = 0
-        await self._audit_decision(
-            run_id, DecisionType.PAUSE, 0.50,
-            f"Step {req.step_index} failed after retries + heals + last-chance AI: {error}",
-            pause_reason=error,
-        )
-        with contextlib.suppress(Exception):
-            await self.execution.pause(run_id, reason=error)
+        snapshot_steps = (run.workflow_snapshot or {}).get("steps", []) or []
+        action_type = snapshot_steps[req.step_index].get("action_type") if req.step_index < len(snapshot_steps) else None
+        run.error_summary = error
+        await self.audit.append(AppendEvent(
+            event_type="step_executed",
+            payload={
+                "step_index": req.step_index,
+                "action_type": action_type,
+                "success": False,
+                "error": error,
+            },
+            run_id=run_id,
+        ))
+        await self.audit.append(AppendEvent(
+            event_type="recovery_failure",
+            payload={
+                "step_index": req.step_index,
+                "error": error,
+                "error_context": req.error_context,
+            },
+            run_id=run_id,
+        ))
+        await self.session.flush()
 
         return ResultResponse(
             accepted=True,
-            decision=DecisionType.PAUSE,
             next_step_index=req.step_index,
+            should_poll=True,
         )
+
+    async def _goal_predicate_satisfied(
+        self,
+        run: ExecutionRun,
+        page_context_after: Any | None,
+    ) -> bool:
+        snapshot = run.workflow_snapshot or {}
+        analysis = snapshot.get("analysis") or {}
+        predicate = analysis.get("goal_predicate") or {}
+        if not isinstance(predicate, dict) or not predicate.get("type"):
+            return False
+        ptype = predicate.get("type")
+        if ptype == "extract_count":
+            minimum = int(predicate.get("min") or 1)
+            return len(run.extracted_data or []) >= minimum
+        if ptype == "url_matches":
+            pattern = str(predicate.get("pattern") or "")
+            url = getattr(page_context_after, "url", "") or ""
+            return bool(pattern and re.search(pattern, url))
+        if ptype == "element_visible":
+            selector = str(predicate.get("selector") or "")
+            visible_elements = getattr(page_context_after, "visible_elements", None) or []
+            return bool(selector) and any(selector in str(el.get("selector", "")) for el in visible_elements)
+        if ptype == "text_present":
+            phrase = str(predicate.get("phrase") or "")
+            visible_text = getattr(page_context_after, "visible_text", "") or ""
+            return bool(phrase) and phrase.lower() in visible_text.lower()
+        return False
 
     async def _last_chance_recovery(
         self,
@@ -753,6 +1258,17 @@ class AgentService:
                     run_id=str(run.id),
                 )
             )
+        elif current == RunStatus.RECOVERING:
+            WorkflowStateMachine.transition(current, RunStatus.RUNNING)
+            run.status = RunStatus.RUNNING.value
+            await self.session.flush()
+            await self.audit.append(
+                AppendEvent(
+                    event_type="run_running",
+                    payload={"workflow_id": run.workflow_id, "recovered": True},
+                    run_id=str(run.id),
+                )
+            )
         elif current == RunStatus.WAITING_FOR_USER:
             WorkflowStateMachine.transition(current, RunStatus.RUNNING)
             run.status = RunStatus.RUNNING.value
@@ -775,6 +1291,9 @@ class AgentService:
         pause_reason: str | None = None,
         extra_payload: dict[str, Any] | None = None,
         step_index: int | None = None,
+        thinking_steps: list | None = None,
+        page_context: Any | None = None,
+        decision_context: dict | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "decision": decision.value,
@@ -802,16 +1321,50 @@ class AgentService:
                 if step_index is not None
                 else (extra_payload or {}).get("step_index", 0)
             )
+            effective_step_int = int(effective_step or 0)
+            model_name = settings.ai_model if settings.ai_api_key else "fast-path"
             await self.ai_outcomes.record_decision(
                 run_id=run_id,
-                step_index=int(effective_step or 0),
+                step_index=effective_step_int,
                 decision=decision.value,
                 confidence=confidence,
                 reasoning=reasoning,
-                model=settings.ai_model if settings.ai_api_key else "fast-path",
+                model=model_name,
+                thinking_steps=thinking_steps,
+                decision_context=decision_context,
             )
         except Exception as exc:
             logger.debug("ai_outcomes.record_decision skipped: %s", exc)
+
+        # Record reasoning chain and page snapshot (observability).
+        # Both are fail-open — any error is swallowed.
+        with contextlib.suppress(Exception):
+            effective_step_int = int(
+                step_index if step_index is not None
+                else (extra_payload or {}).get("step_index", 0) or 0
+            )
+            if thinking_steps is not None:
+                await self.ai_outcomes.record_reasoning_chain(
+                    run_id=run_id,
+                    step_index=effective_step_int,
+                    decision=decision.value,
+                    thinking_steps=thinking_steps,
+                    full_reasoning=reasoning,
+                    invocation_type="step_decision",
+                    model=settings.ai_model if settings.ai_api_key else "fast-path",
+                )
+        with contextlib.suppress(Exception):
+            effective_step_int = int(
+                step_index if step_index is not None
+                else (extra_payload or {}).get("step_index", 0) or 0
+            )
+            if page_context is not None:
+                await self.ai_outcomes.record_page_snapshot(
+                    run_id=run_id,
+                    step_index=effective_step_int,
+                    trigger="before_step",
+                    ctx=page_context,
+                )
 
     async def _analyze_failure(
         self,
@@ -820,6 +1373,7 @@ class AgentService:
         error: str,
         error_context: str | None = None,
         last_chance: bool = False,
+        trigger: str = "heal",
     ) -> dict[str, Any] | None:
         """Use AI to analyze why a step failed and suggest alternatives.
 
@@ -897,7 +1451,10 @@ class AgentService:
             "\"suggested_action\": \"navigate|click|type|select|scroll|extract\" (optional), "
             "\"suggested_value\": str (optional, e.g. URL for navigate), "
             "\"suggested_selectors\": [{\"type\": str, \"value\": str, \"score\": float}], "
-            "\"confidence\": float, \"should_retry\": bool, \"should_skip\": bool}"
+            "\"confidence\": float, \"should_retry\": bool, \"should_skip\": bool, "
+            "\"thinking_steps\": [{\"step\": int, \"question\": str, \"observation\": str, "
+            "\"conclusion\": str}] (3-5 entries reasoning through: why failure occurred, "
+            "whether element exists under different selector, what recovery action is best)}"
         )
         if last_chance:
             system_prompt += (
@@ -907,6 +1464,7 @@ class AgentService:
             )
 
         provider = get_ai_provider(api_key_override=ai_api_key)
+        _fa_start = time.monotonic()
         try:
             response = await provider.generate(
                 prompt,
@@ -914,7 +1472,8 @@ class AgentService:
             )
             try:
                 result = json.loads(response.content)
-                return {
+                latency_ms = int((time.monotonic() - _fa_start) * 1000)
+                analysis_result = {
                     "likely_cause": result.get("likely_cause", "unknown"),
                     "analysis": result.get("analysis", ""),
                     "suggested_action": result.get("suggested_action"),
@@ -923,9 +1482,25 @@ class AgentService:
                     "confidence": result.get("confidence", 0.0),
                     "should_retry": result.get("should_retry", False),
                     "should_skip": result.get("should_skip", False),
+                    "thinking_steps": self._extract_thinking_steps(result),
+                    "latency_ms": latency_ms,
                 }
+                with contextlib.suppress(Exception):
+                    await self.ai_outcomes.record_recovery_trace(
+                        run_id=str(run.id),
+                        step_index=step_index,
+                        attempt_number=_run_heal_attempts.get(str(run.id), 0) + 1,
+                        trigger=trigger,
+                        error=error,
+                        analysis_result=analysis_result,
+                        outcome=None,
+                        model=settings.ai_model if settings.ai_api_key else None,
+                        latency_ms=latency_ms,
+                    )
+                return analysis_result
             except (json.JSONDecodeError, ValueError):
-                return {"analysis": response.content, "confidence": 0.0}
+                return {"analysis": response.content, "confidence": 0.0,
+                        "thinking_steps": [], "latency_ms": None}
         except Exception as exc:
             logger.warning("AI failure analysis failed: %s", exc)
             return None

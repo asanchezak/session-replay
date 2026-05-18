@@ -16,16 +16,17 @@ After the cap, the run stays in `waiting_for_user` and a human must intervene.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
-from services.agent_models import SAFETY_LIMITS
 from services.agent_service import AgentService
 from services.audit import AppendEvent, AuditService
 
@@ -99,6 +100,14 @@ class RecoverySupervisor:
             logger.info("Run %s already at auto-resume cap (%d)", run_id, prior)
             return False
 
+        latest_ev_result = await self.session.execute(
+            select(EventLog)
+            .where(EventLog.run_id == run.id)
+            .order_by(EventLog.sequence_number.desc())
+            .limit(1)
+        )
+        latest_event = latest_ev_result.scalar_one_or_none()
+
         # Find the most recent failure to use as recovery context
         ev = await self.session.execute(
             select(EventLog)
@@ -109,11 +118,27 @@ class RecoverySupervisor:
         )
         last_failure = ev.scalar_one_or_none()
         payload = (last_failure.payload if last_failure else {}) or {}
+
+        snapshot = run.workflow_snapshot or {}
+        steps = snapshot.get("steps", []) or []
+        if not steps or run.current_step_index >= len(steps):
+            await self._complete_empty_run(run, forced=forced)
+            return True
+
+        if (
+            run.status == RunStatus.RUNNING.value
+            and latest_event is not None
+            and latest_event.event_type in {"run_auto_resumed", "plan_update"}
+        ):
+            await self._pause_stalled_after_recovery(run, latest_event)
+            return False
+
         step_index = int(payload.get("step_index", run.current_step_index))
         error = str(payload.get("error") or run.pause_reason or "stalled run")
 
         analysis = await self.agent._analyze_failure(
             run, step_index, error, error_context=None, last_chance=True,
+            trigger="supervisor",
         )
 
         if not analysis:
@@ -128,7 +153,11 @@ class RecoverySupervisor:
 
         ops: list[dict] = []
         if should_skip:
-            ops.append({"operation": "REMOVE", "step_index": step_index, "reason": "supervisor skip"})
+            ops.append({
+                "operation": "REMOVE",
+                "step_index": step_index,
+                "reason": "supervisor skip",
+            })
         elif suggested_action == "navigate" and suggested_value:
             ops.append({
                 "operation": "MODIFY", "step_index": step_index,
@@ -182,6 +211,82 @@ class RecoverySupervisor:
         ))
         logger.info("Supervisor auto-resumed run %s (attempt %d)", run_id, prior + 1)
         return True
+
+    async def _complete_empty_run(self, run: ExecutionRun, *, forced: bool = False) -> None:
+        """Close runs whose snapshot has no remaining executable steps.
+
+        A previous supervisor bug could repeatedly accept AI `REMOVE step 0`
+        advice and leave a run in `running` with `total_steps == 0`. Once the
+        plan is empty, there is nothing left for the extension to execute, so
+        the least surprising terminal state is completed.
+        """
+        run_id = str(run.id)
+        snapshot = run.workflow_snapshot or {}
+        snapshot["steps"] = []
+        run.workflow_snapshot = snapshot
+        flag_modified(run, "workflow_snapshot")
+        run.total_steps = 0
+        run.current_step_index = 0
+        await self.session.flush()
+
+        if run.status != RunStatus.RUNNING.value:
+            await self.agent.execution.transition(run_id, RunStatus.RUNNING)
+        await self.agent.execution.complete(run_id)
+        await self.audit.append(AppendEvent(
+            event_type="run_auto_completed",
+            payload={
+                "reason": "No executable steps remain after autonomous recovery",
+                "forced": forced,
+            },
+            run_id=run_id,
+        ))
+        logger.info("Supervisor completed empty run %s", run_id)
+
+    async def _pause_stalled_after_recovery(
+        self,
+        run: ExecutionRun,
+        last_event: EventLog,
+    ) -> None:
+        """Avoid repeatedly mutating a run after the extension stopped polling."""
+        run_id = str(run.id)
+        reason = (
+            "Autonomous recovery produced a plan update, but the extension did "
+            "not report progress afterward. Reopen the target tab or resume "
+            "with AI from the dashboard."
+        )
+        await self._audit_decision(
+            run_id,
+            reason,
+            {
+                "last_event_type": last_event.event_type,
+                "last_event_sequence": last_event.sequence_number,
+            },
+        )
+        with contextlib.suppress(Exception):
+            await self.agent.execution.pause(run_id, reason=reason)
+        logger.info("Supervisor paused run %s after stale recovery event", run_id)
+
+    async def _audit_decision(
+        self,
+        run_id: str,
+        reason: str,
+        extra_payload: dict | None = None,
+    ) -> None:
+        payload = {
+            "decision": "PAUSE",
+            "confidence": 0.95,
+            "reasoning": reason,
+            "command": None,
+            "pause_reason": reason,
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        await self.audit.append(AppendEvent(
+            event_type="agent_decision",
+            payload=payload,
+            run_id=run_id,
+            actor_type="ai",
+        ))
 
     @staticmethod
     def start_supervisor(app) -> asyncio.Task:

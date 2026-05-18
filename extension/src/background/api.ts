@@ -1,11 +1,12 @@
 import type { ActionEvent, RecordEventResponse, Workflow, AgentPollRequest, AgentPollResponse, AgentResultRequest, AgentResultResponse } from "../shared/types";
+import { API_BASE_URL } from "../shared/constants";
 
 const API_BASE_KEY = "apiBaseUrl";
 const API_KEY_KEY = "apiKey";
 const AI_API_KEY_KEY = "aiApiKey";
 
 export const DEV_DEFAULTS = {
-  apiBase: "http://localhost:8091/v1",
+  apiBase: API_BASE_URL,
   apiKey: "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw",
   aiApiKey: "",
 };
@@ -244,7 +245,11 @@ export class ApiClient {
     }>("POST", `/workflows/${workflowId}/analyze`, undefined, extraHeaders);
   }
 
-  async runWithParams(workflowId: string, params: Record<string, unknown>) {
+  async runWithParams(
+    workflowId: string,
+    params: Record<string, unknown>,
+    executionGoal?: string,
+  ) {
     return this.request<{
       id: string;
       status: string;
@@ -253,6 +258,7 @@ export class ApiClient {
       execution_plan: { strategy: string; mode: string; steps?: Array<Record<string, unknown>>; parameters?: Record<string, unknown>; reason?: string };
     }>("POST", `/workflows/${workflowId}/run-with-params`, {
       runtime_params: params,
+      execution_goal: executionGoal || null,
     });
   }
 

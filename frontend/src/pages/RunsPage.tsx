@@ -7,17 +7,31 @@ import EmptyState from "../components/EmptyState";
 import { useRuns, type RunSummary } from "../hooks/useRuns";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
-import { Play, Square } from "lucide-react";
+import { Play, Square, Trash2 } from "lucide-react";
 
 const CANCELABLE_STATUSES = ["running", "queued", "waiting_for_user", "recovering"];
 
 export default function RunsPage() {
-  const { runs, loading, error, refetch, cancelRun } = useRuns();
+  const { runs, loading, error, refetch, cancelRun, deleteAllRuns } = useRuns();
   const navigate = useNavigate();
   const [canceling, setCanceling] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
   const cancelableRuns = runs.filter((r) => CANCELABLE_STATUSES.includes(r.status));
   const hasCancelable = cancelableRuns.length > 0;
+
+  const handleDeleteAll = async () => {
+    if (!window.confirm(`Delete all ${runs.length} run(s)? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await deleteAllRuns();
+    } catch (err) {
+      logger.error("RunsPage", "delete_all", {}, err instanceof Error ? err : undefined);
+    }
+    setDeleting(false);
+    refetch();
+    window.dispatchEvent(new CustomEvent("runs:updated"));
+  };
 
   const handleCancelAll = async () => {
     setCanceling(new Set(cancelableRuns.map((r) => r.id)));
@@ -73,14 +87,25 @@ export default function RunsPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold text-text-primary">Runs</h1>
-        {hasCancelable && (
-          <button
-            onClick={handleCancelAll}
-            className="flex items-center gap-2 px-3 py-2 border border-error text-error text-sm rounded-md hover:bg-error/10 transition-colors"
-          >
-            <Square size={14} /> Cancel all ({cancelableRuns.length})
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {hasCancelable && (
+            <button
+              onClick={handleCancelAll}
+              className="flex items-center gap-2 px-3 py-2 border border-error text-error text-sm rounded-md hover:bg-error/10 transition-colors"
+            >
+              <Square size={14} /> Cancel all ({cancelableRuns.length})
+            </button>
+          )}
+          {runs.length > 0 && (
+            <button
+              onClick={handleDeleteAll}
+              disabled={deleting}
+              className="flex items-center gap-2 px-3 py-2 border border-error text-error text-sm rounded-md hover:bg-error/10 transition-colors disabled:opacity-50"
+            >
+              <Trash2 size={14} /> {deleting ? "Deleting…" : `Delete all (${runs.length})`}
+            </button>
+          )}
+        </div>
       </div>
       <Card padding="sm">
         <DataTable

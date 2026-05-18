@@ -13,18 +13,29 @@ export type ChallengeType =
   | "element_missing";
 
 function checkCaptcha(): ChallengeDetection {
+  const visible = (el: Element): boolean => {
+    const html = el as HTMLElement;
+    const style = window.getComputedStyle(html);
+    const rect = html.getBoundingClientRect();
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      rect.width >= 20 &&
+      rect.height >= 20
+    );
+  };
+
   const captchaSelectors = [
     'iframe[src*="recaptcha"]',
     'iframe[src*="hcaptcha"]',
     'iframe[src*="turnstile"]',
-    'div[class*="captcha"]',
-    'div[id*="captcha"]',
     '[data-sitekey]',
   ];
 
   for (const sel of captchaSelectors) {
     const el = document.querySelector(sel);
-    if (el) {
+    if (el && visible(el)) {
       return {
         detected: true,
         type: "captcha",
@@ -33,6 +44,21 @@ function checkCaptcha(): ChallengeDetection {
       };
     }
   }
+
+  const containers = document.querySelectorAll<HTMLElement>(
+    'div[class*="captcha" i], div[id*="captcha" i]',
+  );
+  for (const el of containers) {
+    if (visible(el) && /captcha|verify you are human|not a robot/i.test(el.innerText || "")) {
+      return {
+        detected: true,
+        type: "captcha",
+        confidence: 0.9,
+        description: "CAPTCHA challenge detected on page",
+      };
+    }
+  }
+
   return { detected: false, type: null, confidence: 0, description: null };
 }
 

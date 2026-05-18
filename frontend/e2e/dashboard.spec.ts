@@ -46,15 +46,14 @@ test.describe("Dashboard", () => {
     await expect(page.getByText("Requires Attention")).toBeVisible({ timeout: 5000 });
   });
 
-  test("recent run rows navigate to workflow detail on click", async ({ page }) => {
+  test("recent run rows navigate to run detail on click", async ({ page }) => {
     await page.route("**/v1/workflows*", async (route: any) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(WORKFLOWS) });
     });
     await mockRuns(page, RUNS);
     await page.goto("/");
-    // The Recent Runs section shows completed run info
-    await expect(page.getByText("Completed")).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText("No runs yet.")).not.toBeVisible();
+    await page.getByText("Run #run-2").click();
+    await expect(page).toHaveURL(/\/runs\/run-2$/);
   });
 
   test("shows 3 workflow template cards", async ({ page }) => {

@@ -215,6 +215,20 @@ describe("executeStep (async)", () => {
     expect(result.success).toBe(true);
   });
 
+  it("scrolls the page when no selector is recorded", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const scrollBy = vi.fn();
+    window.scrollBy = scrollBy as typeof window.scrollBy;
+
+    const result = await executeStep({
+      action_type: "scroll",
+      selector_chain: [],
+    });
+
+    expect(result.success).toBe(true);
+    expect(scrollBy).toHaveBeenCalledTimes(1);
+  });
+
   it("types into input", async () => {
     const { executeStep } = await import("../src/content/replay");
     const input = document.createElement("input");

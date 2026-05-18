@@ -112,26 +112,59 @@ export class CommandExecutor {
   ): Promise<{ success: boolean; error?: string }> {
     const timeoutMs = command.timeout_ms || 15000;
 
-    try {
-      const response = await Promise.race([
-        chrome.tabs.sendMessage(tabId, {
-          type: "EXECUTE_AGENT_COMMAND",
-          command,
-        } as ExecuteAgentCommandMessage),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Command timed out")), timeoutMs)
-        ),
-      ]);
+    // Retry up to 3 times when the content script is temporarily unavailable
+    // (tab still loading after a navigation).  Hard errors (Command timed out,
+    // ELEMENT_NOT_FOUND, etc.) are returned immediately without retrying.
+    let lastError = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        // Backoff, then wait for the tab to finish loading before retrying
+        await new Promise((r) => setTimeout(r, 600 * attempt));
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.status === "loading") {
+            await new Promise<void>((resolve) => {
+              const timeout = setTimeout(resolve, 8_000);
+              const listener = (id: number, info: chrome.tabs.TabChangeInfo) => {
+                if (id === tabId && info.status === "complete") {
+                  clearTimeout(timeout);
+                  chrome.tabs.onUpdated.removeListener(listener);
+                  resolve();
+                }
+              };
+              chrome.tabs.onUpdated.addListener(listener);
+            });
+            await new Promise((r) => setTimeout(r, 400)); // content-script settle
+          }
+        } catch { /* tab gone */ }
+      }
 
-      const result = response as AgentCommandResultResponse;
-      return { success: result.success, error: result.error };
-    } catch (err) {
-      log.error(`executeCommand ${command.action} failed:`, err);
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      try {
+        const response = await Promise.race([
+          chrome.tabs.sendMessage(tabId, {
+            type: "EXECUTE_AGENT_COMMAND",
+            command,
+          } as ExecuteAgentCommandMessage),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Command timed out")), timeoutMs)
+          ),
+        ]);
+        const result = response as AgentCommandResultResponse;
+        return { success: result.success, error: result.error };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        const isConnectivity =
+          lastError.includes("Could not establish connection") ||
+          lastError.includes("Receiving end does not exist");
+        if (!isConnectivity || attempt === 2) {
+          // Non-connectivity error or exhausted retries — give up
+          log.error(`executeCommand ${command.action} failed (attempt ${attempt + 1}):`, lastError);
+          return { success: false, error: lastError };
+        }
+        log.log(`executeCommand connectivity retry ${attempt + 1}: ${lastError}`);
+      }
     }
+    return { success: false, error: lastError };
   }
 }
 

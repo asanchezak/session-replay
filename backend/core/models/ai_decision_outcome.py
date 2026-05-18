@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy import DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin
@@ -34,6 +34,9 @@ class AIDecisionOutcome(Base, TimestampMixin, UUIDMixin):
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thinking_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    reasoning_chain_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decision_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # IMPORTANT: must be tz-aware to match `datetime.now(UTC)` writes from
     # AIOutcomeService.resolve_latest. The 2026-05-15 ghost-run incident
     # ('a31c67d0-…') was caused by this column being TIMESTAMP WITHOUT TZ.

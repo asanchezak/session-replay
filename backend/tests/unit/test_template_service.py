@@ -183,3 +183,67 @@ async def test_variable_steps_have_param_references(db_session: AsyncSession, mo
     for step_index in template["variable_steps"]:
         step = template["steps"][step_index]
         assert step["value"].startswith("{{") or step["value"] == ""
+
+
+@pytest.mark.asyncio
+async def test_semantic_execution_plan_compacts_exploratory_scrolls(db_session: AsyncSession, monkeypatch):
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+    wf = Workflow(
+        name="Semantic Scroll",
+        status="draft",
+        prompt="Get the first 10 job descriptions from Indeed results.",
+    )
+    db_session.add(wf)
+    await db_session.flush()
+    wf_id = str(wf.id)
+
+    steps_data = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed"},
+        {"step_index": 1, "action_type": "scroll", "intent": None},
+        {"step_index": 2, "action_type": "scroll", "intent": None},
+        {"step_index": 3, "action_type": "click", "intent": "Click listing"},
+    ]
+    for sd in steps_data:
+        db_session.add(WorkflowStep(workflow_id=wf_id, **sd))
+    await db_session.flush()
+
+    analysis_svc = SemanticAnalysisService(db_session)
+    await analysis_svc.analyze_workflow(wf_id)
+
+    svc = TemplateService(db_session)
+    plan = await svc.build_execution_plan(wf_id, {"__execution_goal__": "Get the first 10 job descriptions"})
+
+    assert plan["strategy"] == "semantic"
+    assert plan["mode"] == "goal_driven"
+    assert len(plan["steps"]) == 2
+    assert all(step["action_type"] != "scroll" for step in plan["steps"])
+    assert len(plan["omitted_steps"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_semantic_execution_plan_requires_goal_for_ambiguous_recording(db_session: AsyncSession, monkeypatch):
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+    wf = Workflow(name="Needs Goal", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    wf_id = str(wf.id)
+
+    steps_data = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed"},
+        {"step_index": 1, "action_type": "scroll", "intent": None},
+        {"step_index": 2, "action_type": "copy", "intent": "Copy description"},
+    ]
+    for sd in steps_data:
+        db_session.add(WorkflowStep(workflow_id=wf_id, **sd))
+    await db_session.flush()
+
+    analysis_svc = SemanticAnalysisService(db_session)
+    await analysis_svc.analyze_workflow(wf_id)
+
+    svc = TemplateService(db_session)
+    plan = await svc.build_execution_plan(wf_id)
+
+    assert plan["mode"] == "confirmation_required"
+    assert plan["questions"]

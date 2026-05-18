@@ -17,9 +17,10 @@ class WorkflowAnalysis(Base, TimestampMixin, UUIDMixin):
     confidence_overall: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     ai_model_used: Mapped[str | None] = mapped_column(String(50), nullable=True)
     ai_inference_metadata: Mapped[dict | None] = mapped_column("ai_inference_metadata", JSON, nullable=True)
-    ambiguity_notes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ambiguity_notes: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
     is_user_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     replay_strategy: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    goal_predicate: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class SemanticPhase(Base, TimestampMixin, UUIDMixin):

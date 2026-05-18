@@ -1,11 +1,9 @@
 import { useState } from "react";
 import { getConfig } from "../src/background/api";
-
-const API_BASE = "http://localhost:8081/v1";
-const DASHBOARD_URL = "http://localhost:5173/dashboard";
+import { API_BASE_URL, DASHBOARD_ORIGIN } from "../src/shared/constants";
 
 function openDashboard() {
-  chrome.tabs.create({ url: DASHBOARD_URL });
+  chrome.tabs.create({ url: `${DASHBOARD_ORIGIN}/dashboard` });
 }
 
 interface IdleViewProps {
@@ -28,7 +26,7 @@ function RecordingCompleteView({
     setSaving(true);
     try {
       const config = await getConfig();
-      await fetch(`${API_BASE}/workflows/${workflowId}`, {
+      await fetch(`${API_BASE_URL}/workflows/${workflowId}`, {
         method: "PUT",
         headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),

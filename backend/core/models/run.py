@@ -31,3 +31,4 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     # primary cursor will eventually be derived from this instead of
     # current_step_index; both kept for now during the transition.
     goal_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    extracted_data: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)

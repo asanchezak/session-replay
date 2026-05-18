@@ -202,3 +202,74 @@ async def test_record_workflow_includes_analysis(api_client, monkeypatch):
     data = resp.json()
     assert "analysis" in data
     assert "goal" in data["analysis"]
+
+
+@pytest.mark.asyncio
+async def test_run_with_params_requires_goal_for_ambiguous_semantic_workflow(api_client, monkeypatch):
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": {"type": "css", "value": "#root"}},
+        {"step_index": 1, "action_type": "scroll", "intent": None, "selector_chain": None},
+        {"step_index": 2, "action_type": "copy", "intent": "Copy description", "selector_chain": {"type": "css", "value": ".job"}},
+    ]
+    wf_id = await _create_active_workflow_with_steps(api_client, "Need Goal", steps)
+    await api_client.post(f"/v1/workflows/{wf_id}/analyze", headers=_HEADERS)
+
+    run = await api_client.post(
+        f"/v1/workflows/{wf_id}/run-with-params",
+        json={"runtime_params": {}},
+        headers=_HEADERS,
+    )
+    assert run.status_code == 409
+    assert run.json()["error"]["code"] == "GOAL_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_run_with_params_applies_execution_goal_and_semantic_plan(api_client, monkeypatch):
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+
+    create = await api_client.post(
+        "/v1/workflows",
+        json={"name": "Goal Driven Run", "prompt": "Get the first 10 job descriptions from Indeed."},
+        headers=_HEADERS,
+    )
+    wf_id = create.json()["id"]
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": {"type": "css", "value": "#root"}},
+        {"step_index": 1, "action_type": "scroll", "intent": None, "selector_chain": None},
+        {"step_index": 2, "action_type": "scroll", "intent": None, "selector_chain": None},
+        {"step_index": 3, "action_type": "click", "intent": "Click listing title", "selector_chain": {"type": "css", "value": ".jobTitle a"}},
+    ]
+    for i, s in enumerate(steps):
+        body = {
+            "step_index": i,
+            "action_type": s.get("action_type", "click"),
+            "intent": s.get("intent"),
+            "selector_chain": s.get("selector_chain"),
+            "value": s.get("value"),
+        }
+        await api_client.post(f"/v1/workflows/{wf_id}/steps", json=body, headers=_HEADERS)
+    await api_client.put(f"/v1/workflows/{wf_id}/status", json={"status": "active"}, headers=_HEADERS)
+    await api_client.post(f"/v1/workflows/{wf_id}/analyze", headers=_HEADERS)
+
+    run = await api_client.post(
+        f"/v1/workflows/{wf_id}/run-with-params",
+        json={
+            "runtime_params": {},
+            "execution_goal": "Extract the first 10 job descriptions from the search results",
+        },
+        headers=_HEADERS,
+    )
+    assert run.status_code == 200
+    run_data = run.json()
+    assert run_data["execution_plan"]["strategy"] == "semantic"
+    assert run_data["execution_plan"]["mode"] == "goal_driven"
+    assert len(run_data["execution_plan"]["steps"]) == 2
+
+    run_detail = await api_client.get(f"/v1/runs/{run_data['id']}", headers=_HEADERS)
+    assert run_detail.status_code == 200
+    goal_progress = run_detail.json()["goal_progress"]
+    assert goal_progress["workflow_goal"] == "Extract the first 10 job descriptions from the search results"

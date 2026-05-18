@@ -24,13 +24,43 @@ interface ChallengeDetection {
 
 function detectChallenges(): ChallengeDetection[] {
   const results: ChallengeDetection[] = [];
+
+  const visible = (el: Element): boolean => {
+    const html = el as HTMLElement;
+    const style = window.getComputedStyle(html);
+    const rect = html.getBoundingClientRect();
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      rect.width >= 20 &&
+      rect.height >= 20
+    );
+  };
   
   // Captcha check
-  const captchaSelectors = ['iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]', 'iframe[src*="turnstile"]', 'div[class*="captcha"]', 'div[id*="captcha"]', '[data-sitekey]'];
+  const captchaSelectors = [
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="hcaptcha"]',
+    'iframe[src*="turnstile"]',
+    '[data-sitekey]',
+  ];
   for (const sel of captchaSelectors) {
-    if (document.querySelector(sel)) {
+    const el = document.querySelector(sel);
+    if (el && visible(el)) {
       results.push({ detected: true, type: "captcha", confidence: 0.95, description: "CAPTCHA detected" });
       break;
+    }
+  }
+  if (!results.some((r) => r.type === "captcha")) {
+    const captchaContainers = document.querySelectorAll<HTMLElement>(
+      'div[class*="captcha" i], div[id*="captcha" i]',
+    );
+    for (const el of captchaContainers) {
+      if (visible(el) && /captcha|verify you are human|not a robot/i.test(el.innerText || "")) {
+        results.push({ detected: true, type: "captcha", confidence: 0.9, description: "CAPTCHA detected" });
+        break;
+      }
     }
   }
   
@@ -71,14 +101,26 @@ window.addEventListener("message", (event: MessageEvent) => {
   const data = event.data as { type?: string; [key: string]: unknown } | undefined;
   if (!data || data.type !== "DASHBOARD_RUN_WORKFLOW") return;
   const workflowId = data.workflowId as string | undefined;
+  const goal = typeof data.goal === "string" ? data.goal : undefined;
+  const params = data.params && typeof data.params === "object"
+    ? data.params as Record<string, unknown>
+    : undefined;
   if (!workflowId) return;
   sendDebugLog("log", `Dashboard triggered run for workflow ${workflowId}`);
-  chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId })
+  chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, goal, params })
     .then((response) => {
-      const resp = response as { type: string; run?: { id: string } };
+      const resp = response as { type: string; run?: { id: string }; error?: string };
       if (resp.type === "RUN_STARTED" && resp.run?.id) {
         window.postMessage(
           { type: "DASHBOARD_RUN_STARTED", runId: resp.run.id },
+          "*",
+        );
+      } else if (resp.type === "RUN_FAILED") {
+        window.postMessage(
+          {
+            type: "DASHBOARD_RUN_FAILED",
+            error: resp.error || "Failed to start workflow run",
+          },
           "*",
         );
       }
@@ -95,7 +137,12 @@ chrome.storage.session.get(STORAGE_KEY).then((data) => {
     eventCount = state.events?.length ?? 0;
     sendDebugLog("log", `Initial state: recording enabled (${eventCount} events)`);
   }
-}).catch(() => {});
+  // Signal readiness only after recording state is resolved so waitForContentScript
+  // guarantees recordingEnabled is correct before the first captured event.
+  (window as any).__SR_CONTENT_SCRIPT__ = true;
+}).catch(() => {
+  (window as any).__SR_CONTENT_SCRIPT__ = true;
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session") return;
@@ -124,8 +171,6 @@ setInterval(() => {
     }).catch(() => {});
   }
 }, 500);
-
-(window as any).__SR_CONTENT_SCRIPT__ = true;
 
 // ── Shadow DOM Replay UI ──────────────────────────────────────────
 
@@ -299,24 +344,69 @@ function sendToBackground(event: CaptureResult): void {
   );
 }
 
+// Snapshot of text-input values captured on mousedown, used to detect
+// when a custom dropdown click sets an input value without firing "change".
+let preClickInputSnapshot: Map<HTMLInputElement, string> | null = null;
+// Per-input: last value we emitted as a type step, for deduplication.
+const recentTypeEmits = new WeakMap<HTMLInputElement, { value: string; ts: number }>();
+
+const EXCLUDED_INPUT_TYPES = new Set([
+  "file", "checkbox", "radio", "submit", "button", "image", "reset", "password",
+]);
+
+document.addEventListener("mousedown", () => {
+  if (!recordingEnabled) return;
+  preClickInputSnapshot = new Map();
+  // Snapshot ALL text-like inputs — broad selector so custom dropdowns backed by
+  // any input type (text, hidden, email, search, …) are included.
+  document.querySelectorAll<HTMLInputElement>("input").forEach((el) => {
+    if (EXCLUDED_INPUT_TYPES.has(el.type.toLowerCase())) return;
+    if (el.name || el.id) {
+      preClickInputSnapshot!.set(el, el.value);
+    }
+  });
+}, true);
+
+// Use capture phase (true) so we see every click before any child handler can
+// call stopPropagation() — critical for navigation links in SPA frameworks.
 document.addEventListener("click", (e: MouseEvent) => {
   if (!recordingEnabled) return;
-  if (e.defaultPrevented) return;
+  const snapshot = preClickInputSnapshot;
+  preClickInputSnapshot = null;
   sendToBackground(captureClick(e));
-}, false);
 
+  if (!snapshot || snapshot.size === 0) return;
+  // 300ms after the click, check whether a custom dropdown updated any input
+  // value without firing a "change" event.
+  setTimeout(() => {
+    if (!recordingEnabled) return;
+    snapshot.forEach((prevValue, input) => {
+      if (!document.contains(input)) return;
+      const newValue = input.value;
+      if (!newValue || newValue === prevValue) return;
+      const recent = recentTypeEmits.get(input);
+      if (recent && recent.value === newValue && Date.now() - recent.ts < 500) return;
+      recentTypeEmits.set(input, { value: newValue, ts: Date.now() });
+      sendToBackground(captureInput({ target: input } as unknown as Event));
+    });
+  }, 300);
+}, true);  // ← capture phase
+
+// Capture phase for change too — catches events that child handlers stop.
 document.addEventListener("change", (e: Event) => {
   if (!recordingEnabled) return;
-  if (e.defaultPrevented) return;
   const target = e.target as HTMLElement;
   if (
     target instanceof HTMLInputElement ||
     target instanceof HTMLSelectElement ||
     target instanceof HTMLTextAreaElement
   ) {
+    if (target instanceof HTMLInputElement && !EXCLUDED_INPUT_TYPES.has(target.type.toLowerCase())) {
+      recentTypeEmits.set(target, { value: target.value, ts: Date.now() });
+    }
     sendToBackground(captureInput(e));
   }
-}, false);
+}, true);  // ← capture phase
 
 // ── Scroll listener with AbortController (E-C-11) ──────────────────
 

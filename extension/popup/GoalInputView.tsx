@@ -3,9 +3,20 @@ import { useState } from "react";
 interface GoalInputViewProps {
   onStart: (goal: string) => void;
   onSkip: () => void;
+  label?: string;
+  placeholder?: string;
+  startLabel?: string;
+  skipLabel?: string;
 }
 
-export function GoalInputView({ onStart, onSkip }: GoalInputViewProps) {
+export function GoalInputView({
+  onStart,
+  onSkip,
+  label = "What are you trying to accomplish?",
+  placeholder = 'e.g. "Extract job descriptions for Python developers in Berlin from Indeed"',
+  startLabel = "Start Recording",
+  skipLabel = "Skip",
+}: GoalInputViewProps) {
   const [goal, setGoal] = useState("");
 
   const handleStart = () => {
@@ -30,13 +41,13 @@ export function GoalInputView({ onStart, onSkip }: GoalInputViewProps) {
             marginBottom: "6px",
           }}
         >
-          What are you trying to accomplish?
+          {label}
         </label>
         <textarea
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder='e.g. "Extract job descriptions for Python developers in Berlin from Indeed"'
+          placeholder={placeholder}
           rows={3}
           autoFocus
           style={{
@@ -71,7 +82,7 @@ export function GoalInputView({ onStart, onSkip }: GoalInputViewProps) {
             cursor: goal.trim() ? "pointer" : "not-allowed",
           }}
         >
-          Start Recording
+          {startLabel}
         </button>
         <button
           onClick={onSkip}
@@ -86,7 +97,7 @@ export function GoalInputView({ onStart, onSkip }: GoalInputViewProps) {
             whiteSpace: "nowrap",
           }}
         >
-          Skip
+          {skipLabel}
         </button>
       </div>
     </div>

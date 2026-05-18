@@ -3,6 +3,7 @@ import { apiClient, DEV_DEFAULTS } from "./api";
 import { createLogger } from "../shared/logger";
 import { stepHealer } from "./healer";
 import { stepExecutor } from "./executor";
+import { API_BASE_URL, DASHBOARD_ORIGIN } from "../shared/constants";
 import { commandExecutor } from "./command-executor";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
@@ -62,9 +63,14 @@ chrome.runtime.onMessage.addListener(
         return true;
       }
       case "RUN_WORKFLOW": {
-        const msg = message as unknown as { workflowId: string; tabId?: number };
+        const msg = message as unknown as {
+          workflowId: string;
+          tabId?: number;
+          goal?: string;
+          params?: Record<string, unknown>;
+        };
         const tabId = msg.tabId ?? sender.tab?.id;
-        executeAgentRun(msg.workflowId, tabId)
+        executeAgentRun(msg.workflowId, tabId, msg.goal, msg.params)
           .then((result: { id: string; status: string; total_steps: number }) => {
             sendResponse({ type: "RUN_STARTED", run: result });
           })
@@ -485,8 +491,10 @@ async function executeWorkflowRun(
     }
   }
 
-  orchestrator.notifyIdle();
-  orchestrator.broadcastState();
+  if (statusOverride !== "waiting_for_user") {
+    orchestrator.notifyIdle();
+    orchestrator.broadcastState();
+  }
 
   return { id: runId, status: statusOverride || (allStepsSucceeded ? "completed" : "failed"), total_steps: steps.length };
 }
@@ -494,16 +502,22 @@ async function executeWorkflowRun(
 async function executeAgentRun(
   workflowId: string,
   tabId?: number,
+  goal?: string,
+  runtimeParams?: Record<string, unknown>,
 ): Promise<{ id: string; status: string; total_steps: number }> {
-  const run = await apiClient.runWorkflow(workflowId);
+  const run = await apiClient.runWithParams(workflowId, runtimeParams || {}, goal);
   const runId = run.id;
   log.log(`[Agent] Run ${runId} started for workflow ${workflowId}`);
 
   const workflow = await apiClient.getWorkflow(workflowId);
+  const plannedSteps = run.execution_plan?.steps;
   // Mutable, loosely-typed steps array so plan_updates can INSERT/REMOVE/MODIFY
   // arbitrary shapes mid-run. We rely on the backend snapshot as the source of
   // truth for execution; this local cache only feeds the HEAL fallback.
-  const steps: Array<Record<string, unknown>> = (workflow.steps || []).map(
+  const stepsSource = Array.isArray(plannedSteps) && plannedSteps.length > 0
+    ? plannedSteps
+    : (workflow.steps || []);
+  const steps: Array<Record<string, unknown>> = stepsSource.map(
     (s) => ({ ...(s as unknown as Record<string, unknown>) }),
   );
   const totalSteps = steps.length;
@@ -537,7 +551,7 @@ async function executeAgentRun(
 
   let currentStepIndex = 0;
   let pollCount = 0;
-  let finalStatus = "completed";
+  let finalStatus = "running"; // "running" = in-progress; set to terminal value to exit loop
   // Phase 3: when the backend says PAUSE, don't bail immediately — re-poll
   // for up to `pauseRePollCap * 10s` ≈ 5 minutes so the auto-recovery
   // supervisor can produce a fresh decision. After the cap, surface
@@ -545,6 +559,7 @@ async function executeAgentRun(
   let pausePollCount = 0;
   const pauseRePollCap = 30;
 
+  try {
   while (true) {
     pollCount++;
 
@@ -560,7 +575,10 @@ async function executeAgentRun(
 
     const pageContext = await commandExecutor.captureContext(targetTabId);
 
-    if (pageContext.is_blocking) {
+    // unexpected_modal fires whenever role=dialog is visible — the EXPECTED state
+    // when a workflow step opens a form dialog (e.g. Liquidación). Only hard-stop
+    // for blockers the agent genuinely cannot handle (captcha, login form).
+    if (pageContext.is_blocking && pageContext.blocking_type !== "unexpected_modal") {
       log.log(`[Agent] Blocking challenge: ${pageContext.blocking_type}`);
       await apiClient.pauseRun(runId, `Blocking: ${pageContext.blocking_type}`, currentStepIndex);
       orchestrator.notifyWaiting(runId, `Blocking: ${pageContext.blocking_type}`);
@@ -568,9 +586,15 @@ async function executeAgentRun(
       break;
     }
 
+    // Strip unexpected_modal from the context we send to the backend so it
+    // doesn't also return PAUSE — the agent should fill in-workflow dialogs.
+    const contextForPoll = pageContext.blocking_type === "unexpected_modal"
+      ? { ...pageContext, is_blocking: false, blocking_type: null }
+      : pageContext;
+
     log.log(`[Agent] Poll #${pollCount} step ${currentStepIndex}/${totalSteps}`);
     const pollResponse = await apiClient.agentPoll(runId, {
-      page_context: pageContext,
+      page_context: contextForPoll,
       current_step_index: currentStepIndex,
     });
 
@@ -636,6 +660,44 @@ async function executeAgentRun(
         break;
       }
 
+      case "WAIT": {
+        const waitMs = Math.min(5000, Math.max(500, pollResponse.wait_ms ?? 1500));
+        log.log(`[Agent] WAIT ${waitMs}ms: ${pollResponse.reasoning}`);
+        orchestrator.notifyRunning(workflow.name, currentStepIndex, totalSteps, runId);
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+
+      case "RESTART": {
+        const url = pollResponse.command?.value || pollResponse.command?.target || workflow.target_url;
+        if (!url) {
+          log.error("[Agent] RESTART without target URL");
+          finalStatus = "failed";
+          break;
+        }
+        log.log(`[Agent] Restarting run from ${url}`);
+        await chrome.tabs.update(targetTabId, { url });
+        await waitForTabLoad(targetTabId);
+        commandExecutor.clearTabCache(targetTabId);
+        currentStepIndex = 0;
+        continue;
+      }
+
+      case "ROLLBACK": {
+        const url = pollResponse.command?.value || pollResponse.command?.target;
+        if (!url) {
+          log.error("[Agent] ROLLBACK without checkpoint URL");
+          finalStatus = "failed";
+          break;
+        }
+        log.log(`[Agent] Rolling back to step ${pollResponse.next_step_index}: ${url}`);
+        await chrome.tabs.update(targetTabId, { url });
+        await waitForTabLoad(targetTabId);
+        commandExecutor.clearTabCache(targetTabId);
+        currentStepIndex = pollResponse.next_step_index ?? currentStepIndex;
+        continue;
+      }
+
       case "PAUSE": {
         // Don't immediately break out of the loop — the auto-recovery
         // supervisor on the backend may produce a fresh decision within
@@ -682,6 +744,8 @@ async function executeAgentRun(
 
         if (adaptResultResponse.decision === "COMPLETED") {
           finalStatus = "completed";
+        } else if (adaptResultResponse.should_poll) {
+          continue;
         }
         break;
       }
@@ -709,30 +773,55 @@ async function executeAgentRun(
           if (url) {
             await chrome.tabs.update(targetTabId, { url });
             await waitForTabLoad(targetTabId);
+            // Allow SPA re-render after hash-based navigation (waitForTabLoad
+            // returns immediately for same-origin hash changes).
+            await new Promise((r) => setTimeout(r, 1500));
           }
-          await apiClient.agentResult(runId, {
+          const resultResponse = await apiClient.agentResult(runId, {
             step_index: currentStepIndex,
             success: true,
             error: null,
             page_context_after: null,
           });
+          if (resultResponse.decision === "COMPLETED") {
+            finalStatus = "completed";
+            break;
+          }
           currentStepIndex++;
         } else {
+          // Capture URL before so we can detect click-triggered navigation
+          let agentBeforeUrl: string | undefined;
+          try { agentBeforeUrl = (await chrome.tabs.get(targetTabId)).url; } catch { /* no-op */ }
+
           const execResult = await commandExecutor.executeCommand(
             targetTabId, cmd,
           );
 
           if (execResult.success) {
             log.log(`[Agent] Step ${currentStepIndex} OK`);
+            // Allow navigation triggered by the click to start, then wait for
+            // the page (or SPA) to settle before the next captureContext.
+            await new Promise((r) => setTimeout(r, 300));
+            try {
+              const afterTab = await chrome.tabs.get(targetTabId);
+              if (afterTab.status === "loading") {
+                await waitForTabLoad(targetTabId, 10000);
+              } else if (agentBeforeUrl && afterTab.url !== agentBeforeUrl) {
+                // Hash / SPA navigation: page stays "complete" but needs render time
+                await new Promise((r) => setTimeout(r, 2000));
+              }
+            } catch { /* no-op if tab gone */ }
           } else {
             log.error(`[Agent] Step ${currentStepIndex} failed: ${execResult.error}`);
           }
 
           let errorContext = "";
+          let pageContextAfter = null;
           if (!execResult.success && targetTabId) {
             try {
               const ctx = await commandExecutor.captureContext(targetTabId);
               errorContext = ctx.dom_snippet || ctx.visible_text || "";
+              pageContextAfter = ctx;
             } catch {
               // context capture best-effort
             }
@@ -742,7 +831,7 @@ async function executeAgentRun(
             step_index: currentStepIndex,
             success: execResult.success,
             error: execResult.error || null,
-            page_context_after: null,
+            page_context_after: pageContextAfter,
             error_context: errorContext || undefined,
           });
 
@@ -761,104 +850,8 @@ async function executeAgentRun(
             finalStatus = "completed";
             break;
           }
-          if (next === "PAUSE") {
-            orchestrator.notifyWaiting(
-              runId,
-              execResult.error || "Step failed repeatedly",
-            );
-            finalStatus = "waiting_for_user";
-            break;
-          }
-          if (next === "RETRY") {
-            await new Promise((r) => setTimeout(r, 500));
-            continue;
-          }
-          if (next === "ADAPT") {
-            const analysis = resultResponse.ai_analysis as
-              | {
-                  suggested_selectors?: Array<{ type: string; value: string; score?: number }>;
-                  suggested_action?: string;
-                  suggested_value?: string;
-                }
-              | undefined;
-            const suggestedAction = analysis?.suggested_action;
-            const suggestedValue = analysis?.suggested_value;
-            const adaptedCommand = analysis?.suggested_selectors;
-            const recordedStep = steps[currentStepIndex] as Record<string, unknown>;
-
-            if (suggestedAction === "navigate" && suggestedValue) {
-              log.log(`[Agent] Adapting step ${currentStepIndex}: navigate -> ${suggestedValue}`);
-              try {
-                await chrome.tabs.update(targetTabId, { url: suggestedValue });
-                await waitForTabLoad(targetTabId);
-                await apiClient.agentResult(runId, {
-                  step_index: currentStepIndex,
-                  success: true,
-                  error: null,
-                  page_context_after: null,
-                });
-                currentStepIndex++;
-              } catch (err) {
-                log.error(`[Agent] Adapted navigate failed: ${err}`);
-              }
-              continue;
-            }
-
-            if (adaptedCommand && adaptedCommand.length > 0) {
-              const action = (suggestedAction as "navigate" | "click" | "type" | "select" | "scroll" | "extract")
-                || (recordedStep.action_type as "navigate" | "click" | "type" | "select" | "scroll" | "extract")
-                || "click";
-              const value = suggestedValue ?? (recordedStep.value as string | null) ?? null;
-              log.log(`[Agent] Adapting step ${currentStepIndex} (action=${action}) with AI-suggested selectors`);
-              const adaptResult = await commandExecutor.executeCommand(
-                targetTabId,
-                {
-                  action,
-                  target: value,
-                  value,
-                  selector_chain: adaptedCommand,
-                  intent: (recordedStep.intent as string | null) || null,
-                  methods: [],
-                  timeout_ms: 15000,
-                  success_condition: null,
-                },
-              );
-              await apiClient.agentResult(runId, {
-                step_index: currentStepIndex,
-                success: adaptResult.success,
-                error: adaptResult.error || null,
-                page_context_after: null,
-              });
-              if (adaptResult.success) {
-                log.log(`[Agent] Adapted step ${currentStepIndex} succeeded`);
-                currentStepIndex++;
-              } else {
-                log.error(`[Agent] Adapted step ${currentStepIndex} still failed: ${adaptResult.error}`);
-              }
-            } else {
-              log.log("[Agent] ADAPT decision but no suggested selectors/action, re-polling");
-            }
-            continue;
-          }
-          if (next === "SKIP") {
-            log.log(`[Agent] AI recommends skipping step ${currentStepIndex}`);
-            currentStepIndex = resultResponse.next_step_index ?? currentStepIndex + 1;
-            continue;
-          }
-          if (next === "HEAL") {
-            const healed = await tryHealStep(
-              runId, currentStepIndex, steps[currentStepIndex],
-              targetTabId, workflow.name, totalSteps,
-            );
-            await apiClient.agentResult(runId, {
-              step_index: currentStepIndex,
-              success: healed,
-              error: healed ? null : "Healing exhausted",
-              page_context_after: null,
-            });
-            if (healed) {
-              currentStepIndex++;
-            }
+          if (resultResponse.should_poll) {
+            log.log(`[Agent] Step ${currentStepIndex} failed; re-polling for a new strategy`);
             continue;
           }
           if (execResult.success) {
@@ -874,13 +867,42 @@ async function executeAgentRun(
         break;
     }
 
-    if (finalStatus !== "completed") break;
+    if (finalStatus !== "running") break;
 
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  orchestrator.notifyIdle();
-  orchestrator.broadcastState();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`[Agent] Run loop crashed: ${message}`);
+    try {
+      await apiClient.pauseRun(
+        runId,
+        `Extension agent stopped unexpectedly: ${message}`,
+        currentStepIndex,
+      );
+    } catch (pauseErr) {
+      log.error("[Agent] Failed to pause crashed run:", pauseErr);
+    }
+    orchestrator.notifyWaiting(
+      runId,
+      `Extension agent stopped unexpectedly: ${message}`,
+    );
+    finalStatus = "waiting_for_user";
+  }
+
+  if (finalStatus === "completed") {
+    orchestrator.notifyIdle();
+    orchestrator.broadcastState();
+  } else if (finalStatus === "failed") {
+    orchestrator.notifyFailed(
+      workflow.name,
+      currentStepIndex,
+      totalSteps,
+      runId,
+      "Agent run failed",
+    );
+  }
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }
 
@@ -1010,10 +1032,16 @@ async function tryHealStep(
 
 chrome.runtime.onMessageExternal.addListener(
   (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void) => {
-    const msg = message as { type: string; workflowId?: string; tabId?: number };
+    const msg = message as {
+      type: string;
+      workflowId?: string;
+      tabId?: number;
+      goal?: string;
+      params?: Record<string, unknown>;
+    };
     if (msg.type === "RUN_WORKFLOW" && msg.workflowId) {
       log.log(`[External] RUN_WORKFLOW for ${msg.workflowId}`);
-      executeAgentRun(msg.workflowId, msg.tabId)
+      executeAgentRun(msg.workflowId, msg.tabId, msg.goal, msg.params)
         .then((result) => sendResponse({ type: "RUN_STARTED", run: result }))
         .catch((err) => sendResponse({ type: "RUN_FAILED", error: String(err) }));
       return true;
@@ -1025,8 +1053,45 @@ chrome.runtime.onMessageExternal.addListener(
 chrome.alarms.create("keepAlive", { periodInMinutes: 4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "keepAlive") {
-    fetch("http://localhost:8081/v1/health").catch(() => {});
+    Promise.allSettled([
+      fetch(`${API_BASE_URL}/health`, { signal: AbortSignal.timeout(3000) }),
+      fetch(DASHBOARD_ORIGIN, { method: "HEAD", signal: AbortSignal.timeout(3000) }),
+    ]).then(([be, dash]) => {
+      chrome.storage.session.set({
+        connStatus: {
+          backend: be.status === "fulfilled" && be.value.ok ? "up" : "down",
+          dashboard: dash.status === "fulfilled" ? "up" : "down",
+          checkedAt: Date.now(),
+        },
+      });
+    });
   }
+});
+
+// Fallback navigate event capture: when a tab completes loading during an
+// active recording session, synthesize a "navigate" event so page transitions
+// are represented in the workflow even if the content-script click message
+// was lost mid-navigation.
+const _recentNavigateUrls = new Map<number, string>();
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  if (!orchestrator.isRecording) return;
+  const url = tab.url || "";
+  if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url === "about:blank") return;
+  // Deduplicate: skip if this exact URL was already recorded for this tab.
+  if (_recentNavigateUrls.get(tabId) === url) return;
+  _recentNavigateUrls.set(tabId, url);
+  orchestrator.pushEvent({
+    event_type: "navigate",
+    payload: {
+      target: {},
+      intent: `Navigate to ${url}`,
+      value: url,
+    },
+    page_url: url,
+    page_title: tab.title || "",
+    timestamp: new Date().toISOString(),
+  }).catch(() => {});
 });
 
 chrome.action.onClicked.addListener(() => {

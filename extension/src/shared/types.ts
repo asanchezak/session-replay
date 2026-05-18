@@ -62,6 +62,7 @@ export interface ExecutionRun {
   current_step_index: number;
   pause_reason?: string;
   error_summary?: string;
+  extracted_data?: Record<string, unknown>[];
   started_at?: string;
   ended_at?: string;
 }
@@ -173,9 +174,10 @@ export interface AgentDecision {
   decision:
     | "EXECUTE"
     | "SKIP"
-    | "RETRY"
-    | "HEAL"
     | "ADAPT"
+    | "WAIT"
+    | "RESTART"
+    | "ROLLBACK"
     | "PAUSE"
     | "COMPLETED";
   confidence: number;
@@ -231,7 +233,10 @@ export interface AgentPollResponse {
   command: AgentCommand | null;
   next_step_index: number | null;
   pause_reason: string | null;
+  wait_ms?: number | null;
+  rollback_to?: number | null;
   requires_human: boolean;
+  plan_updates?: Array<{ operation: string; step_index: number; new_step?: Record<string, unknown>; reason?: string }>;
 }
 
 export interface AgentResultRequest {
@@ -246,6 +251,7 @@ export interface AgentResultResponse {
   accepted: boolean;
   decision: string | null;
   next_step_index: number | null;
+  should_poll?: boolean;
   ai_analysis?: {
     likely_cause: string;
     analysis: string;

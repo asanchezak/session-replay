@@ -74,11 +74,15 @@ class OdooAdapter(BaseAdapter):
         return mapping.get(resource, resource)
 
     async def list(
-        self, resource: str, filters: dict | None = None, limit: int = 100, offset: int = 0
+        self,
+        resource: str,
+        filters: dict | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        fields: list[str] | None = None,
     ) -> list[dict]:
         model = self._model_for(resource)
         domain = self._build_domain(filters)
-        fields = list((filters or {}).keys()) if filters else None
         return await self._client.search_read(model, domain, fields, limit=limit, offset=offset)
 
     async def get(self, resource: str, id: str) -> dict | None:

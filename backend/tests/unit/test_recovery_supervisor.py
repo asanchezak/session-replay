@@ -61,7 +61,7 @@ async def test_supervisor_resumes_with_navigate_plan_update(db_session, with_ai)
 
     supervisor = RecoverySupervisor(db_session)
 
-    async def fake_analyze(_run, _step_idx, _err, error_context=None, last_chance=False):
+    async def fake_analyze(_run, _step_idx, _err, error_context=None, last_chance=False, trigger="heal"):
         return {
             "likely_cause": "stale selector",
             "analysis": "navigate directly to the target",
@@ -190,3 +190,68 @@ async def test_supervisor_returns_false_when_ai_has_no_advice(db_session, with_a
     assert resumed is False
     await db_session.refresh(run)
     assert run.status == "waiting_for_user"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_completes_running_run_with_empty_snapshot(db_session):
+    """A run with no remaining steps must not stay running forever."""
+    svc = ExecutionService(db_session)
+    wf = Workflow(name="Empty Ghost WF", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(wf.id))
+    run.workflow_snapshot = _snapshot([])
+    run.total_steps = 0
+    run.status = "running"
+    await db_session.flush()
+
+    supervisor = RecoverySupervisor(db_session)
+    resumed = await supervisor.attempt_resume(run, forced=False)
+
+    assert resumed is True
+    await db_session.refresh(run)
+    assert run.status == "completed"
+    assert run.total_steps == 0
+
+    result = await db_session.execute(
+        select(EventLog).where(
+            EventLog.run_id == run.id,
+            EventLog.event_type == "run_auto_completed",
+        )
+    )
+    assert result.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_supervisor_pauses_running_run_after_stale_auto_resume(db_session):
+    """If no extension activity follows an auto recovery, do not keep deleting
+    or mutating steps on every supervisor tick."""
+    svc = ExecutionService(db_session)
+    wf = Workflow(name="Stale Recovery WF", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(wf.id))
+    run.workflow_snapshot = _snapshot([_step(0), _step(1)])
+    run.total_steps = 2
+    run.status = "running"
+    await db_session.flush()
+
+    from services.audit import AppendEvent, AuditService
+
+    await AuditService(db_session).append(AppendEvent(
+        event_type="run_auto_resumed",
+        payload={"step_index": 0, "attempt": 1},
+        run_id=str(run.id),
+    ))
+
+    supervisor = RecoverySupervisor(db_session)
+    supervisor.agent._analyze_failure = AsyncMock()
+
+    resumed = await supervisor.attempt_resume(run, forced=False)
+
+    assert resumed is False
+    await db_session.refresh(run)
+    assert run.status == "waiting_for_user"
+    assert "extension did not report progress" in (run.pause_reason or "")
+    assert len(run.workflow_snapshot["steps"]) == 2
+    supervisor.agent._analyze_failure.assert_not_awaited()
