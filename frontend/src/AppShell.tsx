@@ -4,7 +4,6 @@ import { LayoutDashboard, GitBranch, Play, ScrollText, Cable, Settings, Search, 
 import ErrorBoundary from "./components/ErrorBoundary";
 import InterventionModal from "./components/InterventionModal";
 import Breadcrumbs from "./components/Breadcrumbs";
-import RightDrawer from "./components/RightDrawer";
 import { useApi } from "./hooks/useApi";
 import { logger } from "./lib/logger";
 
@@ -25,7 +24,6 @@ export default function AppShell() {
     pause_reason?: string;
     error_summary?: string;
   } | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const { request } = useApi();
   const navigate = useNavigate();
   const location = window.location;
@@ -85,7 +83,6 @@ export default function AppShell() {
           </ErrorBoundary>
         </main>
       </div>
-      <RightDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       {waitingRun && !onCurrentRunPage && !isDismissed && (
         <InterventionModal
           runId={waitingRun.id}

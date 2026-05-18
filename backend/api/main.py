@@ -19,6 +19,7 @@ from api.v1.client_logs import router as client_logs_router
 from api.v1.connectors import router as connectors_router
 from api.v1.debug import router as debug_router
 from api.v1.events import router as events_router
+from api.v1.interventions import router as interventions_router
 from api.v1.integrations import router as integrations_router
 from api.v1.runs import router as runs_router
 from api.v1.settings import router as settings_router
@@ -27,7 +28,6 @@ from core.config import settings
 from core.database import engine
 from core.models import Base
 from services.log_service import get_logger
-from services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
 log = get_logger()
@@ -40,15 +40,16 @@ async def lifespan(_app: FastAPI):
     settings.check_insecure_defaults()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    OutboxService.start_processor(_app)
     # Recovery supervisor — autonomously unsticks paused runs (Phase 3)
     from services.recovery_supervisor import RecoverySupervisor
+    from services.retention_supervisor import RetentionSupervisor
     RecoverySupervisor.start_supervisor(_app)
+    RetentionSupervisor.start_supervisor(_app)
     yield
-    if hasattr(_app.state, "outbox_processor"):
-        _app.state.outbox_processor.cancel()
     if hasattr(_app.state, "recovery_supervisor"):
         _app.state.recovery_supervisor.cancel()
+    if hasattr(_app.state, "retention_supervisor"):
+        _app.state.retention_supervisor.cancel()
     await engine.dispose()
 
 
@@ -189,6 +190,7 @@ async def global_exception_handler(_request: Request, exc: Exception):
 
 app.include_router(agent_router, prefix="/v1")
 app.include_router(events_router, prefix="/v1")
+app.include_router(interventions_router, prefix="/v1")
 app.include_router(workflows_router, prefix="/v1")
 app.include_router(runs_router, prefix="/v1")
 app.include_router(audit_router, prefix="/v1")

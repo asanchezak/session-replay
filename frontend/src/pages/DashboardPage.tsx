@@ -52,7 +52,7 @@ export default function DashboardPage() {
     <div>
       <h1 className="text-xl font-semibold mb-6 text-text-primary">Dashboard</h1>
 
-      <div className="grid grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6">
         <Card>
           <div className="text-text-secondary text-xs mb-1 flex items-center gap-2">
             <GitBranch size={12} /> Active Workflows
@@ -121,7 +121,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         <Card>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-medium text-text-primary">Recent Runs</h2>
@@ -140,16 +140,16 @@ export default function DashboardPage() {
           ) : (
             <div className="space-y-2">
               {recentRuns.map((run) => (
-                <div
+                <button
                   key={run.id}
                   onClick={() => navigate(`/runs/${run.id}`)}
-                  className="flex items-center justify-between py-2 px-3 rounded-md hover:bg-bg-elevated cursor-pointer transition-colors"
+                  className="w-full flex items-center justify-between py-2 px-3 rounded-md hover:bg-bg-elevated cursor-pointer transition-colors text-left"
                 >
                   <span className="text-sm text-text-primary">
                     Run #{run.id.slice(0, 6)}
                   </span>
                   <StatusBadge status={run.status as any} size="sm" />
-                </div>
+                </button>
               ))}
               {recentRuns.length === 0 && (
                 <div className="text-text-secondary text-sm">No runs yet.</div>
@@ -162,12 +162,13 @@ export default function DashboardPage() {
           <h2 className="text-sm font-medium text-text-primary mb-3">Workflow Templates</h2>
           <div className="space-y-2">
             {["Search & Extract", "Fill & Submit", "Open & Inspect"].map((tpl) => (
-              <div
+              <button
                 key={tpl}
+                onClick={() => navigate("/workflows")}
                 className="py-2 px-3 rounded-md hover:bg-bg-elevated cursor-pointer transition-colors text-sm text-text-secondary hover:text-text-primary"
               >
                 {tpl}
-              </div>
+              </button>
             ))}
           </div>
         </Card>

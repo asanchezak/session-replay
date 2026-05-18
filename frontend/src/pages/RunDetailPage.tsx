@@ -414,7 +414,7 @@ export default function RunDetailPage() {
           </div>
           <div className="flex items-center gap-4 text-xs text-text-secondary">
             {workflow && <span className="font-mono text-text-gray">#{run.id.slice(0, 8)}</span>}
-            <span>Step {run.current_step_index} of {run.total_steps}</span>
+            <span>Step {run.current_step_index + 1} of {run.total_steps}</span>
             {run.started_at && <span>Started {formatTime(run.started_at)}</span>}
             {run.ended_at && <span>Ended {formatTime(run.ended_at)}</span>}
             {!run.ended_at && run.started_at && (

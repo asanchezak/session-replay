@@ -29,10 +29,6 @@ class UpdateParameterRequest(BaseModel):
     validation_rules: dict | None = None
 
 
-class RunWithParamsRequest(BaseModel):
-    runtime_params: dict = Field(default_factory=dict, description="key-value pairs for parameter substitution")
-
-
 def _not_found(msg: str):
     return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": msg}})
 
@@ -113,7 +109,6 @@ async def get_analysis(workflow_id: str, db: AsyncSession = Depends(get_db)):
     phases = await svc.get_phases(workflow_id)
     parameters = await svc.get_parameters(workflow_id)
     output_spec = await svc.get_output_spec(workflow_id)
-    await svc.get_template(workflow_id)
 
     return {
         "workflow_id": workflow_id,

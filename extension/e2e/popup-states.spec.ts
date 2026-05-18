@@ -3,7 +3,8 @@
  *
  * Drives the orchestrator's broadcastState/notify* methods from the
  * service worker and verifies the popup DOM renders correctly for:
- *   idle, recording, running, recovering, waiting_for_user, error
+ *   idle, recording, running, running_parameterized, recovering,
+ *   waiting_for_user, failed, error
  *
  * This catches runtime render bugs: wrong text, missing buttons,
  * broken progress bars, invisible views, etc.
@@ -156,38 +157,63 @@ test.describe("Popup state views", () => {
     await popup.page.close();
   });
 
-  test.fail(
-    "'failed' state is not rendered — App.tsx has no handler for state.type === 'failed'",
-    async ({ context, extensionId, errors }) => {
-      const popup = await new PopupPage(await context.newPage(), extensionId);
-      await popup.open();
-      await popup.page.waitForTimeout(1000);
+  test("'failed' state renders error summary", async ({ context, extensionId, errors }) => {
+    const popup = await new PopupPage(await context.newPage(), extensionId);
+    await popup.open();
+    await popup.page.waitForTimeout(1000);
 
-      const sw = context.serviceWorkers()[0];
-      await sw.evaluate(() => {
-        chrome.runtime.sendMessage({
-          type: "STATE_UPDATE",
-          state: {
-            type: "failed",
-            workflow_name: "Failed Run",
-            current_step: 3,
-            total_steps: 5,
-            run_id: "run-fail-1",
-            error: "Selector not found",
-          },
-        });
+    const sw = context.serviceWorkers()[0];
+    await sw.evaluate(() => {
+      chrome.runtime.sendMessage({
+        type: "STATE_UPDATE",
+        state: {
+          type: "failed",
+          workflow_name: "Failed Run",
+          current_step: 3,
+          total_steps: 5,
+          run_id: "run-fail-1",
+          error: "Selector not found",
+        },
       });
-      await popup.page.waitForTimeout(500);
+    });
+    await popup.page.waitForTimeout(500);
 
-      // This fails today because App.tsx doesn't handle the "failed" state.
-      // The popup would show an empty content area when a run fails.
-      await expect(popup.page.getByText("Run Failed")).toBeVisible();
-      await expect(popup.page.getByText("Selector not found")).toBeVisible();
+    await expect(popup.page.getByText("Error")).toBeVisible();
+    await expect(popup.page.getByText(/Failed Run failed at step 3\/5/)).toBeVisible();
+    await expect(popup.page.getByText("Selector not found")).toBeVisible();
 
-      expect(errors.filter(e => e.type === "console")).toHaveLength(0);
-      await popup.page.close();
-    },
-  );
+    expect(errors.filter(e => e.type === "console")).toHaveLength(0);
+    await popup.page.close();
+  });
+
+  test("running_parameterized state reuses running view", async ({ context, extensionId, errors }) => {
+    const popup = await new PopupPage(await context.newPage(), extensionId);
+    await popup.open();
+    await popup.page.waitForTimeout(1000);
+
+    const sw = context.serviceWorkers()[0];
+    await sw.evaluate(() => {
+      chrome.runtime.sendMessage({
+        type: "STATE_UPDATE",
+        state: {
+          type: "running_parameterized",
+          workflow_name: "Param Workflow",
+          current_step: 1,
+          total_steps: 4,
+          run_id: "run-param-1",
+          params: { query: "qa engineer" },
+        },
+      });
+    });
+    await popup.page.waitForTimeout(500);
+
+    await expect(popup.page.getByText("Param Workflow")).toBeVisible();
+    await expect(popup.page.getByText("Step 1/4")).toBeVisible();
+    await expect(popup.page.getByText("25% complete")).toBeVisible();
+
+    expect(errors.filter(e => e.type === "console")).toHaveLength(0);
+    await popup.page.close();
+  });
 
   test("state transitions: idle → recording → idle", async ({ context, extensionId, errors }) => {
     const popup = await new PopupPage(await context.newPage(), extensionId);

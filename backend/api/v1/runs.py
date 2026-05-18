@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -644,9 +644,12 @@ async def record_intervention(
 
 
 class ExtractionResultRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     step_index: int
     data: list[dict] = []
     output_schema: dict | None = None
+    legacy_schema: dict | None = Field(default=None, alias="schema")
     url: str | None = None
 
 
@@ -668,7 +671,11 @@ async def report_extraction(
         payload={
             "step_index": req.step_index,
             "data": req.data,
-            "output_schema": req.output_schema,
+            "output_schema": (
+                req.output_schema
+                if req.output_schema is not None
+                else req.legacy_schema
+            ),
             "url": req.url,
         },
         run_id=run_id,

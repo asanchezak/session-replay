@@ -56,14 +56,22 @@ export function RunParameterModal({
     const trimmedGoal = goal.trim();
     onRun(values, trimmedGoal || undefined);
   };
+  const headingId = "run-parameter-modal-title";
+  const descriptionId = "run-parameter-modal-description";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-[#242836] rounded-2xl border border-[#2D3148] shadow-lg w-full max-w-lg mx-4 p-6">
-        <h2 className="text-lg font-semibold text-[#E8EAED] mb-1">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="presentation">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        aria-describedby={descriptionId}
+        className="bg-[#242836] rounded-2xl border border-[#2D3148] shadow-lg w-full max-w-lg mx-4 p-6"
+      >
+        <h2 id={headingId} className="text-lg font-semibold text-[#E8EAED] mb-1">
           {title}
         </h2>
-        <p className="text-sm text-[#9AA0B0] mb-4">
+        <p id={descriptionId} className="text-sm text-[#9AA0B0] mb-4">
           {description}
         </p>
 

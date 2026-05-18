@@ -13,7 +13,11 @@ async def _create_active_wf(api_client: AsyncClient, name: str) -> str:
     wf_id = wf_resp.json()["id"]
     await api_client.post(
         f"/v1/workflows/{wf_id}/steps",
-        json={"step_index": 0, "action_type": "click", "selector_chain": {"type": "css", "value": "#x"}},
+        json={
+            "step_index": 0,
+            "action_type": "click",
+            "selector_chain": [{"type": "css", "value": "#x"}],
+        },
         headers=API_HEADERS,
     )
     await api_client.put(
@@ -271,6 +275,58 @@ async def test_intervention_recording(api_client: AsyncClient):
     )
     assert int_resp.status_code == 200
     assert int_resp.json()["trigger_reason"] == "CAPTCHA"
+
+    list_resp = await api_client.get(
+        "/v1/interventions", headers=API_HEADERS
+    )
+    assert list_resp.status_code == 200
+    items = list_resp.json()["interventions"]
+    assert any(i["run_id"] == run_id for i in items)
+
+
+@pytest.mark.asyncio
+async def test_extraction_schema_compat(api_client: AsyncClient):
+    wf_id = await _create_active_wf(api_client, "Extraction Schema Test")
+    run_resp = await api_client.post(
+        f"/v1/workflows/{wf_id}/run", headers=API_HEADERS
+    )
+    run_id = run_resp.json()["id"]
+
+    legacy_resp = await api_client.post(
+        f"/v1/runs/{run_id}/extraction",
+        json={
+            "step_index": 1,
+            "data": [{"title": "Engineer"}],
+            "schema": {"type": "array"},
+            "url": "https://example.com/jobs",
+        },
+        headers=API_HEADERS,
+    )
+    assert legacy_resp.status_code == 200
+
+    modern_resp = await api_client.post(
+        f"/v1/runs/{run_id}/extraction",
+        json={
+            "step_index": 2,
+            "data": [{"title": "Designer"}],
+            "output_schema": {"type": "array", "items": {"type": "object"}},
+            "url": "https://example.com/jobs",
+        },
+        headers=API_HEADERS,
+    )
+    assert modern_resp.status_code == 200
+
+    audit_resp = await api_client.get(f"/v1/audit/{run_id}", headers=API_HEADERS)
+    assert audit_resp.status_code == 200
+    extraction_events = [
+        e for e in audit_resp.json()["events"] if e["event_type"] == "extraction"
+    ]
+    assert len(extraction_events) >= 2
+    assert extraction_events[-2]["payload"]["output_schema"] == {"type": "array"}
+    assert extraction_events[-1]["payload"]["output_schema"] == {
+        "type": "array",
+        "items": {"type": "object"},
+    }
 
 
 @pytest.mark.asyncio

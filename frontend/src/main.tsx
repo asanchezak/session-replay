@@ -11,6 +11,7 @@ import AuditPage from "./pages/AuditPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import SettingsPage from "./pages/SettingsPage";
 import HumanInterventionPage from "./pages/HumanInterventionPage";
+import TracePage from "./pages/TracePage";
 import NotFoundPage from "./pages/NotFoundPage";
 import "./index.css";
 
@@ -28,7 +29,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/connectors" element={<ConnectorsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/runs/:id/trace" element={<></>} />
+          <Route path="/runs/:id/trace" element={<TracePage />} />
           <Route path="/interventions" element={<HumanInterventionPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

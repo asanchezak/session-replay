@@ -270,10 +270,15 @@ export class ApiClient {
     }>("GET", `/workflows/${workflowId}/template`);
   }
 
-  async reportExtraction(runId: string, stepIndex: number, data: Record<string, unknown>[]) {
+  async reportExtraction(
+    runId: string,
+    stepIndex: number,
+    data: Record<string, unknown>[],
+    outputSchema?: Record<string, unknown> | null,
+  ) {
     return this.request<{ status: string; records: number }>(
       "POST", `/runs/${runId}/extraction`,
-      { step_index: stepIndex, data, schema: null, url: null },
+      { step_index: stepIndex, data, output_schema: outputSchema ?? null, url: null },
     );
   }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import Banner from "../components/Banner";
@@ -15,6 +16,7 @@ interface Connector {
 }
 
 export default function ConnectorsPage() {
+  const navigate = useNavigate();
   const { data: connectors, loading, error, fetchData } = useApiData<Connector[]>();
   const { request } = useApi();
   const [testing, setTesting] = useState<string | null>(null);
@@ -25,7 +27,7 @@ export default function ConnectorsPage() {
 
   useEffect(() => {
     fetchData("GET", "/connectors");
-  }, []);
+  }, [fetchData]);
 
   const handleTest = async (connectorId: string) => {
     setTesting(connectorId);
@@ -141,12 +143,20 @@ export default function ConnectorsPage() {
                     <RefreshCw size={12} className={testing === conn.id ? "animate-spin" : ""} />
                     Test
                   </button>
-                  <button className="px-3 py-1.5 bg-[#242836] text-[#E8EAED] text-xs rounded-md hover:bg-[#2A2E3D] transition-colors">
+                  <button
+                    onClick={() => navigate("/settings")}
+                    className="px-3 py-1.5 bg-[#242836] text-[#E8EAED] text-xs rounded-md hover:bg-[#2A2E3D] transition-colors"
+                  >
                     Configure
                   </button>
-                  <button className="px-3 py-1.5 bg-[#242836] text-[#E8EAED] text-xs rounded-md hover:bg-[#2A2E3D] transition-colors">
+                  <a
+                    href="http://localhost:8082"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 bg-[#242836] text-[#E8EAED] text-xs rounded-md hover:bg-[#2A2E3D] transition-colors"
+                  >
                     View Logs
-                  </button>
+                  </a>
                 </div>
               </div>
               {testResult && testResult.id === conn.id && (

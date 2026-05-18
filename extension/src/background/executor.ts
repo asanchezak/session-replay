@@ -3,6 +3,7 @@ import { orchestrator } from "./orchestrator";
 import type { BackgroundToContentMessage } from "../shared/messaging";
 import type { RecordedStep, SemanticWorkflowInfo, ExtractedData } from "../shared/types";
 import { createLogger } from "../shared/logger";
+import { executeWithRetry, initRunState, shouldRetry as shouldRetryCode } from "./retry";
 
 const log = createLogger("executor");
 
@@ -34,16 +35,33 @@ export class StepExecutor {
       },
     };
 
+    initRunState(runId);
     try {
-      const response = await chrome.tabs.sendMessage(tabId, bgStep);
-      const result = response as { type: string; success: boolean; error?: string };
-      if (result.type === "STEP_RESULT") {
-        return { success: result.success, error: result.error };
-      }
-      return { success: false, error: "Unexpected response from content script" };
+      const response = await executeWithRetry(
+        runId,
+        async () => {
+          const attemptResponse = await chrome.tabs.sendMessage(tabId, bgStep);
+          const attempt = attemptResponse as { type: string; success: boolean; error?: string };
+          if (attempt.type !== "STEP_RESULT") {
+            throw new Error("Unexpected response from content script");
+          }
+          if (!attempt.success) {
+            throw new Error(attempt.error || "STEP_FAILED");
+          }
+          return attempt;
+        },
+        (error) => {
+          const code = error instanceof Error ? error.message : String(error);
+          return shouldRetryCode(code);
+        },
+        { maxRetries: 2, intervalMs: 300, onFailure: "retry" },
+      );
+
+      return { success: true, error: response.error };
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       log.error(`Step ${step.step_index}/${totalSteps} execution error:`, err);
-      return { success: false, error: String(err) };
+      return { success: false, error: message };
     }
   }
 

@@ -5,7 +5,7 @@ import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
 import { formatTime } from "../lib/formatTime";
-import { GitBranch, Plus, Search } from "lucide-react";
+import { GitBranch, Plus } from "lucide-react";
 
 export default function WorkflowsPage() {
   const navigate = useNavigate();
@@ -35,7 +35,10 @@ export default function WorkflowsPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold text-text-primary">Workflows</h1>
-        <button className="flex items-center gap-2 px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors">
+        <button
+          onClick={() => navigate("/dashboard")}
+          className="flex items-center gap-2 px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
+        >
           <Plus size={14} /> New
         </button>
       </div>
@@ -67,11 +70,17 @@ export default function WorkflowsPage() {
               description="Record your first workflow from the browser extension, or start from a template."
               actions={
                 <>
-                  <button className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors">
+                  <button
+                    onClick={() => navigate("/settings")}
+                    className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
+                  >
                     Install Extension
                   </button>
-                  <button className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors">
-                    Use Template
+                  <button
+                    onClick={() => navigate("/dashboard")}
+                    className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors"
+                  >
+                    Open Dashboard
                   </button>
                 </>
               }

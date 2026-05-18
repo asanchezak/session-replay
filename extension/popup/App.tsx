@@ -311,12 +311,25 @@ function App() {
           runId={state.run_id}
         />
       )}
+      {state.type === "running_parameterized" && (
+        <RunningView
+          workflowName={state.workflow_name}
+          currentStep={state.current_step}
+          totalSteps={state.total_steps}
+          runId={state.run_id}
+        />
+      )}
       {state.type === "recovering" && (
         <RecoveringView
           workflowName={state.workflow_name}
           currentStep={state.current_step}
           totalSteps={state.total_steps}
           error={state.error}
+        />
+      )}
+      {state.type === "failed" && (
+        <ErrorView
+          message={`${state.workflow_name} failed at step ${state.current_step}/${state.total_steps}: ${state.error}`}
         />
       )}
       {state.type === "waiting_for_user" && <WaitingView reason={state.reason} />}

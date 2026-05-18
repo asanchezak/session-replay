@@ -122,7 +122,7 @@ export default function RunsPage() {
               <StatusBadge status={r.status as any} size="sm" />
             )},
             { key: "step", label: "Step", render: (r: RunSummary) => (
-              <span className="text-text-secondary">{r.current_step_index}/{r.total_steps}</span>
+              <span className="text-text-secondary">{r.current_step_index + 1}/{r.total_steps}</span>
             )},
             { key: "error", label: "Error", render: (r: RunSummary) => (
               <span className="text-error text-xs">{r.error_summary || "—"}</span>
@@ -150,7 +150,10 @@ export default function RunsPage() {
               title="No runs yet"
               description="Start a workflow to see execution history here."
               actions={
-                <button className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors">
+                <button
+                  onClick={() => navigate("/workflows")}
+                  className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
+                >
                   Browse Workflows
                 </button>
               }

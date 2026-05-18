@@ -482,7 +482,12 @@ async function executeWorkflowRun(
           steps.length,
         );
         if (extraction && extraction.data.length > 0) {
-          await apiClient.reportExtraction(runId, extraction.step_index, extraction.data);
+          await apiClient.reportExtraction(
+            runId,
+            extraction.step_index,
+            extraction.data,
+            extraction.schema,
+          );
           log.log(`Extracted ${extraction.data.length} records from run ${runId}`);
         }
       } catch (err) {
