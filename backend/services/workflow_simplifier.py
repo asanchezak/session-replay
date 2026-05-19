@@ -43,8 +43,12 @@ SEARCH_ENGINE_DOMAINS: frozenset[str] = frozenset({
 
 # --- Pass 2 constants -------------------------------------------------------
 
-# Random/session CSS IDs: #<optional-underscore><letter><15+ alphanumeric/dash/underscore>
-_EPHEMERAL_CSS_ID = re.compile(r"^#[_a-zA-Z][A-Za-z0-9_\-]{14,}$")
+# Leading-underscore session IDs (React/framework-generated): #_<14+ chars>
+_EPHEMERAL_CSS_ID_LEADING_UNDERSCORE = re.compile(r"^#_[A-Za-z0-9_\-]{14,}$")
+# A token (between `-`/`_`) is "random-looking" when it's 12+ chars AND mixes
+# letters with digits. Catches `#a8f9b4c2d1e7f3a9` and `#sess7f3a9b4c2d1e` while
+# leaving `#email-input-field` and `#nav-2024-q3` alone.
+_HIGH_ENTROPY_TOKEN = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{12,}$")
 # Pure positional XPath with no semantic anchor: /html/body/div[1]/div[2]/...
 _POSITIONAL_XPATH = re.compile(r"^(/[a-zA-Z]+\[\d+\]){3,}$")
 
@@ -100,7 +104,7 @@ def _is_ephemeral_selector(sel: dict) -> bool:
     value = sel.get("value") or ""
 
     if sel_type == "css":
-        if _EPHEMERAL_CSS_ID.match(value):
+        if _is_ephemeral_css_id(value):
             return True
         # Deep nth-of-type chains (4+ levels)
         if value.count(":nth-of-type") >= 4:
@@ -109,6 +113,18 @@ def _is_ephemeral_selector(sel: dict) -> bool:
     if sel_type == "xpath" and _POSITIONAL_XPATH.match(value):
         return True
 
+    return False
+
+
+def _is_ephemeral_css_id(value: str) -> bool:
+    if not value.startswith("#"):
+        return False
+    if _EPHEMERAL_CSS_ID_LEADING_UNDERSCORE.match(value):
+        return True
+    body = value[1:]
+    for token in re.split(r"[-_]", body):
+        if _HIGH_ENTROPY_TOKEN.match(token):
+            return True
     return False
 
 
@@ -140,8 +156,6 @@ def _pass2_filter_selectors(steps: list[dict]) -> list[dict]:
         if chain:
             filtered = [sel for sel in chain if not _is_ephemeral_selector(sel)]
             s["selector_chain"] = filtered
-            if not filtered:
-                s["intent_only"] = True
 
         intent = s.get("intent") or ""
         if len(intent.split()) < 4:
@@ -163,38 +177,43 @@ def _is_search_engine_url(url: str) -> bool:
     return _extract_domain(url) in SEARCH_ENGINE_DOMAINS
 
 
-def _pass3_collapse(steps: list[dict]) -> list[dict]:
+def _pass3_collapse(
+    steps: list[dict],
+    phase_start_indices: set[int] | None = None,
+) -> list[dict]:
     if not steps:
         return steps
+    phase_starts = phase_start_indices or set()
 
     # Pattern A — Search detour collapse
-    # Find navigate steps that go to a real (non-search-engine) destination.
-    # Remove all preceding steps that are on search-engine domains.
-    # Work from the last navigate step backwards so we keep the final destination.
+    # Find the FIRST navigate that goes to a non-search-engine destination —
+    # that's the entry point into the real workflow. Drop everything before it.
+    # (Using the *last* such navigate is unsafe: a result/redirect URL after a
+    # button click would consume the click as part of the detour.)
     navigate_indices = [i for i, s in enumerate(steps) if s.get("action_type") == "navigate"]
 
-    final_destination_idx: int | None = None
-    for idx in reversed(navigate_indices):
+    first_destination_idx: int | None = None
+    for idx in navigate_indices:
         url = steps[idx].get("value") or ""
         if url and not _is_search_engine_url(url):
-            final_destination_idx = idx
+            first_destination_idx = idx
             break
 
-    if final_destination_idx is not None and final_destination_idx > 0:
+    if first_destination_idx is not None and first_destination_idx > 0:
         # Check if any earlier steps are on a search engine domain
-        preceding = steps[:final_destination_idx]
+        preceding = steps[:first_destination_idx]
         search_detour_present = any(
             s.get("action_type") == "navigate" and _is_search_engine_url(s.get("value") or "")
             for s in preceding
         )
         if search_detour_present:
-            # Keep only: steps after the last destination navigate (the on-site steps)
-            # plus the destination navigate itself
-            destination_and_after = steps[final_destination_idx:]
+            # Keep the entry navigate plus everything after — including any
+            # post-arrival clicks and subsequent same-site navigations.
+            destination_and_after = steps[first_destination_idx:]
             logger.info(
                 "Pass 3: collapsed search detour — removed %d steps before navigate to %s",
-                final_destination_idx,
-                steps[final_destination_idx].get("value"),
+                first_destination_idx,
+                steps[first_destination_idx].get("value"),
             )
             steps = destination_and_after
 
@@ -225,6 +244,38 @@ def _pass3_collapse(steps: list[dict]) -> list[dict]:
             continue  # duplicate — skip
         deduped.append(step)
 
+    # Pattern D — Drop trailing same-domain navigate that is a side-effect of
+    # the preceding click. Pages like speedtest.net change the URL when the
+    # test finishes (e.g. /es → /es/result/<id>); recording the result URL as
+    # a step would, on replay, jump to a stale result instead of starting a
+    # new test. The user-meaningful action is the click; the URL change is
+    # incidental.
+    #
+    # Constrain to same-domain to avoid dropping legitimate cross-site
+    # navigations the user performed after a click. The click's "context
+    # domain" is inferred from the most recent navigate before it.
+    if len(deduped) >= 2:
+        last = deduped[-1]
+        prev = deduped[-2]
+        if (last.get("action_type") == "navigate"
+                and prev.get("action_type") in {"click", "submit"}):
+            last_url = last.get("value") or ""
+            click_context_url = ""
+            for s in reversed(deduped[:-1]):
+                if s.get("action_type") == "navigate" and s.get("value"):
+                    click_context_url = s.get("value") or ""
+                    break
+            # Never drop a navigate that is the entry of a recorded phase —
+            # losing it would lose the checkpoint marker downstream.
+            last_idx = last.get("step_index")
+            is_phase_start = last_idx is not None and int(last_idx) in phase_starts
+            if last_url and click_context_url and _same_domain(last_url, click_context_url) and not is_phase_start:
+                logger.info(
+                    "Pass 3: dropped trailing side-effect navigate after click: %s",
+                    last_url,
+                )
+                deduped = deduped[:-1]
+
     return deduped
 
 
@@ -239,20 +290,39 @@ def _final_non_search_navigate_index(steps: list[dict]) -> int | None:
     return None
 
 
+# Selector-type priority for signature stability. Picks the most semantically
+# stable type present in the chain, regardless of chain order, so a reorder by
+# the AI doesn't flip the signature and fool the safety guard.
+_SIGNATURE_SELECTOR_PRIORITY = (
+    "text",
+    "accessibility",
+    "aria-label",
+    "aria",
+    "data-testid",
+    "anchor",
+    "css",
+    "xpath",
+)
+
+
 def _step_signature(step: dict) -> tuple[str, str, str]:
     action = str(step.get("action_type") or "")
     value = str(step.get("value") or "")
-    selector_value = ""
     chain = step.get("selector_chain") or []
+    by_type: dict[str, str] = {}
     if isinstance(chain, list):
         for sel in chain:
             if not isinstance(sel, dict):
                 continue
             sel_type = (sel.get("type") or "").lower()
-            if sel_type in {"text", "accessibility", "aria", "aria-label", "data-testid", "css", "xpath"}:
-                selector_value = str(sel.get("value") or "")
-                if selector_value:
-                    break
+            sel_value = str(sel.get("value") or "")
+            if sel_value and sel_type not in by_type:
+                by_type[sel_type] = sel_value
+    selector_value = ""
+    for t in _SIGNATURE_SELECTOR_PRIORITY:
+        if t in by_type:
+            selector_value = by_type[t]
+            break
     return action, value[:120], selector_value[:120]
 
 
@@ -359,6 +429,33 @@ def _reject_ai_candidate(
     return False
 
 
+def _merge_intent_enrichments(
+    baseline_steps: list[dict],
+    candidate_steps: list[dict],
+) -> list[dict]:
+    # When an AI candidate is rejected for structural reasons, salvage any
+    # intent text the AI improved. Walk both lists by signature; copy a
+    # longer, non-empty intent from the candidate onto the matching baseline
+    # step. Falls back to plain baseline if signatures don't align.
+    if not isinstance(candidate_steps, list) or len(candidate_steps) != len(baseline_steps):
+        return [dict(s) for s in baseline_steps]
+    merged: list[dict] = []
+    for base, cand in zip(baseline_steps, candidate_steps):
+        m = dict(base)
+        if not isinstance(cand, dict):
+            merged.append(m)
+            continue
+        if _step_signature(base) != _step_signature(cand):
+            merged.append(m)
+            continue
+        cand_intent = (cand.get("intent") or "").strip()
+        base_intent = (base.get("intent") or "").strip()
+        if cand_intent and len(cand_intent) > len(base_intent):
+            m["intent"] = cand_intent
+        merged.append(m)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Pass 3b — Checkpoint marking
 # ---------------------------------------------------------------------------
@@ -367,25 +464,39 @@ def _pass3b_mark_checkpoints(steps: list[dict], phases: list) -> list[dict]:
     if not phases:
         return steps
 
-    phase_start_indices: set[int] = set()
+    phase_start_indices: list[int] = []
     for phase in phases:
         idx = getattr(phase, "start_step_index", None)
         if idx is None and isinstance(phase, dict):
             idx = phase.get("start_step_index")
         if idx is not None:
-            phase_start_indices.add(int(idx))
+            phase_start_indices.append(int(idx))
 
-    result = []
-    for step in steps:
-        s = dict(step)
-        original_idx = s.get("step_index")
-        if (
-            s.get("action_type") == "navigate"
-            and original_idx is not None
-            and int(original_idx) in phase_start_indices
-        ):
-            s["checkpoint"] = True
-        result.append(s)
+    result = [dict(s) for s in steps]
+    surviving_navigate_indices: list[tuple[int, int]] = [
+        (int(s.get("step_index")), i)
+        for i, s in enumerate(result)
+        if s.get("action_type") == "navigate" and s.get("step_index") is not None
+    ]
+
+    for phase_start in phase_start_indices:
+        # Prefer an exact match; otherwise remap to the nearest surviving
+        # navigate whose original step_index is >= phase_start. This catches
+        # the case where Pass 3 collapsed the original phase-entry step.
+        exact = next(
+            (i for orig_idx, i in surviving_navigate_indices if orig_idx == phase_start),
+            None,
+        )
+        if exact is not None:
+            result[exact]["checkpoint"] = True
+            continue
+        successor = next(
+            (i for orig_idx, i in surviving_navigate_indices if orig_idx >= phase_start),
+            None,
+        )
+        if successor is not None:
+            result[successor]["checkpoint"] = True
+
     return result
 
 
@@ -417,12 +528,17 @@ def _build_simplification_prompt(
         "3. Any step sequence that represents getting to a URL already captured in a later navigate "
         "→ collapse to the direct navigate\n"
         "4. Any typo in typed values (context: goal above) → correct them\n"
-        "5. Steps on intermediate pages that are bypassed by a later navigate → remove them\n\n"
+        "5. Steps on intermediate pages that are bypassed by a later navigate → remove them, "
+        "but only when those steps did not produce data or trigger the later navigate\n\n"
         "Return ONLY a JSON array (same structure, same fields). Rules:\n"
         "- Minimum 1 step\n"
         "- Never add steps that weren't in the input\n"
-        "- Never remove the final meaningful navigate or click that achieves the goal\n"
+        "- Never remove the final click, type, submit, or select that achieves the goal, "
+        "even if a navigate follows it\n"
+        "- Never remove the final meaningful navigate that achieves the goal\n"
         "- Preserve all steps that happen on the destination page after arrival\n"
+        "- Trailing same-domain navigates that look like side-effects of a click have already "
+        "been removed by earlier passes; do not remove any more navigates after a click\n"
         "- Use the critical action hints to keep goal-achieving actions. You may remove only actions "
         "that are clearly redundant and not required for the goal.\n"
         "- Return each step with: action_type, intent, selector_chain, value, checkpoint\n"
@@ -531,18 +647,28 @@ class WorkflowSimplifier:
                     d["step_index"] = i
             normalized.append(d)
 
+        phase_starts: set[int] = set()
+        for phase in phases or []:
+            idx = getattr(phase, "start_step_index", None)
+            if idx is None and isinstance(phase, dict):
+                idx = phase.get("start_step_index")
+            if idx is not None:
+                phase_starts.add(int(idx))
+
         p1 = _pass1_clean_urls(normalized)
         p2 = _pass2_filter_selectors(p1)
-        p3 = _pass3_collapse(p2)
+        p3 = _pass3_collapse(p2, phase_start_indices=phase_starts)
         p3b = _pass3b_mark_checkpoints(p3, phases or [])
 
         # Pass 4 always runs — AI is a core system requirement
         p4 = await _pass4_ai_simplify(p3b, self.workflow_goal, self.target_url)
         if _reject_ai_candidate(p3b, p4):
+            merged = _merge_intent_enrichments(p3b, p4)
             logger.warning(
-                "Pass 4 candidate rejected by safety invariants; keeping pass-3 result"
+                "Pass 4 candidate rejected by safety invariants; keeping pass-3b result"
+                " with merged intents where matched"
             )
-            p4 = p3b
+            p4 = merged
 
         # Re-index steps sequentially
         for i, step in enumerate(p4):

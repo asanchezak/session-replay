@@ -141,18 +141,26 @@ export interface AnchorSelectorValue {
   offset_y?: number;
 }
 
+export interface StepMethod {
+  action_type: string;
+  selector_chain: SelectorSet[];
+  value?: string;
+}
+
 export interface StepToExecute {
   action_type: string;
   selector_chain: SelectorSet[];
   value?: string;
   intent?: string;
   force?: boolean;
+  methods?: StepMethod[];
 }
 
 export interface StepResult {
   success: boolean;
   error?: string;
   actual_url?: string;
+  via_method_index?: number;
 }
 
 function normalizeText(value: string): string {
@@ -507,7 +515,54 @@ function simulateNavigate(value?: string): { success: boolean; actual_url?: stri
   return { success: false };
 }
 
+const ELEMENT_FAILURE_CODES = new Set<string>([
+  "ELEMENT_NOT_FOUND",
+  "ELEMENT_NOT_VISIBLE",
+  "ELEMENT_NOT_ENABLED",
+  "ELEMENT_NOT_EDITABLE",
+  "ELEMENT_BLOCKED",
+  "ELEMENT_UNSTABLE",
+]);
+
+function _isElementFailure(result: StepResult): boolean {
+  if (result.success) return false;
+  const err = result.error || "";
+  if (ELEMENT_FAILURE_CODES.has(err)) return true;
+  // waitForElement reasons can be prefixed with code (e.g. "ELEMENT_BLOCKED: …")
+  for (const code of ELEMENT_FAILURE_CODES) {
+    if (err.startsWith(code)) return true;
+  }
+  return false;
+}
+
 export async function executeStep(step: StepToExecute): Promise<StepResult> {
+  const primary = await _executeStepInner(step);
+  if (primary.success || !_isElementFailure(primary)) return primary;
+
+  const methods = Array.isArray(step.methods) ? step.methods : [];
+  for (let i = 0; i < methods.length; i++) {
+    const m = methods[i];
+    if (!m || !Array.isArray(m.selector_chain) || m.selector_chain.length === 0) continue;
+    const attempt: StepToExecute = {
+      action_type: m.action_type || step.action_type,
+      selector_chain: m.selector_chain,
+      value: m.value !== undefined ? m.value : step.value,
+      intent: step.intent,
+      force: step.force,
+      // No methods: prevents recursion. One level of fallback only.
+    };
+    const result = await _executeStepInner(attempt);
+    if (result.success) {
+      return { ...result, via_method_index: i };
+    }
+    if (!_isElementFailure(result)) return result;
+  }
+
+  return primary;
+}
+
+
+async function _executeStepInner(step: StepToExecute): Promise<StepResult> {
   let element: Element | null = null;
   const hasSelectorChain = Array.isArray(step.selector_chain) && step.selector_chain.length > 0;
 

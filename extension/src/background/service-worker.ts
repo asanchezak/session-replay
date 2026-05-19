@@ -858,6 +858,7 @@ async function executeAgentRun(
             error: execResult.error || null,
             page_context_after: pageContextAfter,
             error_context: errorContext || undefined,
+            via_method_index: execResult.via_method_index,
           });
 
           const next = resultResponse.decision;

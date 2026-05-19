@@ -1017,14 +1017,17 @@ class AgentService:
             run.pause_reason = None
             run.error_summary = None
             await self.session.flush()
+            success_payload: dict = {
+                "step_index": req.step_index,
+                "action_type": action_type,
+                "success": True,
+                "page_url": getattr(req.page_context_after, "url", None),
+            }
+            if req.via_method_index is not None:
+                success_payload["via_method_index"] = req.via_method_index
             await self.audit.append(AppendEvent(
                 event_type="step_executed",
-                payload={
-                    "step_index": req.step_index,
-                    "action_type": action_type,
-                    "success": True,
-                    "page_url": getattr(req.page_context_after, "url", None),
-                },
+                payload=success_payload,
                 run_id=run_id,
             ))
             await self._audit_decision(

@@ -124,6 +124,10 @@ class ResultRequest(BaseModel):
     error: str | None = None
     page_context_after: PageContext | None = None
     error_context: str | None = None
+    # Index into the step's `methods` array, set by the executor when the
+    # primary selector chain failed and a fallback method recovered the step.
+    # None when the primary chain succeeded.
+    via_method_index: int | None = None
 
 
 class ResultResponse(BaseModel):

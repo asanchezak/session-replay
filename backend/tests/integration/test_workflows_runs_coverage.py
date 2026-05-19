@@ -121,6 +121,68 @@ async def test_record_workflow_covers_analysis_naming_and_simplifier(api_client,
     assert body["step_count"] == 1
     assert body["simplified_from"] == 2
     assert body["analysis"]["goal"] == "Do task"
+    assert body["simplification_status"] == "succeeded"
+    assert body["simplification_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_workflow_idempotency(api_client, monkeypatch):
+    from services import idempotency_cache as ic
+
+    # Use a fresh cache so other tests don't bleed state in.
+    fresh = ic.IdempotencyCache(ttl_seconds=600)
+    monkeypatch.setattr(ic, "_default_cache", fresh)
+
+    async def _no_analysis(_self, _workflow_id):
+        return types.SimpleNamespace(
+            workflow_goal="goal", workflow_summary="s", domain_context="d",
+            confidence_overall=0.5, replay_strategy="parameterized",
+            is_user_edited=False, ambiguity_notes=[], parameters=[],
+            output_spec=types.SimpleNamespace(type="unknown", schema=None, confidence=0.0),
+            template_version=2,
+        )
+
+    monkeypatch.setattr(
+        "services.semantic_analysis_service.SemanticAnalysisService.analyze_workflow",
+        _no_analysis,
+    )
+
+    class _Provider:
+        async def generate(self, *_args, **_kwargs):
+            from ai.client import AIResponse
+            return AIResponse(content="Some Name")
+
+    monkeypatch.setattr("api.v1.workflows.get_ai_provider", lambda **_kwargs: _Provider())
+
+    async def _identity_simplify(_self, steps, phases):
+        return steps
+
+    monkeypatch.setattr(
+        "services.workflow_simplifier.WorkflowSimplifier.simplify",
+        _identity_simplify,
+    )
+
+    payload = {
+        "name": "idem-test",
+        "target_url": "https://example.com",
+        "events": [{"event_type": "click", "payload": {"target": {"selector": "#a"}}}],
+    }
+    headers = {**HEADERS, "Idempotency-Key": "idem-1"}
+
+    r1 = await api_client.post("/v1/workflows/record", headers=headers, json=payload)
+    assert r1.status_code == 200, r1.text
+    r2 = await api_client.post("/v1/workflows/record", headers=headers, json=payload)
+    assert r2.status_code == 200, r2.text
+    # Same key + same payload → identical response body, no new workflow row.
+    assert r1.json()["id"] == r2.json()["id"]
+
+    # Same key + different payload → 409 conflict.
+    r3 = await api_client.post(
+        "/v1/workflows/record",
+        headers=headers,
+        json={**payload, "name": "idem-test-different"},
+    )
+    assert r3.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -151,8 +213,12 @@ async def test_record_workflow_handles_analysis_ai_and_simplifier_failures(api_c
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["step_count"] == 1
-    assert resp.json()["analysis"]["goal"] is None
+    body = resp.json()
+    assert body["step_count"] == 1
+    assert body["analysis"]["goal"] is None
+    # New observability fields surface the simplification failure to the client
+    assert body["simplification_status"] == "failed"
+    assert body["simplification_error"] == "simplify fail"
 
 
 @pytest.mark.asyncio

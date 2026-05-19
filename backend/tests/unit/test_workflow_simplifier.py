@@ -4,12 +4,14 @@ import pytest
 
 from services.workflow_simplifier import (
     WorkflowSimplifier,
+    _build_simplification_prompt,
     _clean_url,
     _pass1_clean_urls,
     _pass2_filter_selectors,
     _pass3_collapse,
     _pass3b_mark_checkpoints,
     _is_ephemeral_selector,
+    _step_signature,
     _synthesize_intent,
 )
 
@@ -94,15 +96,16 @@ def test_pass2_text_selector_kept():
     assert len(result["selector_chain"]) == 1
 
 
-def test_pass2_empty_chain_marks_intent_only():
+def test_pass2_empty_chain_keeps_step_with_synthesized_intent():
     step = {
         "action_type": "click",
         "intent": "Click the big button",
         "selector_chain": [{"type": "css", "value": "#_RandomlyGeneratedId_xyz123abc456"}],
     }
     result = _pass2_filter_selectors([step])[0]
-    assert result.get("intent_only") is True
     assert result["selector_chain"] == []
+    assert result["intent"]
+    assert "intent_only" not in result
 
 
 def test_pass2_null_intent_gets_synthesized():
@@ -144,6 +147,16 @@ def test_is_ephemeral_deep_nth_of_type():
     })
 
 
+def test_pass2_semantic_id_kept():
+    for semantic in ("#email-input-field", "#main-content", "#nav-2024-q3", "#submit-btn-primary"):
+        assert not _is_ephemeral_selector({"type": "css", "value": semantic}), semantic
+
+
+def test_pass2_high_entropy_id_filtered():
+    for ephemeral in ("#a8f9b4c2d1e7f3a9", "#abc123XYZdef456", "#sess-7f3a9b4c2d1e"):
+        assert _is_ephemeral_selector({"type": "css", "value": ephemeral}), ephemeral
+
+
 # ---------------------------------------------------------------------------
 # Pass 3 — Sequence collapsing
 # ---------------------------------------------------------------------------
@@ -160,11 +173,12 @@ def test_pass3_search_detour_collapsed():
     result = _pass3_collapse(steps)
     action_types = [s["action_type"] for s in result]
     values = [s.get("value") for s in result]
-    # Should start with the speedtest navigate, not the google ones
-    navigate_values = [v for v in values if v and "speedtest" in v]
-    assert len(navigate_values) >= 1
-    # The result should be shorter than original (search detour removed)
-    assert len(result) < len(steps)
+    # Strong assertions — the search prefix is gone, the destination navigate
+    # and the Go-button click are both preserved.
+    assert action_types == ["navigate", "click"], action_types
+    assert "speedtest.net" in (values[0] or "")
+    # No google search step survives.
+    assert not any("google.com" in (v or "") for v in values)
 
 
 def test_pass3_consecutive_same_domain_navigates_collapsed():
@@ -199,6 +213,76 @@ def test_pass3_different_domain_navigates_kept():
     # Google is a search engine so it should be collapsed out
     values = [s.get("value") for s in result]
     assert any("indeed.com" in (v or "") for v in values)
+
+
+def test_pass3_preserves_click_before_post_test_redirect():
+    """Regression: speedtest.net's Go button click was being consumed by
+    Pattern A because the test-completion URL change (e.g. /es → /es/result/<id>)
+    was treated as the "final destination" navigate. Pattern A must use the
+    FIRST non-search navigate as the entry boundary, not the last, and Pattern
+    D should drop the trailing same-domain navigate that's really a side-effect
+    of the click.
+    """
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://www.google.com/", "selector_chain": [], "intent": "Go to Google"},
+        {"step_index": 1, "action_type": "type", "value": "velocidad internet", "selector_chain": [], "intent": "Search"},
+        {"step_index": 2, "action_type": "click", "value": None, "selector_chain": [], "intent": "Click result"},
+        {"step_index": 3, "action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": [], "intent": "Open speedtest"},
+        {"step_index": 4, "action_type": "click", "value": None, "selector_chain": [], "intent": "Click Go button"},
+        {"step_index": 5, "action_type": "navigate", "value": "https://www.speedtest.net/es/result/19211525847", "selector_chain": [], "intent": "Results page"},
+    ]
+    result = _pass3_collapse(steps)
+    action_types = [s["action_type"] for s in result]
+    # The destination navigate AND the Go click must both survive
+    assert "click" in action_types, f"Go-button click was stripped: {action_types}"
+    # The trailing stale result URL must be dropped — replay shouldn't jump there
+    values = [s.get("value") or "" for s in result]
+    assert not any("/result/" in v for v in values), f"Stale result URL kept: {values}"
+    # Workflow should end on the click, not a navigate
+    assert action_types[-1] == "click", f"Last step should be the click: {action_types}"
+    # The entry navigate to speedtest must be preserved
+    assert any("speedtest.net/es" in v for v in values)
+
+
+def test_pass3_pattern_d_preserves_checkpoint_aligned_navigate():
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://example.com/", "selector_chain": [], "intent": "home"},
+        {"step_index": 1, "action_type": "click", "value": None, "selector_chain": [], "intent": "Go"},
+        {"step_index": 2, "action_type": "navigate", "value": "https://example.com/done", "selector_chain": [], "intent": "Done page"},
+    ]
+    # Phase boundary at step 2 — Pattern D must NOT drop it
+    result = _pass3_collapse(steps, phase_start_indices={2})
+    action_types = [s["action_type"] for s in result]
+    assert action_types == ["navigate", "click", "navigate"]
+
+
+def test_pass3b_remaps_phase_boundary_when_collapsed():
+    # Simulate Pass 3 output: search detour collapsed away, only the destination
+    # navigate (with original step_index=3) remains.
+    steps_after_p3 = [
+        {"step_index": 3, "action_type": "navigate", "value": "https://example.com", "selector_chain": [], "checkpoint": False},
+        {"step_index": 4, "action_type": "click", "value": None, "selector_chain": [], "checkpoint": False},
+    ]
+    # Phase originally started at index 0, but step 0 was collapsed. The
+    # nearest surviving navigate with step_index >= 0 is the one at 3.
+    phases = [_FakePhase(0)]
+    result = _pass3b_mark_checkpoints(steps_after_p3, phases)
+    assert result[0]["checkpoint"] is True
+
+
+def test_pass3_pattern_d_keeps_cross_domain_trailing_navigate():
+    """Pattern D should NOT drop a trailing navigate that goes to a different
+    domain than the click's context — that's a legitimate cross-site
+    transition the user performed.
+    """
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://site-a.com/", "selector_chain": [], "intent": "Site A"},
+        {"step_index": 1, "action_type": "click", "value": None, "selector_chain": [], "intent": "Click button"},
+        {"step_index": 2, "action_type": "navigate", "value": "https://site-b.com/", "selector_chain": [], "intent": "Site B"},
+    ]
+    result = _pass3_collapse(steps)
+    values = [s.get("value") or "" for s in result]
+    assert any("site-b.com" in v for v in values), f"Cross-site navigate was dropped: {values}"
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +325,211 @@ def test_pass3b_no_phases_returns_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+def test_pass3_collapse_empty_list_returns_empty():
+    assert _pass3_collapse([]) == []
+
+
+def test_pass3_pure_interactions_no_navigates_unchanged():
+    steps = [
+        {"step_index": 0, "action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "A"}], "intent": "click A"},
+        {"step_index": 1, "action_type": "type", "value": "abc", "selector_chain": [{"type": "css", "value": "#email"}], "intent": "type email"},
+        {"step_index": 2, "action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "B"}], "intent": "click B"},
+    ]
+    result = _pass3_collapse(steps)
+    assert [s["action_type"] for s in result] == ["click", "type", "click"]
+
+
+def test_pass3_all_search_navigates_kept_as_is():
+    # No real destination → no detour to collapse. Pattern B still applies.
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://www.google.com/search?q=a", "selector_chain": []},
+        {"step_index": 1, "action_type": "navigate", "value": "https://www.google.com/search?q=b", "selector_chain": []},
+    ]
+    result = _pass3_collapse(steps)
+    # Pattern B collapses consecutive same-domain navigates: only the last kept.
+    assert len(result) == 1
+    assert "q=b" in result[0]["value"]
+
+
+@pytest.mark.asyncio
+async def test_simplify_empty_list_returns_empty():
+    simplifier = WorkflowSimplifier()
+    assert await simplifier.simplify([]) == []
+
+
+@pytest.mark.asyncio
+async def test_simplify_single_step_passes_through(monkeypatch):
+    class _IdentityProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            import json as _json
+            return AIResponse(content=_json.dumps([
+                {"action_type": "navigate", "value": "https://example.com", "intent": "Open page", "selector_chain": [], "checkpoint": False},
+            ]))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: _IdentityProvider())
+
+    simplifier = WorkflowSimplifier(workflow_goal="see homepage", target_url="https://example.com")
+    result = await simplifier.simplify([
+        {"action_type": "navigate", "value": "https://example.com", "intent": "Open page", "selector_chain": []},
+    ])
+    assert len(result) == 1
+    assert result[0]["action_type"] == "navigate"
+
+
+def test_pass3_pattern_d_keeps_subdomain_change():
+    # `c.example.com` → click → `www.example.com` is treated as a legitimate
+    # cross-(sub)domain transition because `_same_domain` is netloc-strict.
+    # Pinning this so a future refactor to registered-domain matching doesn't
+    # regress it silently.
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://c.example.com/", "selector_chain": [], "intent": "Open c"},
+        {"step_index": 1, "action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Continue"}], "intent": "Continue"},
+        {"step_index": 2, "action_type": "navigate", "value": "https://www.example.com/done", "selector_chain": [], "intent": "Arrive www"},
+    ]
+    result = _pass3_collapse(steps)
+    values = [s.get("value") or "" for s in result]
+    assert any("www.example.com" in v for v in values)
+
+
+# ---------------------------------------------------------------------------
+# Safety guard isolated tests
+# ---------------------------------------------------------------------------
+
+def test_reject_ai_candidate_accepts_identical_baseline():
+    from services.workflow_simplifier import _reject_ai_candidate
+
+    steps = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    assert _reject_ai_candidate(steps, [dict(s) for s in steps]) is False
+
+
+def test_drops_post_destination_interactions_detects_drop():
+    from services.workflow_simplifier import _drops_post_destination_interactions
+
+    baseline = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    candidate_dropped = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+    ]
+    assert _drops_post_destination_interactions(baseline, candidate_dropped) is True
+    assert _drops_post_destination_interactions(baseline, baseline) is False
+
+
+def test_missing_post_destination_critical_actions_subsequence():
+    from services.workflow_simplifier import _missing_post_destination_critical_actions
+
+    baseline = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Go"}]},
+        {"action_type": "type", "value": "hello", "selector_chain": [{"type": "css", "value": "#email"}]},
+    ]
+    # Candidate keeps both critical actions in same order.
+    candidate_ok = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Go"}]},
+        {"action_type": "type", "value": "hello", "selector_chain": [{"type": "css", "value": "#email"}]},
+    ]
+    assert _missing_post_destination_critical_actions(baseline, candidate_ok) is False
+    # Candidate drops the type.
+    candidate_missing = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    assert _missing_post_destination_critical_actions(baseline, candidate_missing) is True
+
+
+def test_changes_destination_domain_handles_missing_destination():
+    from services.workflow_simplifier import _changes_destination_domain
+
+    baseline = [
+        {"action_type": "navigate", "value": "https://example.com", "selector_chain": []},
+    ]
+    # Candidate has no non-search navigate at all.
+    candidate_no_dest = [
+        {"action_type": "navigate", "value": "https://www.google.com/search?q=foo", "selector_chain": []},
+    ]
+    assert _changes_destination_domain(baseline, candidate_no_dest) is True
+    # Candidate has the same destination.
+    assert _changes_destination_domain(baseline, baseline) is False
+    # Different non-search destination.
+    candidate_swap = [
+        {"action_type": "navigate", "value": "https://fast.com", "selector_chain": []},
+    ]
+    assert _changes_destination_domain(baseline, candidate_swap) is True
+
+
+# ---------------------------------------------------------------------------
+# _step_signature
+# ---------------------------------------------------------------------------
+
+def test_step_signature_stable_under_selector_reorder():
+    step_a = {
+        "action_type": "click",
+        "value": "Go",
+        "selector_chain": [
+            {"type": "css", "value": ".btn"},
+            {"type": "text", "value": "Go"},
+            {"type": "xpath", "value": "/html/body/button"},
+        ],
+    }
+    step_b = {
+        "action_type": "click",
+        "value": "Go",
+        "selector_chain": [
+            {"type": "xpath", "value": "/html/body/button"},
+            {"type": "text", "value": "Go"},
+            {"type": "css", "value": ".btn"},
+        ],
+    }
+    assert _step_signature(step_a) == _step_signature(step_b)
+
+
+def test_step_signature_picks_text_over_css():
+    step = {
+        "action_type": "click",
+        "value": None,
+        "selector_chain": [
+            {"type": "css", "value": ".btn"},
+            {"type": "text", "value": "Submit"},
+        ],
+    }
+    sig = _step_signature(step)
+    assert sig[2] == "Submit"
+
+
+def test_step_signature_falls_back_to_lowest_priority_when_only_xpath():
+    step = {
+        "action_type": "click",
+        "value": None,
+        "selector_chain": [{"type": "xpath", "value": "/html/body/button[2]"}],
+    }
+    sig = _step_signature(step)
+    assert sig[2] == "/html/body/button[2]"
+
+
+# ---------------------------------------------------------------------------
 # Pass 4 — AI holistic simplification
 # ---------------------------------------------------------------------------
+
+def test_pass4_prompt_includes_post_click_guidance():
+    steps = [
+        {"action_type": "navigate", "value": "https://example.com", "intent": "Open", "selector_chain": []},
+        {"action_type": "click", "value": None, "intent": "Click button", "selector_chain": []},
+    ]
+    prompt = _build_simplification_prompt(steps, "Some goal", "https://example.com")
+    assert "Trailing same-domain navigates" in prompt
+    assert "side-effects of a click have already been removed" in prompt
+    assert "Never remove the final click, type, submit, or select" in prompt
+
 
 @pytest.mark.asyncio
 async def test_pass4_ai_returns_fewer_steps(monkeypatch):
@@ -369,6 +656,121 @@ async def test_pass4_cannot_drop_destination_interaction(monkeypatch):
     result = await simplifier.simplify(steps)
     actions = [s.get("action_type") for s in result]
     assert actions == ["navigate", "click"]
+
+
+@pytest.mark.asyncio
+async def test_pass4_rejected_candidate_merges_intent_strings(monkeypatch):
+    # AI returns a structurally bad candidate (drops the click), but the AI
+    # also enriched the navigate step's intent. The merge should preserve the
+    # baseline structure while adopting the better intent.
+    class EnrichedButBadProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            # Structurally invalid (drops the click), but intent improved.
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.speedtest.net/es",
+                    "intent": "Open the Ookla speedtest page in Spanish to measure connection speed",
+                    "selector_chain": [],
+                    "checkpoint": False,
+                }
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: EnrichedButBadProvider())
+
+    simplifier = WorkflowSimplifier(workflow_goal="speedtest", target_url="https://example.com")
+    baseline_navigate_intent = "Open the speedtest page in Spanish before running test"
+    steps = [
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es", "intent": baseline_navigate_intent, "selector_chain": []},
+        {"action_type": "click", "value": None, "intent": "Click the speedtest start button", "selector_chain": [{"type": "text", "value": "Iniciar"}]},
+    ]
+    result = await simplifier.simplify(steps)
+    # Click is preserved (safety guard rejection)
+    actions = [s.get("action_type") for s in result]
+    assert actions == ["navigate", "click"]
+    # Intent on the navigate is unchanged because the candidate length didn't
+    # match baseline (1 vs 2) — defensive fallback path. This locks the
+    # current "length mismatch ⇒ plain fallback" behavior.
+    assert result[0]["intent"] == baseline_navigate_intent
+
+
+@pytest.mark.asyncio
+async def test_pass4_rejected_candidate_with_aligned_lengths_merges_intent(monkeypatch):
+    class StructurallyBadButAlignedProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            # Same length as p3b, same signatures (action+value+text-selector),
+            # but the AI deletes the destination-page click's text selector,
+            # which trips the safety guard via `_drops_post_destination_interactions`.
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.speedtest.net/es",
+                    "intent": "Open the Ookla speedtest page to measure connection speed",
+                    "selector_chain": [],
+                    "checkpoint": False,
+                },
+                {
+                    "action_type": "click",
+                    "value": None,
+                    "intent": "Click the Iniciar button to start the speed test",
+                    "selector_chain": [{"type": "text", "value": "Iniciar"}],
+                    "checkpoint": False,
+                },
+                # Adds a spurious extra step on the same domain — drops the
+                # safety guard via missing-critical or domain-change.
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.fast.com/",  # destination domain change
+                    "intent": "Switch to Fast",
+                    "selector_chain": [],
+                    "checkpoint": False,
+                },
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: StructurallyBadButAlignedProvider())
+
+    simplifier = WorkflowSimplifier(workflow_goal="speedtest", target_url="https://example.com")
+    steps = [
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es", "intent": "Open speedtest start page now", "selector_chain": []},
+        {"action_type": "click", "value": None, "intent": "Click speedtest start button", "selector_chain": [{"type": "text", "value": "Iniciar"}]},
+    ]
+    result = await simplifier.simplify(steps)
+    # Safety guard rejects (destination-domain change), but length mismatch
+    # (3 vs 2) means plain fallback. Locks that behavior.
+    actions = [s.get("action_type") for s in result]
+    assert actions == ["navigate", "click"]
+
+
+def test_merge_intent_enrichments_adopts_longer_intent():
+    from services.workflow_simplifier import _merge_intent_enrichments
+
+    baseline = [
+        {"action_type": "click", "value": None, "intent": "Click", "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    candidate = [
+        {"action_type": "click", "value": None, "intent": "Click the Go button to start the test", "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    merged = _merge_intent_enrichments(baseline, candidate)
+    assert merged[0]["intent"] == "Click the Go button to start the test"
+
+
+def test_merge_intent_enrichments_falls_back_on_signature_mismatch():
+    from services.workflow_simplifier import _merge_intent_enrichments
+
+    baseline = [
+        {"action_type": "click", "value": None, "intent": "Click Go", "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    candidate = [
+        {"action_type": "click", "value": "different", "intent": "Better intent", "selector_chain": [{"type": "text", "value": "Go"}]},
+    ]
+    merged = _merge_intent_enrichments(baseline, candidate)
+    assert merged[0]["intent"] == "Click Go"
 
 
 @pytest.mark.asyncio

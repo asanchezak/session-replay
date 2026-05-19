@@ -109,6 +109,7 @@ export interface AgentCommandResultResponse {
   type: "AGENT_COMMAND_RESULT";
   success: boolean;
   error?: string;
+  via_method_index?: number;
 }
 
 export type ExtensionMessage =

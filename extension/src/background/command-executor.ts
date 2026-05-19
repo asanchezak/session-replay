@@ -109,7 +109,7 @@ export class CommandExecutor {
   async executeCommand(
     tabId: number,
     command: AgentCommand,
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; via_method_index?: number }> {
     const timeoutMs = command.timeout_ms || 15000;
 
     // Retry up to 3 times when the content script is temporarily unavailable
@@ -150,7 +150,11 @@ export class CommandExecutor {
           ),
         ]);
         const result = response as AgentCommandResultResponse;
-        return { success: result.success, error: result.error };
+        return {
+          success: result.success,
+          error: result.error,
+          via_method_index: result.via_method_index,
+        };
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         const isConnectivity =

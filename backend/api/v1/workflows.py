@@ -1,7 +1,7 @@
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
 from core.state_machine import RunStatus
 from services.execution_service import ExecutionService
+from services.idempotency_cache import get_cache, hash_payload
 from services.semantic_analysis_service import SemanticAnalysisService
 from services.template_service import TemplateService
 from services.workflow_service import WorkflowService
@@ -91,6 +92,44 @@ class RecordWorkflowRequest(BaseModel):
 async def record_workflow(
     req: RecordWorkflowRequest,
     db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
+    # Unit tests call this directly without FastAPI resolving Header(...);
+    # in that case the default is a Header sentinel rather than None.
+    if not isinstance(idempotency_key, str):
+        idempotency_key = None
+    cache = get_cache()
+    payload_hash = hash_payload(req.model_dump()) if idempotency_key else ""
+    if idempotency_key:
+        lock = await cache.lock_for("workflow_record", idempotency_key)
+        await lock.acquire()
+    try:
+        if idempotency_key:
+            status, cached = cache.get("workflow_record", idempotency_key, payload_hash)
+            if status == "hit":
+                return cached
+            if status == "conflict":
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": {
+                            "code": "CONFLICT",
+                            "message": "Idempotency-Key already used for a different payload",
+                        }
+                    },
+                )
+        response = await _do_record_workflow(req, db)
+        if idempotency_key and not isinstance(response, JSONResponse):
+            cache.put("workflow_record", idempotency_key, payload_hash, response)
+        return response
+    finally:
+        if idempotency_key:
+            lock.release()
+
+
+async def _do_record_workflow(
+    req: RecordWorkflowRequest,
+    db: AsyncSession,
 ):
     logger.info("Recording workflow name=%s", req.name)
     svc = WorkflowService(db)
@@ -176,6 +215,8 @@ async def record_workflow(
 
     # Simplify the workflow — runs all 5 passes including AI holistic pass
     original_count = len(steps)
+    simplification_status: str = "not_attempted"
+    simplification_error: str | None = None
     try:
         from services.workflow_simplifier import WorkflowSimplifier
         analysis_svc2 = SemanticAnalysisService(db)
@@ -192,8 +233,11 @@ async def record_workflow(
                 "Simplified workflow=%s: %d → %d steps",
                 workflow.id, original_count, len(steps),
             )
+            simplification_status = "succeeded"
     except Exception as exc:
         logger.warning("Simplification failed for workflow=%s: %s", workflow.id, exc)
+        simplification_status = "failed"
+        simplification_error = str(exc)[:200]
 
     return {
         "id": str(workflow.id),
@@ -202,6 +246,8 @@ async def record_workflow(
         "version": workflow.version,
         "step_count": len(steps),
         "simplified_from": original_count if len(steps) < original_count else None,
+        "simplification_status": simplification_status,
+        "simplification_error": simplification_error,
         "created_at": workflow.created_at.isoformat(),
         "analysis": {
             "goal": analysis.workflow_goal if analysis else None,

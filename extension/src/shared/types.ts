@@ -245,6 +245,7 @@ export interface AgentResultRequest {
   error: string | null;
   page_context_after: PageContext | null;
   error_context?: string;
+  via_method_index?: number;
 }
 
 export interface AgentResultResponse {

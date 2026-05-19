@@ -92,6 +92,11 @@ const STORAGE_KEY = "recording_state";
 let recordingEnabled = false;
 let eventCount = 0;
 
+// Events captured before the async storage read resolves are buffered here so
+// we don't silently drop them during the init window (~5-50 ms after page load).
+let _initResolved = false;
+const _earlyEventBuffer: CaptureResult[] = [];
+
 function sendDebugLog(level: string, msg: string): void {
   chrome.runtime.sendMessage({ type: "DEBUG_LOG", level, message: msg, source: "content-script" }).catch(() => {});
 }
@@ -137,10 +142,21 @@ chrome.storage.session.get(STORAGE_KEY).then((data) => {
     eventCount = state.events?.length ?? 0;
     sendDebugLog("log", `Initial state: recording enabled (${eventCount} events)`);
   }
+  _initResolved = true;
+  // Drain events captured during the async init window.
+  if (recordingEnabled && _earlyEventBuffer.length > 0) {
+    sendDebugLog("log", `Flushing ${_earlyEventBuffer.length} buffered early event(s)`);
+    for (const ev of _earlyEventBuffer) {
+      _dispatchToBackground(ev);
+    }
+  }
+  _earlyEventBuffer.length = 0;
   // Signal readiness only after recording state is resolved so waitForContentScript
   // guarantees recordingEnabled is correct before the first captured event.
   (window as any).__SR_CONTENT_SCRIPT__ = true;
 }).catch(() => {
+  _initResolved = true;
+  _earlyEventBuffer.length = 0;
   (window as any).__SR_CONTENT_SCRIPT__ = true;
 });
 
@@ -295,7 +311,15 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ type: "PAGE_CONTEXT_RESULT", ...capturePageContext() });
         break;
       case "EXECUTE_AGENT_COMMAND": {
-        const cmd = (msg as any).command as { action: string; selector_chain?: Array<{ type: string; value: string }>; value?: string; target?: string | null; intent?: string; timeout_ms?: number };
+        const cmd = (msg as any).command as {
+          action: string;
+          selector_chain?: Array<{ type: string; value: string }>;
+          value?: string;
+          target?: string | null;
+          intent?: string;
+          timeout_ms?: number;
+          methods?: Array<{ action_type: string; selector_chain: Array<{ type: string; value: string }>; value?: string }>;
+        };
         if (cmd.action === "navigate") {
           const targetUrl = cmd.value || cmd.target;
           if (targetUrl) {
@@ -310,6 +334,7 @@ chrome.runtime.onMessage.addListener(
             selector_chain: cmd.selector_chain || [],
             value: cmd.value || undefined,
             intent: cmd.intent || undefined,
+            methods: cmd.methods || undefined,
           };
           executeStep(step as StepToExecute).then((result) => {
             sendResponse({ type: "AGENT_COMMAND_RESULT", ...result });
@@ -324,12 +349,9 @@ chrome.runtime.onMessage.addListener(
 
 // ── Event capture ──────────────────────────────────────────────────
 
-function sendToBackground(event: CaptureResult): void {
-  if (!recordingEnabled) return;
-
+function _dispatchToBackground(event: CaptureResult): void {
   eventCount++;
   sendDebugLog("log", `Sending event #${eventCount}: ${event.event_type} on ${event.page_url}`);
-
   chrome.runtime.sendMessage(
     {
       type: "RECORD_EVENT",
@@ -344,6 +366,18 @@ function sendToBackground(event: CaptureResult): void {
   );
 }
 
+function sendToBackground(event: CaptureResult): void {
+  if (!_initResolved) {
+    // Storage read is still pending — buffer so we don't drop events that
+    // happen in the first ~5-50 ms of a new page (e.g. quickly clicking the
+    // speedtest "Go" button right after navigation completes).
+    _earlyEventBuffer.push(event);
+    return;
+  }
+  if (!recordingEnabled) return;
+  _dispatchToBackground(event);
+}
+
 // Snapshot of text-input values captured on mousedown, used to detect
 // when a custom dropdown click sets an input value without firing "change".
 let preClickInputSnapshot: Map<HTMLInputElement, string> | null = null;
@@ -355,7 +389,7 @@ const EXCLUDED_INPUT_TYPES = new Set([
 ]);
 
 document.addEventListener("mousedown", () => {
-  if (!recordingEnabled) return;
+  if (_initResolved && !recordingEnabled) return;
   preClickInputSnapshot = new Map();
   // Snapshot ALL text-like inputs — broad selector so custom dropdowns backed by
   // any input type (text, hidden, email, search, …) are included.

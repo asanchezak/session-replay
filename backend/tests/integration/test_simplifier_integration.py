@@ -266,3 +266,62 @@ async def test_speedtest_record_and_first_step_success_does_not_complete(
     assert run_state["status"] == "running"
     assert run_state["current_step_index"] == 1
     assert run_state["total_steps"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_record_speedtest_full_shape_drops_side_effect_navigate(
+    api_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    """End-to-end: search detour + entry navigate + Go click + post-test
+    redirect URL. The pipeline must collapse the Google detour AND drop the
+    trailing result URL, leaving exactly [navigate speedtest, click Go]."""
+    import services.workflow_simplifier as mod
+
+    class IdentityProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            import re
+            m = re.search(r"steps.*?:\n(\[.*?\])\n\n", prompt, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    return AIResponse(content=json.dumps(data))
+                except Exception:
+                    pass
+            return AIResponse(content="[]")
+
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: IdentityProvider())
+
+    payload = _make_record_payload(
+        "Speedtest Full Shape",
+        [
+            {"action_type": "navigate", "intent": "Open Google", "value": "https://www.google.com/"},
+            {"action_type": "type", "intent": "Search", "value": "velocidad internet"},
+            {"action_type": "navigate", "intent": "Google search", "value": "https://www.google.com/search?q=velocidad+internet"},
+            {"action_type": "click", "intent": "Click result", "value": None, "selector_chain": []},
+            {"action_type": "navigate", "intent": "Open speedtest", "value": "https://www.speedtest.net/es"},
+            {"action_type": "click", "intent": "Click Iniciar to start the test", "value": None, "selector_chain": [{"type": "text", "value": "Iniciar"}]},
+            {"action_type": "navigate", "intent": "Results page", "value": "https://www.speedtest.net/es/result/19211525847"},
+        ],
+        target_url="https://www.google.com/",
+    )
+
+    response = await api_client.post("/v1/workflows/record", json=payload, headers=_HEADERS)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["simplification_status"] == "succeeded"
+
+    wf_id = data["id"]
+    result = await db_session.execute(
+        select(WorkflowStep).where(WorkflowStep.workflow_id == wf_id).order_by(WorkflowStep.step_index)
+    )
+    db_steps = result.scalars().all()
+    actions = [s.action_type for s in db_steps]
+    values = [s.value or "" for s in db_steps]
+
+    # Final workflow shape: navigate to speedtest + click Iniciar. No Google
+    # detour, no stale result URL.
+    assert actions == ["navigate", "click"], actions
+    assert "speedtest.net" in values[0]
+    assert not any("google.com" in v for v in values)
+    assert not any("/result/" in v for v in values)

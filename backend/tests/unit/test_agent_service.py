@@ -167,6 +167,71 @@ async def test_result_success_advances_step(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_result_success_with_via_method_index_audit(db_session: AsyncSession):
+    from sqlalchemy import select
+    from core.models.event import EventLog
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Via Method WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    wf_id = str(workflow.id)
+
+    run = await svc.create_run(workflow_id=wf_id)
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    await db_session.flush()
+    run_id = str(run.id)
+
+    agent = AgentService(db_session)
+    result = await agent.report_result(
+        run_id,
+        ResultRequest(step_index=0, success=True, via_method_index=1),
+    )
+    assert result.accepted is True
+
+    events = (
+        await db_session.execute(
+            select(EventLog)
+            .where(EventLog.run_id == run.id)
+            .where(EventLog.event_type == "step_executed")
+        )
+    ).scalars().all()
+    assert any(ev.payload.get("via_method_index") == 1 for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_result_success_omits_via_method_index_when_not_provided(db_session: AsyncSession):
+    from sqlalchemy import select
+    from core.models.event import EventLog
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="No Via Method WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    await agent.report_result(
+        str(run.id),
+        ResultRequest(step_index=0, success=True),
+    )
+    events = (
+        await db_session.execute(
+            select(EventLog)
+            .where(EventLog.run_id == run.id)
+            .where(EventLog.event_type == "step_executed")
+        )
+    ).scalars().all()
+    for ev in events:
+        assert "via_method_index" not in ev.payload
+
+
+@pytest.mark.asyncio
 async def test_result_success_from_recovering_transitions_then_advances(
     db_session: AsyncSession,
 ):
