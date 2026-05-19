@@ -410,6 +410,30 @@ def test_reject_ai_candidate_accepts_identical_baseline():
     assert _reject_ai_candidate(steps, [dict(s) for s in steps]) is False
 
 
+def test_reject_ai_candidate_rejects_length_or_signature_changes():
+    from services.workflow_simplifier import _reject_ai_candidate
+
+    baseline = [
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "Iniciar"}]},
+        {"action_type": "click", "value": "115.65", "selector_chain": [{"type": "text", "value": "115.65"}]},
+    ]
+    # Drops the start click (length change).
+    shorter = [
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es/result/19212057393", "selector_chain": []},
+        {"action_type": "click", "value": "115.65", "selector_chain": [{"type": "text", "value": "115.65"}]},
+    ]
+    assert _reject_ai_candidate(baseline, shorter) is True
+
+    # Keeps length but changes step signature at index 1.
+    wrong_middle = [
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": []},
+        {"action_type": "click", "value": None, "selector_chain": [{"type": "text", "value": "115.65"}]},
+        {"action_type": "click", "value": "115.65", "selector_chain": [{"type": "text", "value": "115.65"}]},
+    ]
+    assert _reject_ai_candidate(baseline, wrong_middle) is True
+
+
 def test_drops_post_destination_interactions_detects_drop():
     from services.workflow_simplifier import _drops_post_destination_interactions
 
@@ -880,6 +904,77 @@ async def test_pass4_cannot_change_destination_domain(monkeypatch):
     ]
     result = await simplifier.simplify(steps)
     assert "speedtest.net" in str(result[0].get("value") or "")
+
+
+@pytest.mark.asyncio
+async def test_pass4_cannot_remove_start_test_click_before_results_click(monkeypatch):
+    class OverAggressiveProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            # Mirrors the bad pattern from run 5c271508: keep only result URL
+            # navigate plus a results-page click, dropping the start-test click.
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.speedtest.net/es/result/19212057393",
+                    "intent": "Open speedtest result",
+                    "selector_chain": [],
+                    "checkpoint": True,
+                },
+                {
+                    "action_type": "click",
+                    "value": "115.65",
+                    "intent": "Click 115.65",
+                    "selector_chain": [{"type": "text", "value": "115.65"}],
+                    "checkpoint": False,
+                },
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: OverAggressiveProvider())
+
+    simplifier = WorkflowSimplifier(
+        workflow_goal="get the internet speed",
+        target_url="https://www.google.com/",
+    )
+    steps = [
+        {
+            "action_type": "navigate",
+            "value": "https://www.google.com/search?q=velocidad+internet",
+            "intent": "Google search",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "navigate",
+            "value": "https://www.speedtest.net/es",
+            "intent": "Open speedtest",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "click",
+            "value": None,
+            "intent": "Click speed test start",
+            "selector_chain": [{"type": "text", "value": "Iniciar"}],
+        },
+        {
+            "action_type": "navigate",
+            "value": "https://www.speedtest.net/es/result/19212057393",
+            "intent": "Results page",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "click",
+            "value": "115.65",
+            "intent": "Click 115.65",
+            "selector_chain": [{"type": "text", "value": "115.65"}],
+        },
+    ]
+    result = await simplifier.simplify(steps)
+    actions = [s.get("action_type") for s in result]
+    intents = [str(s.get("intent") or "").lower() for s in result]
+    assert actions.count("click") >= 2
+    assert any("start" in intent or "iniciar" in intent for intent in intents)
 
 
 # ---------------------------------------------------------------------------

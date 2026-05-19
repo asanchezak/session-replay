@@ -420,6 +420,15 @@ def _reject_ai_candidate(
     baseline_steps: list[dict],
     candidate_steps: list[dict],
 ) -> bool:
+    # Pass 4 is intentionally conservative: deterministic passes already
+    # perform structural simplification, so AI is only allowed to enrich
+    # step metadata without dropping/reordering user actions.
+    if len(candidate_steps) != len(baseline_steps):
+        return True
+    for base, cand in zip(baseline_steps, candidate_steps):
+        if _step_signature(base) != _step_signature(cand):
+            return True
+
     if _changes_destination_domain(baseline_steps, candidate_steps):
         return True
     if _drops_post_destination_interactions(baseline_steps, candidate_steps):
@@ -536,6 +545,8 @@ def _build_simplification_prompt(
         "- Never remove the final click, type, submit, or select that achieves the goal, "
         "even if a navigate follows it\n"
         "- Never remove the final meaningful navigate that achieves the goal\n"
+        "- Keep the exact action sequence and step count from the input. You may only improve "
+        "intent wording and selector quality; do not drop, insert, or reorder steps.\n"
         "- Preserve all steps that happen on the destination page after arrival\n"
         "- Trailing same-domain navigates that look like side-effects of a click have already "
         "been removed by earlier passes; do not remove any more navigates after a click\n"
