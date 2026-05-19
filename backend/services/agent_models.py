@@ -26,6 +26,7 @@ class CommandAction(str, Enum):
     SELECT = "select"
     SCROLL = "scroll"
     EXTRACT = "extract"
+    RUN_SCRIPT = "run_script"
 
 
 class ChallengeType(str, Enum):
@@ -71,6 +72,9 @@ class AgentCommand(BaseModel):
     timeout_ms: int = 15000
     success_condition: dict[str, Any] | None = None
     pre_condition: CommandPreCondition | None = None
+    script: str | None = None
+    script_args: dict[str, Any] = Field(default_factory=dict)
+    script_timeout_ms: int = 5000
 
 
 class PlanUpdateOperation(str, Enum):
@@ -103,6 +107,9 @@ class AgentDecision(BaseModel):
 class PollRequest(BaseModel):
     page_context: PageContext
     current_step_index: int | None = None
+    screenshot_b64: str | None = None
+    screenshot_mime: str = "image/jpeg"
+    screenshot_trigger: str | None = None
 
 
 class PollResponse(BaseModel):
@@ -116,6 +123,7 @@ class PollResponse(BaseModel):
     rollback_to: int | None = None
     requires_human: bool = False
     plan_updates: list[PlanUpdate] = Field(default_factory=list)
+    vision_policy: Literal["auto", "always", "never"] | None = None
 
 
 class ResultRequest(BaseModel):
@@ -128,6 +136,9 @@ class ResultRequest(BaseModel):
     # primary selector chain failed and a fallback method recovered the step.
     # None when the primary chain succeeded.
     via_method_index: int | None = None
+    script_result: Any | None = None
+    script_logs: list[str] = Field(default_factory=list)
+    script_duration_ms: int | None = None
 
 
 class ResultResponse(BaseModel):
@@ -188,4 +199,5 @@ SAFETY_LIMITS = {
     "max_run_duration_seconds": 1800,
     "max_tokens_per_run": 200000,
     "stale_poll_timeout_seconds": 300,
+    "max_run_script_per_run": 30,
 }

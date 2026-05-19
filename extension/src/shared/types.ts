@@ -156,7 +156,7 @@ export interface AgentCommandSelector {
 }
 
 export interface AgentCommand {
-  action: "navigate" | "click" | "type" | "select" | "scroll" | "extract";
+  action: "navigate" | "click" | "type" | "select" | "scroll" | "extract" | "run_script";
   target: string | null;
   value: string | null;
   selector_chain: AgentCommandSelector[];
@@ -168,6 +168,9 @@ export interface AgentCommand {
   }>;
   timeout_ms: number;
   success_condition: Record<string, unknown> | null;
+  script?: string;
+  script_args?: Record<string, unknown>;
+  script_timeout_ms?: number;
 }
 
 export interface AgentDecision {
@@ -224,6 +227,9 @@ export interface PageDiff {
 export interface AgentPollRequest {
   page_context: PageContext;
   current_step_index: number | null;
+  screenshot_b64?: string;
+  screenshot_mime?: string;
+  screenshot_trigger?: string;
 }
 
 export interface AgentPollResponse {
@@ -237,6 +243,7 @@ export interface AgentPollResponse {
   rollback_to?: number | null;
   requires_human: boolean;
   plan_updates?: Array<{ operation: string; step_index: number; new_step?: Record<string, unknown>; reason?: string }>;
+  vision_policy?: "auto" | "always" | "never" | null;
 }
 
 export interface AgentResultRequest {
@@ -246,6 +253,9 @@ export interface AgentResultRequest {
   page_context_after: PageContext | null;
   error_context?: string;
   via_method_index?: number;
+  script_result?: unknown;
+  script_logs?: string[];
+  script_duration_ms?: number;
 }
 
 export interface AgentResultResponse {

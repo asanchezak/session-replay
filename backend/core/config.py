@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = 600
     seq_url: str = "http://localhost:5341"
+    ai_step_recovery_window_seconds: int = 900
+    ai_timeout_decision_history_limit: int = 6
+    vision_enabled: bool = True
+    vision_max_bytes: int = 500_000
+    vision_baseline_every_n: int = 5
+    vision_high_detail_on_failure: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

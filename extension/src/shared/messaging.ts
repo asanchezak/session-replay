@@ -110,6 +110,9 @@ export interface AgentCommandResultResponse {
   success: boolean;
   error?: string;
   via_method_index?: number;
+  script_result?: unknown;
+  script_logs?: string[];
+  script_duration_ms?: number;
 }
 
 export type ExtensionMessage =
