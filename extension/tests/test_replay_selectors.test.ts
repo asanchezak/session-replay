@@ -48,6 +48,48 @@ describe("Selector chain fallthrough", () => {
     expect(r.success).toBe(true);
   });
 
+  it("matches accessibility label-only selector", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const btn = document.createElement("button");
+    btn.textContent = "Iniciar";
+    btn.style.width = "100px";
+    btn.style.height = "30px";
+    document.body.appendChild(btn);
+    const r = await executeStep({
+      action_type: "click",
+      selector_chain: [{ type: "accessibility", value: "Iniciar" }],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("matches accessibility role+text bracket selector", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const btn = document.createElement("button");
+    btn.textContent = "Inicio";
+    btn.style.width = "100px";
+    btn.style.height = "30px";
+    document.body.appendChild(btn);
+    const r = await executeStep({
+      action_type: "click",
+      selector_chain: [{ type: "accessibility", value: "button[text='Inicio']" }],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("matches accessibility text ignoring accents/case", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const btn = document.createElement("button");
+    btn.textContent = "Iniciar sesión";
+    btn.style.width = "100px";
+    btn.style.height = "30px";
+    document.body.appendChild(btn);
+    const r = await executeStep({
+      action_type: "click",
+      selector_chain: [{ type: "accessibility", value: "iniciar sesion" }],
+    });
+    expect(r.success).toBe(true);
+  });
+
   it("falls through all four → xpath wins", async () => {
     const { executeStep } = await import("../src/content/replay");
     const wrapper = document.createElement("div");

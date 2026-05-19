@@ -322,6 +322,164 @@ async def test_pass4_ai_markdown_fenced_json_parsed(monkeypatch):
     assert len(result) == 1
 
 
+@pytest.mark.asyncio
+async def test_pass4_cannot_drop_destination_interaction(monkeypatch):
+    class OverAggressiveProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            # Incorrectly drops the destination-page click.
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.speedtest.net/es",
+                    "intent": "Open speedtest",
+                    "selector_chain": [],
+                    "checkpoint": True,
+                }
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: OverAggressiveProvider())
+
+    simplifier = WorkflowSimplifier(
+        workflow_goal="get the internet speed",
+        target_url="https://www.google.com/",
+    )
+    steps = [
+        {
+            "action_type": "navigate",
+            "value": "https://www.google.com/search?q=velocidad+internet",
+            "intent": "Google search",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "navigate",
+            "value": "https://www.speedtest.net/es",
+            "intent": "Open speedtest",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "click",
+            "value": None,
+            "intent": "Click speed test start",
+            "selector_chain": [{"type": "text", "value": "Iniciar"}],
+        },
+    ]
+    result = await simplifier.simplify(steps)
+    actions = [s.get("action_type") for s in result]
+    assert actions == ["navigate", "click"]
+
+
+@pytest.mark.asyncio
+async def test_pass4_cannot_swap_critical_action_type(monkeypatch):
+    class WrongActionProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://www.speedtest.net/es",
+                    "intent": "Open speedtest",
+                    "selector_chain": [],
+                    "checkpoint": True,
+                },
+                {
+                    "action_type": "scroll",
+                    "value": "down",
+                    "intent": "Scroll page",
+                    "selector_chain": [],
+                    "checkpoint": False,
+                },
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: WrongActionProvider())
+
+    simplifier = WorkflowSimplifier(
+        workflow_goal="get the internet speed",
+        target_url="https://www.google.com/",
+    )
+    steps = [
+        {
+            "action_type": "navigate",
+            "value": "https://www.google.com/search?q=velocidad+internet",
+            "intent": "Google search",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "navigate",
+            "value": "https://www.speedtest.net/es",
+            "intent": "Open speedtest",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "click",
+            "value": None,
+            "intent": "Click speed test start",
+            "selector_chain": [{"type": "text", "value": "Iniciar"}],
+        },
+    ]
+    result = await simplifier.simplify(steps)
+    actions = [s.get("action_type") for s in result]
+    assert actions == ["navigate", "click"]
+
+
+@pytest.mark.asyncio
+async def test_pass4_cannot_change_destination_domain(monkeypatch):
+    class WrongDomainProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            simplified = [
+                {
+                    "action_type": "navigate",
+                    "value": "https://fast.com/",
+                    "intent": "Open speed test site",
+                    "selector_chain": [],
+                    "checkpoint": True,
+                },
+                {
+                    "action_type": "click",
+                    "value": None,
+                    "intent": "Start test",
+                    "selector_chain": [{"type": "text", "value": "Iniciar"}],
+                    "checkpoint": False,
+                },
+            ]
+            return AIResponse(content=json.dumps(simplified))
+
+    import services.workflow_simplifier as mod
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: WrongDomainProvider())
+
+    simplifier = WorkflowSimplifier(
+        workflow_goal="get the internet speed",
+        target_url="https://www.google.com/",
+    )
+    steps = [
+        {
+            "action_type": "navigate",
+            "value": "https://www.google.com/search?q=velocidad+internet",
+            "intent": "Google search",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "navigate",
+            "value": "https://www.speedtest.net/es",
+            "intent": "Open speedtest",
+            "selector_chain": [],
+        },
+        {
+            "action_type": "click",
+            "value": None,
+            "intent": "Click speed test start",
+            "selector_chain": [{"type": "text", "value": "Iniciar"}],
+        },
+    ]
+    result = await simplifier.simplify(steps)
+    assert "speedtest.net" in str(result[0].get("value") or "")
+
+
 # ---------------------------------------------------------------------------
 # Full simplifier pipeline
 # ---------------------------------------------------------------------------

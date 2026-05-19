@@ -1,6 +1,14 @@
 import type { Page } from "@playwright/test";
 
-const BACKEND = "http://localhost:8091";
+const DEFAULT_E2E_BACKEND = "http://localhost:8081";
+const normalizeBaseUrl = (value: string): string => value.replace(/\/+$/, "");
+export const getE2eBackendBaseUrl = (): string => {
+  const fromEnv = process.env.E2E_BACKEND_URL ?? process.env.E2E_BACKEND ?? process.env.BACKEND_URL;
+  const candidate = fromEnv?.trim();
+  return normalizeBaseUrl(candidate && candidate.length > 0 ? candidate : DEFAULT_E2E_BACKEND);
+};
+
+const BACKEND = getE2eBackendBaseUrl();
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
 type Selector = { type: string; value: string };

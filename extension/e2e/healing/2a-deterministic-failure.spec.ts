@@ -1,9 +1,6 @@
 import { test, expect } from "../fixtures";
 import { serveTestPage, TEST_PAGE_URL, pollRunStatus, getAudit, setAiApiKey } from "../helpers";
 
-const BACKEND = "http://localhost:8081";
-const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
-
 test("heals: deterministic failure path (no AI key)", async ({ context, extensionId, errors }) => {
   const ext = new (await import("../page-objects")).ExtensionHelper(context, extensionId);
 

@@ -10,6 +10,7 @@ const ODOO_PASSWORD = "Akurey1234*";
 
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
+const RUN_LIVE_EXTERNAL_E2E = process.env.RUN_LIVE_EXTERNAL_E2E === "true";
 
 const LIQUIDACION_DATA = {
   fecha: "06/01/2026",
@@ -17,6 +18,7 @@ const LIQUIDACION_DATA = {
 };
 
 test.describe.configure({ mode: "serial" });
+test.skip(!RUN_LIVE_EXTERNAL_E2E, "Live external Odoo E2E disabled by default. Set RUN_LIVE_EXTERNAL_E2E=true to enable.");
 
 // ── debug helpers ──────────────────────────────────────────────────────
 const DEBUG_DIR = path.join(os.tmpdir(), "odoo-liquidacion-debug");

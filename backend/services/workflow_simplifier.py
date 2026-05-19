@@ -228,6 +228,137 @@ def _pass3_collapse(steps: list[dict]) -> list[dict]:
     return deduped
 
 
+def _final_non_search_navigate_index(steps: list[dict]) -> int | None:
+    for i in range(len(steps) - 1, -1, -1):
+        step = steps[i]
+        if step.get("action_type") != "navigate":
+            continue
+        url = step.get("value") or ""
+        if url and not _is_search_engine_url(url):
+            return i
+    return None
+
+
+def _step_signature(step: dict) -> tuple[str, str, str]:
+    action = str(step.get("action_type") or "")
+    value = str(step.get("value") or "")
+    selector_value = ""
+    chain = step.get("selector_chain") or []
+    if isinstance(chain, list):
+        for sel in chain:
+            if not isinstance(sel, dict):
+                continue
+            sel_type = (sel.get("type") or "").lower()
+            if sel_type in {"text", "accessibility", "aria", "aria-label", "data-testid", "css", "xpath"}:
+                selector_value = str(sel.get("value") or "")
+                if selector_value:
+                    break
+    return action, value[:120], selector_value[:120]
+
+
+def _critical_action(action_type: str) -> bool:
+    return action_type in {"click", "type", "select", "submit", "extract", "copy", "paste", "tab_change"}
+
+
+def _final_destination_domain(steps: list[dict]) -> str:
+    idx = _final_non_search_navigate_index(steps)
+    if idx is None:
+        return ""
+    return _extract_domain(str((steps[idx].get("value") or "")))
+
+
+def _missing_post_destination_critical_actions(
+    baseline_steps: list[dict],
+    candidate_steps: list[dict],
+) -> bool:
+    baseline_dest_idx = _final_non_search_navigate_index(baseline_steps)
+    candidate_dest_idx = _final_non_search_navigate_index(candidate_steps)
+    if baseline_dest_idx is None or candidate_dest_idx is None:
+        return False
+
+    baseline_critical = [
+        _step_signature(s)
+        for s in baseline_steps[baseline_dest_idx + 1:]
+        if _critical_action(str(s.get("action_type") or ""))
+    ]
+    if not baseline_critical:
+        return False
+
+    candidate_critical = [
+        _step_signature(s)
+        for s in candidate_steps[candidate_dest_idx + 1:]
+        if _critical_action(str(s.get("action_type") or ""))
+    ]
+    if not candidate_critical:
+        return True
+
+    # Ensure baseline critical actions are preserved in order (subsequence match).
+    cidx = 0
+    for sig in baseline_critical:
+        found = False
+        while cidx < len(candidate_critical):
+            if candidate_critical[cidx] == sig:
+                found = True
+                cidx += 1
+                break
+            cidx += 1
+        if not found:
+            return True
+    return False
+
+
+def _changes_destination_domain(
+    baseline_steps: list[dict],
+    candidate_steps: list[dict],
+) -> bool:
+    baseline_domain = _final_destination_domain(baseline_steps)
+    if not baseline_domain:
+        return False
+    candidate_domain = _final_destination_domain(candidate_steps)
+    if not candidate_domain:
+        return True
+    return baseline_domain != candidate_domain
+
+
+def _drops_post_destination_interactions(
+    baseline_steps: list[dict],
+    candidate_steps: list[dict],
+) -> bool:
+    baseline_dest_idx = _final_non_search_navigate_index(baseline_steps)
+    if baseline_dest_idx is None:
+        return False
+
+    baseline_has_post_actions = any(
+        (s.get("action_type") or "") != "navigate"
+        for s in baseline_steps[baseline_dest_idx + 1:]
+    )
+    if not baseline_has_post_actions:
+        return False
+
+    candidate_dest_idx = _final_non_search_navigate_index(candidate_steps)
+    if candidate_dest_idx is None:
+        return True
+
+    candidate_has_post_actions = any(
+        (s.get("action_type") or "") != "navigate"
+        for s in candidate_steps[candidate_dest_idx + 1:]
+    )
+    return not candidate_has_post_actions
+
+
+def _reject_ai_candidate(
+    baseline_steps: list[dict],
+    candidate_steps: list[dict],
+) -> bool:
+    if _changes_destination_domain(baseline_steps, candidate_steps):
+        return True
+    if _drops_post_destination_interactions(baseline_steps, candidate_steps):
+        return True
+    if _missing_post_destination_critical_actions(baseline_steps, candidate_steps):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Pass 3b — Checkpoint marking
 # ---------------------------------------------------------------------------
@@ -269,6 +400,7 @@ def _build_simplification_prompt(
 ) -> str:
     import json as _json
     steps_json = _json.dumps(steps, indent=2)
+    critical_hints_json = _json.dumps(_critical_hints_for_prompt(steps), indent=2)
     goal_str = workflow_goal or "not specified"
     target_str = target_url or "not specified"
     return (
@@ -277,6 +409,8 @@ def _build_simplification_prompt(
         f"Goal: \"{goal_str}\"\n\n"
         f"Recorded steps after initial cleaning ({len(steps)} steps):\n"
         f"{steps_json}\n\n"
+        f"Critical action hints inferred from the full plan:\n"
+        f"{critical_hints_json}\n\n"
         "Problems to address:\n"
         "1. Any navigate step with remaining session params → strip them further\n"
         "2. Any step with no selectors and weak intent → strengthen the intent for AI-based finding\n"
@@ -289,9 +423,30 @@ def _build_simplification_prompt(
         "- Never add steps that weren't in the input\n"
         "- Never remove the final meaningful navigate or click that achieves the goal\n"
         "- Preserve all steps that happen on the destination page after arrival\n"
+        "- Use the critical action hints to keep goal-achieving actions. You may remove only actions "
+        "that are clearly redundant and not required for the goal.\n"
         "- Return each step with: action_type, intent, selector_chain, value, checkpoint\n"
         "- Output only the JSON array, no explanation or markdown."
     )
+
+
+def _critical_hints_for_prompt(steps: list[dict]) -> list[dict]:
+    hints: list[dict] = []
+    final_dest_idx = _final_non_search_navigate_index(steps)
+    for i, step in enumerate(steps):
+        action = str(step.get("action_type") or "")
+        if not _critical_action(action):
+            continue
+        hint = {
+            "step_index": i,
+            "action_type": action,
+            "intent": step.get("intent"),
+            "value": step.get("value"),
+            "selector_chain": step.get("selector_chain") or [],
+            "is_after_destination": bool(final_dest_idx is not None and i > final_dest_idx),
+        }
+        hints.append(hint)
+    return hints
 
 
 async def _pass4_ai_simplify(
@@ -383,6 +538,11 @@ class WorkflowSimplifier:
 
         # Pass 4 always runs — AI is a core system requirement
         p4 = await _pass4_ai_simplify(p3b, self.workflow_goal, self.target_url)
+        if _reject_ai_candidate(p3b, p4):
+            logger.warning(
+                "Pass 4 candidate rejected by safety invariants; keeping pass-3 result"
+            )
+            p4 = p3b
 
         # Re-index steps sequentially
         for i, step in enumerate(p4):

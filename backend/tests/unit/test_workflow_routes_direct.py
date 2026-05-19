@@ -121,6 +121,58 @@ async def test_record_workflow_direct_success_and_failure_paths(db_session, monk
 
 
 @pytest.mark.asyncio
+async def test_record_workflow_accepts_legacy_navigate_url_payload(db_session, monkeypatch):
+    class _Provider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(content="Name")
+
+    async def _analysis(_self, _workflow_id):
+        return types.SimpleNamespace(workflow_goal="Goal", confidence_overall=0.9)
+
+    async def _phases(_self, _workflow_id):
+        return []
+
+    async def _identity_simplify(_self, steps, phases):  # noqa: ARG001
+        return [
+            {
+                "action_type": s.action_type,
+                "intent": s.intent,
+                "selector_chain": s.selector_chain,
+                "value": s.value,
+                "methods": s.methods,
+            }
+            for s in steps
+        ]
+
+    monkeypatch.setattr("api.v1.workflows.get_ai_provider", lambda **_kwargs: _Provider())
+    monkeypatch.setattr(
+        "services.semantic_analysis_service.SemanticAnalysisService.analyze_workflow", _analysis
+    )
+    monkeypatch.setattr(
+        "services.semantic_analysis_service.SemanticAnalysisService.get_phases", _phases
+    )
+    monkeypatch.setattr("services.workflow_simplifier.WorkflowSimplifier.simplify", _identity_simplify)
+
+    out = await record_workflow(
+        RecordWorkflowRequest(
+            name="legacy-nav",
+            events=[
+                RecordEventInput(
+                    event_type="navigate",
+                    payload={"url": "https://example.com/legacy"},
+                ),
+            ],
+        ),
+        db=db_session,
+    )
+    assert out["step_count"] == 1
+
+    detail = await get_workflow(out["id"], db=db_session)
+    assert detail["steps"][0]["action_type"] == "navigate"
+    assert detail["steps"][0]["value"] == "https://example.com/legacy"
+
+
+@pytest.mark.asyncio
 async def test_workflow_detail_update_and_prompt_routes_direct(db_session, monkeypatch):
     wf_id = await _seed_workflow(db_session, with_step=True)
 

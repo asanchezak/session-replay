@@ -92,6 +92,7 @@ async def test_poll_returns_completed_after_all_steps(db_session: AsyncSession):
         _make_step(0, "click"),
     ])
     run.total_steps = 1
+    run.current_step_index = 1
     await db_session.flush()
     run_id = str(run.id)
 
@@ -555,6 +556,59 @@ async def test_poll_with_current_step_index_parameter(db_session: AsyncSession):
     assert response.command.value == "hello"
 
 
+@pytest.mark.asyncio
+async def test_poll_ignores_stale_client_cursor_for_completion(db_session: AsyncSession):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Cursor Drift WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([
+        _make_step(0, "click"),
+        _make_step(1, "type", value="hello"),
+    ])
+    run.total_steps = 2
+    run.current_step_index = 0
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    response = await agent.poll(
+        str(run.id),
+        PollRequest(page_context=_make_context(), current_step_index=999),
+    )
+
+    assert response.decision == DecisionType.EXECUTE
+    assert response.next_step_index == 0
+
+
+@pytest.mark.asyncio
+async def test_report_result_rejects_step_index_mismatch(db_session: AsyncSession):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Result Guard WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([
+        _make_step(0, "click"),
+        _make_step(1, "type", value="hello"),
+    ])
+    run.total_steps = 2
+    run.current_step_index = 0
+    run.status = "running"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    result = await agent.report_result(
+        str(run.id),
+        ResultRequest(step_index=1, success=True),
+    )
+    await db_session.refresh(run)
+
+    assert result.accepted is False
+    assert result.next_step_index == 0
+    assert run.current_step_index == 0
+
+
 def test_selectors_look_fragile_detects_session_ids():
     """Recorded css ids that look session-generated (Google's `#_IvMFav...`,
     hash-suffixed ids) should be treated as fragile so the agent consults AI
@@ -894,7 +948,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
     monkeypatch.setattr(agent.execution, "advance_step", _force_advance)
     result_completed = await agent.report_result(
         run_id,
-        ResultRequest(step_index=0, success=True),
+        ResultRequest(step_index=run.current_step_index, success=True),
     )
     assert result_completed.decision == DecisionType.COMPLETED
 
@@ -909,7 +963,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
     fail_result = await agent.report_result(
         run_id,
         ResultRequest(
-            step_index=0,
+            step_index=run.current_step_index,
             success=False,
             error="boom",
             page_context_after=PageContext(

@@ -1,9 +1,8 @@
 import { test, expect } from "../fixtures";
+import { getE2eBackendBaseUrl } from "../helpers/heal-provider";
 
-const BACKEND = "http://localhost:8091";
+const BACKEND = getE2eBackendBaseUrl();
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
-
-// NOTE: Uses port 8091 (reload-enabled) because /recover fix requires updated healing_service.py
 
 test("heals: RECOVERING→RUNNING via heal-result endpoint", async ({ context }) => {
   const ext = new (await import("../page-objects")).ExtensionHelper(context, "");

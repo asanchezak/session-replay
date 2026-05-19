@@ -155,6 +155,24 @@ export interface StepResult {
   actual_url?: string;
 }
 
+function normalizeText(value: string): string {
+  return (value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\n\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function interactiveCandidates(): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], [aria-label]",
+    ),
+  );
+}
+
 function findElementBySelectors(chain: SelectorSet[]): Element | null {
   const sorted = [...chain].sort((a, b) => (b.score || 0) - (a.score || 0));
   for (const sel of sorted) {
@@ -188,7 +206,7 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
 }
 
 function findElementByText(text: string): Element | null {
-  const lowerText = text.toLowerCase().replace(/[\n\t]/g, " ").trim();
+  const needle = normalizeText(text);
 
   // Prefer interactive elements (a, button) — clicking them triggers navigation
   // and form submission handlers correctly, unlike clicking a parent container.
@@ -199,11 +217,11 @@ function findElementByText(text: string): Element | null {
       r.left >= 0 && r.top >= 0 && r.right <= vw && r.bottom <= vh;
   };
   const matches = (el: HTMLElement): boolean =>
-    (el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim() === lowerText;
+    normalizeText(el.textContent || "") === needle;
   const includes = (el: HTMLElement): boolean =>
-    (el.textContent || "").toLowerCase().replace(/[\n\t]/g, " ").trim().includes(lowerText);
+    normalizeText(el.textContent || "").includes(needle);
 
-  const interactive = Array.from(document.querySelectorAll<HTMLElement>("a, button"));
+  const interactive = interactiveCandidates();
   const all = Array.from(document.querySelectorAll<HTMLElement>(
     "a, button, span, label, div, h1, h2, h3, h4, h5, h6, p, li, td, th",
   ));
@@ -229,24 +247,65 @@ function findElementByAccessibility(data: string): Element | null {
 
   try {
     const parsed = JSON.parse(data);
-    role = parsed[0] || "";
-    label = parsed[1] || "";
+    if (Array.isArray(parsed)) {
+      role = String(parsed[0] || "");
+      label = String(parsed[1] || "");
+    } else if (parsed && typeof parsed === "object") {
+      role = String((parsed as any).role || "");
+      label = String((parsed as any).label || (parsed as any).name || "");
+    }
   } catch {
-    const parts = data.split("|");
-    role = parts[0] || "";
-    label = parts[1] || "";
-  }
-
-  if (label) {
-    const elements = document.querySelectorAll<HTMLElement>("[aria-label]");
-    for (const el of elements) {
-      if (el.getAttribute("aria-label") === label) return el;
+    const bracketPattern = data.match(/^([a-zA-Z]+)\s*\[\s*text\s*=\s*['"](.+?)['"]\s*\]$/);
+    if (bracketPattern) {
+      role = bracketPattern[1] || "";
+      label = bracketPattern[2] || "";
+    } else if (data.includes("|")) {
+      const parts = data.split("|");
+      role = parts[0] || "";
+      label = parts[1] || "";
+    } else {
+      const roleWord = data.match(/^(button|link|textbox|combobox|menuitem|tab)\s+(.+)$/i);
+      if (roleWord) {
+        role = roleWord[1] || "";
+        label = roleWord[2] || "";
+      } else {
+        label = data;
+      }
     }
   }
 
+  const normalizedLabel = normalizeText(label);
+  if (normalizedLabel) {
+    const elements = interactiveCandidates();
+    const exactA11y = elements.find((el) => normalizeText(el.getAttribute("aria-label") || "") === normalizedLabel);
+    if (exactA11y) return exactA11y;
+
+    const exactText = elements.find((el) => normalizeText(el.textContent || "") === normalizedLabel);
+    if (exactText) return exactText;
+
+    const includesA11y = elements.find((el) => normalizeText(el.getAttribute("aria-label") || "").includes(normalizedLabel));
+    if (includesA11y) return includesA11y;
+
+    const includesText = elements.find((el) => normalizeText(el.textContent || "").includes(normalizedLabel));
+    if (includesText) return includesText;
+
+    // Final fallback to generic text search for non-interactive structures.
+    const byText = findElementByText(label);
+    if (byText) return byText;
+  }
+
   if (role) {
-    const byRole = document.querySelector<HTMLElement>(`[role="${CSS.escape(role)}"]`);
-    if (byRole) return byRole;
+    const normalizedRole = role.trim().toLowerCase();
+    const roleMatches = Array.from(document.querySelectorAll<HTMLElement>(`[role="${CSS.escape(normalizedRole)}"]`));
+    if (roleMatches.length > 0) {
+      if (normalizedLabel) {
+        const roleLabelExact = roleMatches.find((el) => normalizeText(el.textContent || "") === normalizedLabel);
+        if (roleLabelExact) return roleLabelExact;
+        const roleLabelIncludes = roleMatches.find((el) => normalizeText(el.textContent || "").includes(normalizedLabel));
+        if (roleLabelIncludes) return roleLabelIncludes;
+      }
+      return roleMatches[0];
+    }
   }
 
   return null;

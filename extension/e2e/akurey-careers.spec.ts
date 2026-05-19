@@ -4,6 +4,7 @@ import { ExtensionHelper } from "./page-objects";
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 const HOME_URL = "https://qa-website.akurey.com/";
+const RUN_LIVE_EXTERNAL_E2E = process.env.RUN_LIVE_EXTERNAL_E2E === "true";
 const SAMPLE = {
   country: "Costa Rica",
   email: "qa.session.replay+akurey@example.com",
@@ -85,6 +86,7 @@ async function fetchLatestWorkflow(page: import("@playwright/test").Page, starte
 }
 
 test.describe.configure({ mode: "serial" });
+test.skip(!RUN_LIVE_EXTERNAL_E2E, "Live external Akurey careers E2E disabled by default. Set RUN_LIVE_EXTERNAL_E2E=true to enable.");
 
 test("Akurey apply form can be filled without submission", async ({ context, errors }) => {
   const page = await context.newPage();

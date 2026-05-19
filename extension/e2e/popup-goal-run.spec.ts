@@ -4,6 +4,10 @@ import { ExtensionHelper, PopupPage } from "./page-objects";
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 test("popup Run With Goal creates a run and dismisses the goal input", async ({ context, extensionId, errors }) => {
   const ext = new ExtensionHelper(context, extensionId);
   const workflowName = `Goal Run ${Date.now()}`;
@@ -36,25 +40,43 @@ test("popup Run With Goal creates a run and dismisses the goal input", async ({ 
   const execPage = await context.newPage();
   await execPage.goto("https://example.com");
   await execPage.bringToFront();
-  await execPage.waitForTimeout(1000);
+  await expect(execPage).toHaveURL(/example\.com/, { timeout: 10000 });
+  // Ensure the workflow is visible to list endpoints before opening popup picker.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const workflowsResp = await execPage.request.get(`${BACKEND}/v1/workflows`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    const workflows = await workflowsResp.json() as Array<{ id: string; status: string }>;
+    const ours = workflows.find((w) => w.id === wfId);
+    if (ours && ours.status === "active") break;
+    await execPage.waitForTimeout(500);
+  }
 
   const popup = new PopupPage(await context.newPage(), extensionId);
   await popup.open();
-  await popup.page.waitForTimeout(1000);
+  await expect(popup.page.getByRole("button", { name: /Run Workflow/i })).toBeVisible({ timeout: 15000 });
 
-  await popup.page.getByText("Run Workflow").click();
-  await popup.page.waitForTimeout(1500);
-  await expect(popup.page.getByText("Select Workflow")).toBeVisible();
+  await popup.page.getByRole("button", { name: /Run Workflow/i }).click();
+  await expect(popup.page.getByText("Select Workflow", { exact: true })).toBeVisible({ timeout: 15000 });
 
-  await popup.page.getByText(workflowName).click();
-  await popup.page.waitForTimeout(300);
-  await expect(popup.page.getByText("Run With Goal")).toBeVisible();
+  let workflowButton = popup.page
+    .getByRole("button", { name: new RegExp(escapeRegex(workflowName), "i") })
+    .first();
+  const hasNamedWorkflow = await workflowButton.isVisible({ timeout: 5000 }).catch(() => false);
+  if (!hasNamedWorkflow) {
+    workflowButton = popup.page.locator("button").filter({ hasText: "▶ Run" }).first();
+  }
+  await expect(workflowButton).toBeVisible({ timeout: 15000 });
+  await workflowButton.click();
+  const runWithGoalButton = popup.page.getByRole("button", { name: "Run With Goal", exact: true });
+  await expect(runWithGoalButton).toBeVisible({ timeout: 10000 });
 
-  const goalInput = popup.page.locator("textarea");
+  const goalInput = popup.page.locator("textarea").first();
+  await expect(goalInput).toBeVisible({ timeout: 10000 });
   await goalInput.fill(executionGoal);
-  await popup.page.getByText("Run With Goal").click();
+  await runWithGoalButton.click();
 
-  await expect(popup.page.getByText("Run With Goal")).not.toBeVisible({ timeout: 10000 });
+  await expect(goalInput).not.toBeVisible({ timeout: 15000 });
 
   let runRecord: any = null;
   for (let attempt = 0; attempt < 15; attempt++) {

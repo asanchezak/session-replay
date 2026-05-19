@@ -180,3 +180,89 @@ async def test_replace_steps_endpoint(api_client: AsyncClient, db_session: Async
     db_steps = result.scalars().all()
     assert len(db_steps) == 2
     assert db_steps[0].checkpoint is True
+
+
+@pytest.mark.asyncio
+async def test_speedtest_record_and_first_step_success_does_not_complete(
+    api_client: AsyncClient,
+    monkeypatch,
+):
+    """Regression: navigate-only AI simplification must not erase required start click."""
+    import services.workflow_simplifier as mod
+
+    class OverAggressiveProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            from ai.client import AIResponse
+            # Simulate a bad AI simplification that drops the start button click.
+            return AIResponse(
+                content='[{"action_type":"navigate","intent":"Open speedtest","selector_chain":[],"value":"https://www.speedtest.net/es","checkpoint":true}]'
+            )
+
+    monkeypatch.setattr(mod, "get_ai_provider", lambda: OverAggressiveProvider())
+
+    record_payload = _make_record_payload(
+        "Internet Speed Test Regression",
+        [
+            {"action_type": "navigate", "intent": "Open Google", "value": "https://www.google.com/"},
+            {"action_type": "type", "intent": "Type speed query", "value": "velocidad internet"},
+            {"action_type": "navigate", "intent": "Open Speedtest", "value": "https://www.speedtest.net/es"},
+            {
+                "action_type": "click",
+                "intent": "Click start internet test",
+                "value": None,
+                "selector_chain": [{"type": "text", "value": "Iniciar"}],
+            },
+        ],
+        target_url="https://www.google.com/",
+    )
+
+    record_resp = await api_client.post("/v1/workflows/record", json=record_payload, headers=_HEADERS)
+    assert record_resp.status_code == 200, record_resp.text
+    workflow_id = record_resp.json()["id"]
+
+    wf_resp = await api_client.get(f"/v1/workflows/{workflow_id}", headers=_HEADERS)
+    assert wf_resp.status_code == 200, wf_resp.text
+    wf_data = wf_resp.json()
+    step_actions = [s["action_type"] for s in wf_data["steps"]]
+    assert "click" in step_actions
+    assert len(wf_data["steps"]) >= 2
+
+    activate_resp = await api_client.put(
+        f"/v1/workflows/{workflow_id}/status",
+        headers=_HEADERS,
+        json={"status": "active"},
+    )
+    assert activate_resp.status_code == 200, activate_resp.text
+
+    run_resp = await api_client.post(f"/v1/workflows/{workflow_id}/run", headers=_HEADERS)
+    assert run_resp.status_code == 200, run_resp.text
+    run_id = run_resp.json()["id"]
+
+    result_resp = await api_client.post(
+        f"/v1/agent/{run_id}/result",
+        headers=_HEADERS,
+        json={
+            "step_index": 0,
+            "success": True,
+            "page_context_after": {
+                "url": "https://www.speedtest.net/es",
+                "title": "Speedtest",
+                "visible_text": "Comprueba tu velocidad de Internet",
+                "visible_elements": [],
+                "dom_snippet": "",
+                "accessibility_tree": "",
+                "is_blocking": False,
+            },
+        },
+    )
+    assert result_resp.status_code == 200, result_resp.text
+    result_data = result_resp.json()
+    assert result_data.get("decision") != "COMPLETED"
+    assert result_data.get("next_step_index") == 1
+
+    run_state_resp = await api_client.get(f"/v1/runs/{run_id}", headers=_HEADERS)
+    assert run_state_resp.status_code == 200, run_state_resp.text
+    run_state = run_state_resp.json()
+    assert run_state["status"] == "running"
+    assert run_state["current_step_index"] == 1
+    assert run_state["total_steps"] >= 2

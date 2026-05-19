@@ -103,6 +103,15 @@ class AgentService:
             if req.current_step_index is not None
             else run.current_step_index
         )
+        if step_index >= total_steps and run.current_step_index < total_steps:
+            logger.warning(
+                "Client step drift detected for run %s: client=%s server=%s total=%s",
+                run_id,
+                step_index,
+                run.current_step_index,
+                total_steps,
+            )
+            step_index = run.current_step_index
 
         if step_index >= total_steps:
             return PollResponse(
@@ -963,6 +972,18 @@ class AgentService:
 
     async def report_result(self, run_id: str, req: ResultRequest) -> ResultResponse:
         run = await self._get_run(run_id)
+        if req.step_index != run.current_step_index:
+            logger.warning(
+                "Rejecting stale result for run %s: expected step %s, got %s",
+                run_id,
+                run.current_step_index,
+                req.step_index,
+            )
+            return ResultResponse(
+                accepted=False,
+                next_step_index=run.current_step_index,
+                should_poll=False,
+            )
 
         if run.status in (RunStatus.RUNNING.value, RunStatus.RECOVERING.value):
             pass

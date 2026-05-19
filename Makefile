@@ -42,7 +42,7 @@ test-extension:
 test-e2e:
 	@echo "Checking backend is running..."
 	@curl -s http://localhost:8081/v1/health | grep -q ok || (echo "✗ Backend not running. Start it with: make dev-backend" && exit 1)
-	cd extension && E2E_API_KEY="$(shell grep API_KEY .env | cut -d= -f2)" npx playwright test
+	cd extension && E2E_API_KEY="$$(awk 'match($$0,/^[[:space:]]*API_KEY[[:space:]]*=/){v=substr($$0,RSTART+RLENGTH); gsub(/\r/,"",v); sub(/^[[:space:]]+/,"",v); sub(/[[:space:]]+$$/,"",v); if ((v ~ /^".*"$$/) || (v ~ /^'\''.*'\''$$/)) v=substr(v,2,length(v)-2); print v; exit}' ../.env)" npx playwright test
 
 # ── Autonomy E2E (Phase 0 / 1 / 3 verification) ────────
 # Single command that proves the AI-driven autonomy fixes are wired in

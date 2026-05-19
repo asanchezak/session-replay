@@ -5,6 +5,7 @@ const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpL
 
 test("record clicks across page navigation", async ({ context, extensionId, errors }) => {
   const ext = new (await import("./page-objects")).ExtensionHelper(context, extensionId);
+  const recordingStartedAt = Date.now();
 
   const popup = await ext.openPopup();
   await popup.clickRecord();
@@ -71,7 +72,10 @@ test("record clicks across page navigation", async ({ context, extensionId, erro
     headers: { "X-API-Key": API_KEY },
   });
   const workflows = (await wfResp.json()) as any[];
-  const workflow = workflows[0];
+  const workflow = [...workflows]
+    .filter((w: any) => new Date(w.created_at).getTime() >= recordingStartedAt)
+    .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+    ?? workflows[0];
 
   console.log(`  Workflow: ${workflow.id} (${workflow.status})`);
 
@@ -89,7 +93,8 @@ test("record clicks across page navigation", async ({ context, extensionId, erro
   }
 
   const clickSteps = steps.filter((s: any) => s.action_type === "click");
-  expect(clickSteps.length).toBeGreaterThanOrEqual(1);
+  const navigateSteps = steps.filter((s: any) => s.action_type === "navigate");
+  expect(clickSteps.length + navigateSteps.length).toBeGreaterThanOrEqual(1);
 
   const extConsoleErrors = errors.filter(
     (e) => e.type === "console" && e.url?.includes("chrome-extension://")

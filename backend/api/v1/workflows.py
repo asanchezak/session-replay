@@ -112,6 +112,10 @@ async def record_workflow(
             selector_chain = [{"type": "css", "value": raw_selector}]
 
         value = payload.get("value")
+        # Backward compatibility: older E2E helpers and recorded payloads may
+        # store navigation destination under `url` instead of `value`.
+        if not value and ev.event_type == "navigate":
+            value = payload.get("url") or payload.get("target_url")
         if not value and isinstance(target, dict):
             value = target.get("text")
 
