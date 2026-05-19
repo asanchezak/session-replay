@@ -111,6 +111,7 @@ class AIOutcomeService:
         latency_ms: int | None = None,
         thinking_steps: list | None = None,
         decision_context: dict | None = None,
+        screenshot_meta: dict | None = None,
     ) -> AIDecisionOutcome | None:
         try:
             prompt_hash = None
@@ -127,6 +128,7 @@ class AIOutcomeService:
                 latency_ms=latency_ms,
                 thinking_steps=thinking_steps,
                 decision_context=decision_context,
+                screenshot_meta=screenshot_meta,
             )
             async with self.session.begin_nested():
                 self.session.add(row)

@@ -37,6 +37,11 @@ class AIDecisionOutcome(Base, TimestampMixin, UUIDMixin):
     thinking_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
     reasoning_chain_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     decision_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Workstream B (vision): lightweight metadata for screenshots that were
+    # forwarded to the model on this decision. Bytes are NOT stored — the
+    # screenshot is in-flight only. Shape: {sha256, width, height, mime,
+    # byte_size, trigger, detail}.
+    screenshot_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # IMPORTANT: must be tz-aware to match `datetime.now(UTC)` writes from
     # AIOutcomeService.resolve_latest. The 2026-05-15 ghost-run incident
     # ('a31c67d0-…') was caused by this column being TIMESTAMP WITHOUT TZ.

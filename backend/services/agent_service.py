@@ -1,7 +1,11 @@
+import base64
+import binascii
 import contextlib
+import hashlib
 import json
 import logging
 import re
+import struct
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -53,6 +57,38 @@ _pending_actions: dict[str, str] = {}
 
 def _is_http_url(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
+def _peek_jpeg_dimensions(data: bytes) -> tuple[int, int]:
+    """Read width/height from a JPEG byte stream without decoding pixels.
+
+    Walks the SOF0/SOF2 frame marker. Returns (0, 0) if the bytes are not a
+    valid JPEG or the marker can't be located — callers should not raise.
+    """
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return 0, 0
+    i = 2
+    n = len(data)
+    while i < n - 9:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        i += 2
+        if marker == 0xD9 or marker == 0xDA:  # EOI or SOS
+            return 0, 0
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            # Start-of-frame: skip 3 bytes (length + sample precision), then
+            # the next 4 bytes are height (2) then width (2).
+            if i + 7 >= n:
+                return 0, 0
+            height, width = struct.unpack(">HH", data[i + 3 : i + 7])
+            return width, height
+        if i + 1 >= n:
+            return 0, 0
+        seg_len = struct.unpack(">H", data[i : i + 2])[0]
+        i += seg_len
+    return 0, 0
 
 
 class AgentService:
@@ -181,6 +217,9 @@ class AgentService:
         if self._should_consult_ai(run_id, step, ctx):
             ai_decision = await self._consult_ai_for_step(
                 run, step_index, step, command, analysis, ctx,
+                screenshot_b64=req.screenshot_b64,
+                screenshot_mime=req.screenshot_mime,
+                screenshot_trigger=req.screenshot_trigger,
             )
             if ai_decision:
                 applied_updates = await self._apply_plan_updates_from_ai(
@@ -224,6 +263,7 @@ class AgentService:
                         thinking_steps=ai_decision.get("thinking_steps"),
                         page_context=ctx,
                         decision_context=ai_decision.get("decision_context"),
+                        screenshot_meta=ai_decision.get("screenshot_meta"),
                     )
                     if run.status != RunStatus.RUNNING.value:
                         with contextlib.suppress(Exception):
@@ -247,6 +287,7 @@ class AgentService:
                         thinking_steps=ai_decision.get("thinking_steps"),
                         page_context=ctx,
                         decision_context=ai_decision.get("decision_context"),
+                        screenshot_meta=ai_decision.get("screenshot_meta"),
                     )
                     await self.execution.advance_step(run_id)
                     self._clear_recovery_state(run_id)
@@ -294,6 +335,7 @@ class AgentService:
             thinking_steps=(ai_decision or {}).get("thinking_steps") if ai_confirmed else None,
             page_context=ctx,
             decision_context=(ai_decision or {}).get("decision_context"),
+            screenshot_meta=(ai_decision or {}).get("screenshot_meta") if ai_confirmed else None,
         )
 
         if run.status != "running":
@@ -1099,10 +1141,60 @@ class AgentService:
         recovery_reason: str | None = None,
         strategy_hint: str | None = None,
         prior_ai_decision: dict[str, Any] | None = None,
+        screenshot_b64: str | None = None,
+        screenshot_mime: str | None = None,
+        screenshot_trigger: str | None = None,
     ) -> dict[str, Any] | None:
         ai_api_key = settings.ai_api_key
         if not ai_api_key:
             return None
+
+        # Workstream B (vision): validate and prepare in-flight screenshot data.
+        # Bytes are passed to the provider and then DISCARDED. Only a small
+        # metadata blob (sha256, dims, size, trigger, detail) is persisted in
+        # the AIDecisionOutcome row.
+        screenshot_meta: dict[str, Any] | None = None
+        images_kwarg: list[dict[str, Any]] | None = None
+        if (
+            settings.vision_enabled
+            and screenshot_b64
+            and len(screenshot_b64) <= max(settings.vision_max_bytes, 1) * 2  # base64 is ~4/3 of bytes; loose upper bound
+        ):
+            try:
+                raw_bytes = base64.b64decode(screenshot_b64, validate=False)
+                if len(raw_bytes) > settings.vision_max_bytes:
+                    logger.info(
+                        "Dropping oversized screenshot (%d bytes > %d cap)",
+                        len(raw_bytes),
+                        settings.vision_max_bytes,
+                    )
+                else:
+                    width, height = _peek_jpeg_dimensions(raw_bytes)
+                    detail = (
+                        "high"
+                        if settings.vision_high_detail_on_failure and (
+                            screenshot_trigger in {"post_failure", "blocking_modal"}
+                        )
+                        else "low"
+                    )
+                    screenshot_meta = {
+                        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                        "width": width,
+                        "height": height,
+                        "mime": screenshot_mime or "image/jpeg",
+                        "byte_size": len(raw_bytes),
+                        "trigger": screenshot_trigger,
+                        "detail": detail,
+                    }
+                    images_kwarg = [{
+                        "b64": screenshot_b64,
+                        "mime": screenshot_mime or "image/jpeg",
+                        "detail": detail,
+                    }]
+            except (binascii.Error, ValueError) as exc:
+                logger.warning("Invalid screenshot_b64: %s", exc)
+                screenshot_meta = None
+                images_kwarg = None
 
         selector_chain = step.get("selector_chain", [])
         visible_elements = []
@@ -1147,6 +1239,7 @@ class AgentService:
             checkpoint_steps=checkpoint_steps,
             step_stability_score=step_stability,
             workflow_expertise=workflow_expertise,
+            has_screenshot=bool(images_kwarg),
         )
         if recovery_mode:
             prompt += (
@@ -1181,6 +1274,7 @@ class AgentService:
                     effective_prompt,
                     system=AGENT_EXECUTOR_SYSTEM,
                     max_tokens=1024,
+                    images=images_kwarg,
                 )
                 last_response = response.content[:2000]
                 result = json.loads(response.content)
@@ -1200,6 +1294,13 @@ class AgentService:
                     "attempt": attempt,
                     "strategy": "primary" if attempt == 1 else "repair" if attempt == 2 else "reframe",
                 }
+                # Stash screenshot metadata on the result for the audit path
+                # to persist into AIDecisionOutcome.screenshot_meta. Bytes are
+                # already discarded — only the small meta dict travels onward.
+                if screenshot_meta:
+                    result["screenshot_meta"] = screenshot_meta
+                # Drop the bytes reference so they can be GC'd promptly.
+                images_kwarg = None
                 return result
             except (json.JSONDecodeError, ValueError):
                 logger.warning("AI agent decision not valid JSON on attempt %s: %s", attempt, (last_response or "")[:200])
@@ -1659,6 +1760,7 @@ class AgentService:
         thinking_steps: list | None = None,
         page_context: Any | None = None,
         decision_context: dict | None = None,
+        screenshot_meta: dict | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "decision": decision.value,
@@ -1699,6 +1801,7 @@ class AgentService:
                 model=model_name,
                 thinking_steps=thinking_steps,
                 decision_context=decision_context,
+                screenshot_meta=screenshot_meta,
             )
         except Exception as exc:
             logger.debug("ai_outcomes.record_decision skipped: %s", exc)

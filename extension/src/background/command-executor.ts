@@ -106,6 +106,74 @@ export class CommandExecutor {
     prevContextByTab.delete(tabId);
   }
 
+  /** Capture the visible viewport as a downscaled JPEG. Returns null on failure
+   *  so the caller can fall back to a no-image poll without breaking the loop.
+   *  Output: base64 string (no data: prefix), MIME, dimensions, byte size. */
+  async captureScreenshot(tabId: number): Promise<{
+    b64: string;
+    mime: string;
+    width: number;
+    height: number;
+    byte_size: number;
+  } | null> {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      const windowId = tab.windowId;
+      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, {
+        format: "jpeg",
+        quality: 70,
+      });
+      if (!dataUrl) return null;
+
+      // Decode the data URL into an ImageBitmap so we can downscale via OffscreenCanvas.
+      const fetched = await fetch(dataUrl);
+      const blob = await fetched.blob();
+      const bitmap = await createImageBitmap(blob);
+
+      const MAX_DIM = 1280;
+      const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+
+      const canvas = new OffscreenCanvas(width, height);
+      const cctx = canvas.getContext("2d");
+      if (!cctx) {
+        bitmap.close();
+        return null;
+      }
+      cctx.drawImage(bitmap, 0, 0, width, height);
+      bitmap.close();
+
+      const outBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 });
+      const buf = await outBlob.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+
+      // Encode bytes -> base64 without using btoa(String.fromCharCode(...)) which
+      // can blow the call stack on large arrays. Chunk through fromCharCode then
+      // base64-encode.
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(
+          null,
+          Array.from(bytes.subarray(i, i + CHUNK)),
+        );
+      }
+      const b64 = btoa(binary);
+
+      return {
+        b64,
+        mime: "image/jpeg",
+        width,
+        height,
+        byte_size: bytes.length,
+      };
+    } catch (err) {
+      log.error("captureScreenshot failed:", err);
+      return null;
+    }
+  }
+
   async executeCommand(
     tabId: number,
     command: AgentCommand,

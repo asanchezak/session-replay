@@ -198,6 +198,18 @@ SELECTOR QUALITY:
 - If the recorded selectors look fragile but you can see a clearly equivalent
   element on the page (matching the intent), ADAPT with stable selectors.
 
+VISUAL CONTEXT (when an image is attached):
+The screenshot shows the live viewport (NOT the full page). visible_elements
+rects are viewport-relative and match the image. Use the image to:
+- Verify a target element is actually visible and unobstructed (no overlay,
+  modal, consent banner, or spinner covering it).
+- Detect blockers the DOM text misses: loading spinners, empty states, error
+  banners with image-based text, captcha widgets.
+- Disambiguate when several elements share the same text/role.
+When DOM says "clickable" but the image shows an overlay/blocker, ADAPT to
+dismiss the blocker first. The image is authoritative for "what the user sees
+right now"; the DOM is authoritative for "what is clickable".
+
 DECISIONS (return one):
 1. EXECUTE — recorded step looks fine, run it as-is
 2. ADAPT  — change selectors / action / value to fit the current page state
@@ -298,6 +310,7 @@ def build_agent_decision_prompt(
     workflow_expertise: str | None = None,
     page_context_error: str | None = None,
     actual_url: str | None = None,
+    has_screenshot: bool = False,
 ) -> str:
     parts = ["## Workflow Context"]
     if workflow_goal:
@@ -389,6 +402,12 @@ def build_agent_decision_prompt(
     parts.append("\n## Current Page State (source of truth)")
     parts.append(f"URL: {page_url}")
     parts.append(f"Title: {page_title}")
+    if has_screenshot:
+        parts.append(
+            "## Visual State\nA viewport screenshot is attached as an image. "
+            "Apply VISUAL CONTEXT rules from the system prompt — prefer the "
+            "image when it disagrees with the DOM about visibility/blockers."
+        )
 
     if step_action == "navigate" and step_value:
         from urllib.parse import urlparse as _up

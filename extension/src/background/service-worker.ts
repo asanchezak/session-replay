@@ -603,6 +603,12 @@ async function executeAgentRun(
   let pausePollCount = 0;
   const pauseRePollCap = 30;
 
+  // Vision (Workstream B): hybrid capture cadence. Track the previous decision
+  // and last step result so we can decide when a screenshot adds signal.
+  let lastDecision: string | null = null;
+  let lastResultSuccess: boolean | null = null;
+  const VISION_BASELINE_EVERY_N = 5;
+
   try {
   while (true) {
     pollCount++;
@@ -636,16 +642,53 @@ async function executeAgentRun(
       ? { ...pageContext, is_blocking: false, blocking_type: null }
       : pageContext;
 
+    // Hybrid vision policy: capture and attach a screenshot when the AI is
+    // most likely to need pixels — first poll, after a recovery decision,
+    // after a failure, on URL change, on visible blocker, or every Nth poll
+    // as a safety baseline. On other polls send text-only to keep cost down.
+    let visionTrigger: string | null = null;
+    if (pollCount === 1) {
+      visionTrigger = "first_poll";
+    } else if (lastDecision === "ADAPT" || lastDecision === "RESTART"
+      || lastDecision === "ROLLBACK" || lastDecision === "PAUSE") {
+      visionTrigger = `post_${lastDecision.toLowerCase()}`;
+    } else if (lastResultSuccess === false) {
+      visionTrigger = "post_failure";
+    } else if (pageContext.page_diff?.url_changed) {
+      visionTrigger = "url_changed";
+    } else if (pageContext.is_blocking
+      && (pageContext.blocking_type === "unexpected_modal"
+        || pageContext.blocking_type === "consent_banner")) {
+      visionTrigger = "blocking_modal";
+    } else if (pollCount % VISION_BASELINE_EVERY_N === 0) {
+      visionTrigger = "baseline";
+    }
+
+    let screenshotPayload: { b64: string; mime: string; trigger: string } | null = null;
+    if (visionTrigger) {
+      const shot = await commandExecutor.captureScreenshot(targetTabId);
+      if (shot) {
+        screenshotPayload = { b64: shot.b64, mime: shot.mime, trigger: visionTrigger };
+        log.log(`[Agent] Vision: ${visionTrigger} (${shot.width}x${shot.height}, ${shot.byte_size}B)`);
+      }
+    }
+
     log.log(`[Agent] Poll #${pollCount} step ${currentStepIndex}/${totalSteps}`);
     const pollResponse = await apiClient.agentPoll(runId, {
       page_context: contextForPoll,
       current_step_index: currentStepIndex,
+      ...(screenshotPayload && {
+        screenshot_b64: screenshotPayload.b64,
+        screenshot_mime: screenshotPayload.mime,
+        screenshot_trigger: screenshotPayload.trigger,
+      }),
     });
 
     log.log(
       `[Agent] Decision: ${pollResponse.decision} ` +
       `(conf: ${pollResponse.confidence})`,
     );
+    lastDecision = pollResponse.decision;
 
     if (pollResponse.decision !== "PAUSE") {
       pausePollCount = 0;
@@ -772,6 +815,7 @@ async function executeAgentRun(
         orchestrator.notifyRecovering(workflow.name, currentStepIndex, totalSteps, runId, pollResponse.reasoning);
 
         const adaptResult = await commandExecutor.executeCommand(targetTabId, adaptCmd);
+        lastResultSuccess = adaptResult.success;
         const adaptResultResponse = await apiClient.agentResult(runId, {
           step_index: currentStepIndex,
           success: adaptResult.success,
@@ -821,6 +865,7 @@ async function executeAgentRun(
             // returns immediately for same-origin hash changes).
             await new Promise((r) => setTimeout(r, 1500));
           }
+          lastResultSuccess = true;
           const resultResponse = await apiClient.agentResult(runId, {
             step_index: currentStepIndex,
             success: true,
@@ -840,6 +885,7 @@ async function executeAgentRun(
           const execResult = await commandExecutor.executeCommand(
             targetTabId, cmd,
           );
+          lastResultSuccess = execResult.success;
 
           if (execResult.success) {
             log.log(`[Agent] Step ${currentStepIndex} OK`);

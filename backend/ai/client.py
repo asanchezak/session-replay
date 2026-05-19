@@ -3,10 +3,20 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Literal, TypedDict
 
 import httpx
 
 from core.config import settings
+
+
+class ImageBlock(TypedDict, total=False):
+    """A single image attached to a generate() call. Bytes are passed inline
+    as base64; the provider translates to its native content-block shape and
+    is responsible for discarding the bytes after the call returns."""
+    b64: str
+    mime: str  # "image/jpeg" | "image/png" | "image/webp"
+    detail: Literal["low", "high"]  # OpenAI vision tile mode; ignored by Mock
 
 
 @dataclass
@@ -24,6 +34,7 @@ class AIProvider(ABC):
         prompt: str,
         system: str | None = None,
         max_tokens: int = 1024,
+        images: list[ImageBlock] | None = None,
     ) -> AIResponse:
         ...
 
@@ -38,6 +49,7 @@ class MockProvider(AIProvider):
         prompt: str,
         system: str | None = None,
         max_tokens: int = 1024,
+        images: list[ImageBlock] | None = None,
     ) -> AIResponse:
         return AIResponse(
             content='{"result": "mock_success", "confidence": 0.85}',
@@ -64,11 +76,32 @@ class OpenAIProvider(AIProvider):
         prompt: str,
         system: str | None = None,
         max_tokens: int = 1024,
+        images: list[ImageBlock] | None = None,
     ) -> AIResponse:
         messages: list[dict] = []
         if system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        # When images are attached, the user content becomes a multi-part array
+        # of {type:"text"|"image_url"} blocks per the OpenAI Chat Completions
+        # vision schema. Without images we keep the simpler string form.
+        if images:
+            user_content: list[dict] = [{"type": "text", "text": prompt}]
+            for img in images:
+                b64 = img.get("b64") or ""
+                mime = img.get("mime") or "image/jpeg"
+                detail = img.get("detail") or "low"
+                if not b64:
+                    continue
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64}",
+                        "detail": detail,
+                    },
+                })
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         resp = await self._client.post(
             "https://api.openai.com/v1/chat/completions",
@@ -126,11 +159,12 @@ class FallbackProvider(AIProvider):
         prompt: str,
         system: str | None = None,
         max_tokens: int = 1024,
+        images: list[ImageBlock] | None = None,
     ) -> AIResponse:
         last_error: Exception | None = None
         for p in self.providers:
             try:
-                return await p.generate(prompt, system, max_tokens)
+                return await p.generate(prompt, system, max_tokens, images=images)
             except Exception as e:
                 last_error = e
         raise last_error  # type: ignore[UnionAttr]
