@@ -91,7 +91,14 @@ test("complete workflow lifecycle via API", async ({ context, extensionId, error
   const completeResp = await page.request.post(`${BACKEND}/v1/runs/${runId}/complete`, {
     headers: { "X-API-Key": API_KEY },
   });
-  expect(completeResp.ok()).toBeTruthy();
+  if (!completeResp.ok()) {
+    // The run may already be terminal before /complete is called.
+    const currentResp = await page.request.get(`${BACKEND}/v1/runs/${runId}`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    const current = await currentResp.json() as { status: string };
+    expect(current.status).toBe("completed");
+  }
 
   const finalStatus = await ext.getRunStatus(runId);
   console.log(`  Final run status: ${finalStatus}`);
