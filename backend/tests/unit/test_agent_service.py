@@ -509,6 +509,87 @@ async def test_poll_restart_restores_original_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_handle_restart_uses_recorded_navigate_not_metadata_target(
+    db_session: AsyncSession,
+):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Restart URL WF", status="draft", target_url="https://www.google.com")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = {
+        "workflow": {"id": str(workflow.id), "target_url": "https://www.google.com"},
+        "steps": [
+            _make_step(0, "navigate", value="https://www.speedtest.net/es"),
+            _make_step(1, "click", intent="Click Iniciar"),
+        ],
+    }
+    run.current_step_index = 1
+    run.total_steps = 2
+    run.status = "running"
+    await db_session.flush()
+
+    run_id = str(run.id)
+    _run_restart_count.pop(run_id, None)
+    agent = AgentService(db_session)
+    response = await agent._handle_restart_decision(
+        run,
+        1,
+        {
+            "confidence": 0.8,
+            "reasoning": "Restart flow",
+            "command": {"action": "navigate", "value": "https://www.google.com/"},
+        },
+        _make_context(url="https://accounts.google.com"),
+    )
+
+    await db_session.refresh(run)
+    assert response.decision == DecisionType.RESTART
+    assert response.command is not None
+    assert response.command.value == "https://www.speedtest.net/es"
+    assert run.current_step_index == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_restart_falls_back_to_ai_command_when_no_navigate_steps(
+    db_session: AsyncSession,
+):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Restart URL Fallback WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = {
+        "workflow": {"id": str(workflow.id), "target_url": None},
+        "steps": [_make_step(0, "click", intent="Click submit")],
+    }
+    run.current_step_index = 0
+    run.total_steps = 1
+    run.status = "running"
+    await db_session.flush()
+
+    run_id = str(run.id)
+    _run_restart_count.pop(run_id, None)
+    agent = AgentService(db_session)
+    response = await agent._handle_restart_decision(
+        run,
+        0,
+        {
+            "confidence": 0.8,
+            "reasoning": "Restart flow",
+            "command": {"action": "navigate", "value": "https://example.org/restart"},
+        },
+        _make_context(url="https://broken.example"),
+    )
+
+    assert response.decision == DecisionType.RESTART
+    assert response.command is not None
+    assert response.command.value == "https://example.org/restart"
+
+
+@pytest.mark.asyncio
 async def test_poll_rollback_to_checkpoint(
     db_session: AsyncSession,
     monkeypatch,
@@ -1184,6 +1265,16 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
         types.SimpleNamespace(page_diff={"added": [1]}, visible_elements=[], visible_text=""),
     )
     assert wait_fallback is not None and wait_fallback.decision == DecisionType.WAIT
+
+    execute_fallback = await agent._fallback_after_ai_failure(
+        run_id,
+        0,
+        {"action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": []},
+        types.SimpleNamespace(page_diff={}, visible_elements=[{"selector": "x"}], visible_text="ready"),
+    )
+    assert execute_fallback is not None and execute_fallback.decision == DecisionType.EXECUTE
+    assert execute_fallback.command is not None
+    assert execute_fallback.command.value == "https://www.speedtest.net/es"
 
     _run_restart_count[run_id] = 99
     restart = await agent._handle_restart_decision(run, 0, {}, _make_context())

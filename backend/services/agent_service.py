@@ -48,6 +48,10 @@ _run_rollback_count: dict[str, int] = {}
 _pending_actions: dict[str, str] = {}
 
 
+def _is_http_url(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
 class AgentService:
     """Intelligent agent service — uses AI for adaptive decision-making."""
 
@@ -381,6 +385,34 @@ class AgentService:
         step: dict[str, Any],
         ctx: Any,
     ) -> PollResponse | None:
+        # AI-first does not mean AI-only. If the model output is unusable but
+        # the recorded step is a deterministic navigate, execute it instead of
+        # pausing the run.
+        if (
+            isinstance(step, dict)
+            and step.get("action_type") == "navigate"
+            and _is_http_url(step.get("value"))
+        ):
+            command = self._build_command(step)
+            reasoning = "AI output unusable; executing deterministic navigate fallback"
+            await self._audit_decision(
+                run_id,
+                DecisionType.EXECUTE,
+                0.7,
+                reasoning,
+                command=command,
+                step_index=step_index,
+                page_context=ctx,
+                decision_context={"origin": "ai-fallback", "step_action": step.get("action_type")},
+            )
+            return PollResponse(
+                decision=DecisionType.EXECUTE,
+                confidence=0.7,
+                reasoning=reasoning,
+                command=command,
+                next_step_index=step_index,
+            )
+
         if self._is_transitional_page(ctx):
             return await self._handle_wait_decision(
                 run_id,
@@ -486,8 +518,11 @@ class AgentService:
             return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
         _run_restart_count[run_id] = restarts + 1
         await self.execution.reset_to_start(run_id)
-        target_url = ((run.workflow_snapshot or {}).get("workflow") or {}).get("target_url")
-        command = AgentCommand(action=CommandAction.NAVIGATE, value=target_url, target=target_url)
+        restart_url = self._resolve_restart_url(run, step_index, ai_decision)
+        if not restart_url:
+            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+
+        command = AgentCommand(action=CommandAction.NAVIGATE, value=restart_url, target=restart_url)
         await self._audit_decision(
             run_id,
             DecisionType.RESTART,
@@ -506,6 +541,49 @@ class AgentService:
             command=command,
             next_step_index=0,
         )
+
+    def _resolve_restart_url(
+        self,
+        run: ExecutionRun,
+        step_index: int,
+        ai_decision: dict[str, Any],
+    ) -> str | None:
+        """Pick a restart URL that follows the recorded workflow blueprint.
+
+        Priority:
+        1) current step navigate URL (if any)
+        2) first recorded navigate URL
+        3) AI-proposed restart command URL
+        4) workflow.target_url metadata
+        """
+        snapshot = run.workflow_snapshot or {}
+        steps = snapshot.get("steps", []) or []
+
+        if 0 <= step_index < len(steps):
+            current = steps[step_index] or {}
+            current_value = current.get("value")
+            if current.get("action_type") == "navigate" and _is_http_url(current_value):
+                return str(current_value)
+
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("action_type") != "navigate":
+                continue
+            value = step.get("value")
+            if _is_http_url(value):
+                return str(value)
+
+        ai_command = ai_decision.get("command")
+        if isinstance(ai_command, dict):
+            ai_value = ai_command.get("value") or ai_command.get("target")
+            if _is_http_url(ai_value):
+                return str(ai_value)
+
+        target_url = ((snapshot.get("workflow") or {}).get("target_url"))
+        if _is_http_url(target_url):
+            return str(target_url)
+        return None
 
     async def _handle_rollback_decision(
         self,
