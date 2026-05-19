@@ -234,6 +234,45 @@ async function detectChallengesOnTab(tabId: number): Promise<ChallengeDetection[
   }
 }
 
+async function extractAndReportRunData(
+  workflowId: string,
+  runId: string,
+  tabId: number,
+  stepIndex: number,
+): Promise<void> {
+  try {
+    let outputSchema: Record<string, unknown> | null = null;
+    try {
+      const analysis = await apiClient.getWorkflowAnalysis(workflowId);
+      const schema = analysis.output_spec?.schema;
+      if (schema && typeof schema === "object") {
+        outputSchema = schema as Record<string, unknown>;
+      }
+    } catch {
+      // Analysis is optional; extraction can still fallback to page text.
+    }
+
+    const extraction = await stepExecutor.extractData(
+      tabId,
+      outputSchema,
+      stepIndex,
+    );
+    if (extraction && extraction.data.length > 0) {
+      await apiClient.reportExtraction(
+        runId,
+        extraction.step_index,
+        extraction.data,
+        extraction.schema,
+      );
+      log.log(`[Extraction] Recorded ${extraction.data.length} rows for run ${runId}`);
+    } else {
+      log.log(`[Extraction] No data extracted for run ${runId}`);
+    }
+  } catch (err) {
+    log.error("[Extraction] Failed:", err);
+  }
+}
+
 async function executeWorkflowRun(
   workflowId: string,
   tabId?: number,
@@ -492,27 +531,7 @@ async function executeWorkflowRun(
 
     // Attempt data extraction after successful run
     if (targetTabId) {
-      try {
-        const outputSchema = typeof (workflow as Record<string, unknown>).output_spec === "object"
-          ? (workflow as Record<string, unknown>).output_spec as Record<string, unknown> | null
-          : null;
-        const extraction = await stepExecutor.extractData(
-          targetTabId,
-          outputSchema as Record<string, unknown> | null,
-          steps.length,
-        );
-        if (extraction && extraction.data.length > 0) {
-          await apiClient.reportExtraction(
-            runId,
-            extraction.step_index,
-            extraction.data,
-            extraction.schema,
-          );
-          log.log(`Extracted ${extraction.data.length} records from run ${runId}`);
-        }
-      } catch (err) {
-        log.error("Data extraction failed:", err);
-      }
+      await extractAndReportRunData(workflowId, runId, targetTabId, steps.length);
     }
   }
 
@@ -918,6 +937,9 @@ async function executeAgentRun(
   }
 
   if (finalStatus === "completed") {
+    if (targetTabId) {
+      await extractAndReportRunData(workflowId, runId, targetTabId, currentStepIndex);
+    }
     orchestrator.notifyIdle();
     orchestrator.broadcastState();
   } else if (finalStatus === "failed") {

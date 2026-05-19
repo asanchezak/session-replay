@@ -45,6 +45,9 @@ _run_step_wait_count: dict[tuple[str, int], int] = {}
 _run_total_waits: dict[str, int] = {}
 _run_restart_count: dict[str, int] = {}
 _run_rollback_count: dict[str, int] = {}
+_run_active_step: dict[str, int] = {}
+_run_step_recovery_started_at: dict[tuple[str, int], datetime] = {}
+_run_step_recovery_cycles: dict[tuple[str, int], int] = {}
 _pending_actions: dict[str, str] = {}
 
 
@@ -97,6 +100,19 @@ class AgentService:
                 requires_human=True,
             )
 
+        if run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.CANCELED.value,
+        }:
+            self._clear_recovery_state(run_id)
+            return PollResponse(
+                decision=DecisionType.COMPLETED,
+                confidence=0.99,
+                reasoning=f"Run already terminal: {run.status}",
+                next_step_index=run.current_step_index,
+            )
+
         snapshot = run.workflow_snapshot or {}
         steps: list[dict[str, Any]] = snapshot.get("steps", [])
         analysis: dict[str, Any] = snapshot.get("analysis", {})
@@ -118,6 +134,7 @@ class AgentService:
             step_index = run.current_step_index
 
         if step_index >= total_steps:
+            self._clear_recovery_state(run_id)
             return PollResponse(
                 decision=DecisionType.COMPLETED,
                 confidence=0.99,
@@ -129,6 +146,7 @@ class AgentService:
         # already satisfied on the current page before attempting the next step.
         # This prevents over-execution when the goal is met before all steps run.
         if await self._goal_predicate_satisfied(run, ctx):
+            self._clear_recovery_state(run_id)
             with contextlib.suppress(Exception):
                 await self.execution.complete(run_id)
             with contextlib.suppress(Exception):
@@ -144,6 +162,16 @@ class AgentService:
                 reasoning="Goal predicate satisfied — workflow objective achieved early",
                 next_step_index=step_index,
             )
+
+        self._touch_recovery_window(run_id, step_index)
+        timeout_response = await self._fail_on_step_recovery_timeout(
+            run=run,
+            step_index=step_index,
+            ctx=ctx,
+            trigger="pre_decision",
+        )
+        if timeout_response:
+            return timeout_response
 
         step = steps[step_index]
         command = self._build_command(step)
@@ -174,7 +202,10 @@ class AgentService:
 
                 if decision_type == DecisionType.WAIT:
                     return await self._handle_wait_decision(
-                        run_id, step_index, ai_decision, ctx,
+                        run=run,
+                        step_index=step_index,
+                        ai_decision=ai_decision,
+                        ctx=ctx,
                     )
                 if decision_type == DecisionType.ADAPT:
                     adapted_command = self._parse_adapted_command(
@@ -218,6 +249,7 @@ class AgentService:
                         decision_context=ai_decision.get("decision_context"),
                     )
                     await self.execution.advance_step(run_id)
+                    self._clear_recovery_state(run_id)
                     _run_step_wait_count.pop((run_id, step_index), None)
                     return PollResponse(
                         decision=DecisionType.SKIP,
@@ -235,30 +267,16 @@ class AgentService:
                         run, step_index, ai_decision, ctx,
                     )
                 if decision_type == DecisionType.PAUSE:
-                    pause_reason = ai_decision.get("pause_reason", "AI recommends pausing")
-                    await self._audit_decision(
-                        run_id,
-                        DecisionType.PAUSE,
-                        ai_decision.get("confidence", 0.5),
-                        ai_decision.get("reasoning", pause_reason),
-                        pause_reason=pause_reason,
+                    return await self._autonomous_recovery_cycle(
+                        run=run,
                         step_index=step_index,
-                        thinking_steps=ai_decision.get("thinking_steps"),
-                        page_context=ctx,
-                        decision_context=ai_decision.get("decision_context"),
-                    )
-                    with contextlib.suppress(Exception):
-                        await self.execution.pause(run_id, reason=pause_reason)
-                    return PollResponse(
-                        decision=DecisionType.PAUSE,
-                        confidence=ai_decision.get("confidence", 0.5),
-                        reasoning=ai_decision.get("reasoning", pause_reason),
-                        pause_reason=pause_reason,
-                        requires_human=True,
-                        plan_updates=applied_updates,
+                        step=step,
+                        ctx=ctx,
+                        trigger="ai_pause_non_blocking",
+                        prior_ai_decision=ai_decision,
                     )
             else:
-                wait_response = await self._fallback_after_ai_failure(run_id, step_index, step, ctx)
+                wait_response = await self._fallback_after_ai_failure(run, step_index, step, ctx)
                 if wait_response:
                     return wait_response
 
@@ -378,13 +396,259 @@ class AgentService:
         visible_text = (getattr(ctx, "visible_text", "") or "").strip()
         return bool(added) and len(visible_elements) <= 4 and len(visible_text) < 200
 
+    def _touch_recovery_window(self, run_id: str, step_index: int) -> None:
+        active_step = _run_active_step.get(run_id)
+        if active_step != step_index:
+            self._clear_recovery_state(run_id)
+            _run_active_step[run_id] = step_index
+        key = (run_id, step_index)
+        _run_step_recovery_started_at.setdefault(key, datetime.now(UTC))
+        _run_step_recovery_cycles.setdefault(key, 0)
+
+    def _clear_recovery_state(self, run_id: str) -> None:
+        _run_retries.pop(run_id, None)
+        _run_heal_attempts.pop(run_id, None)
+        _run_total_waits.pop(run_id, None)
+        _run_restart_count.pop(run_id, None)
+        _run_rollback_count.pop(run_id, None)
+        _run_active_step.pop(run_id, None)
+        keys = [k for k in _run_step_wait_count if k[0] == run_id]
+        for key in keys:
+            _run_step_wait_count.pop(key, None)
+        recovery_keys = [k for k in _run_step_recovery_started_at if k[0] == run_id]
+        for key in recovery_keys:
+            _run_step_recovery_started_at.pop(key, None)
+            _run_step_recovery_cycles.pop(key, None)
+
+    def _recovery_window_seconds(self) -> int:
+        return max(30, int(getattr(settings, "ai_step_recovery_window_seconds", 900)))
+
+    def _seconds_in_recovery_window(self, run_id: str, step_index: int) -> int:
+        started = _run_step_recovery_started_at.get((run_id, step_index))
+        if not started:
+            return 0
+        return int((datetime.now(UTC) - started).total_seconds())
+
+    async def _append_recovery_event(self, run_id: str, payload: dict[str, Any]) -> None:
+        await self.audit.append(
+            AppendEvent(
+                event_type="recovery_cycle",
+                payload=payload,
+                run_id=run_id,
+                actor_type="ai",
+            )
+        )
+
+    def _page_context_digest(self, ctx: Any) -> dict[str, Any]:
+        visible_elements = getattr(ctx, "visible_elements", None) or []
+        visible_text = (getattr(ctx, "visible_text", "") or "").strip()
+        return {
+            "url": (getattr(ctx, "url", "") or "")[:300],
+            "title": (getattr(ctx, "title", "") or "")[:180],
+            "visible_text_excerpt": visible_text[:400],
+            "visible_elements_count": len(visible_elements),
+            "page_diff": getattr(ctx, "page_diff", None),
+        }
+
+    async def _recent_decision_digest(self, run_id: str, limit: int) -> list[dict[str, Any]]:
+        result = await self.session.execute(
+            select(EventLog)
+            .where(EventLog.run_id == to_uuid(run_id))
+            .where(EventLog.event_type == "agent_decision")
+            .order_by(EventLog.sequence_number.desc())
+            .limit(limit)
+        )
+        rows = []
+        for ev in result.scalars().all():
+            payload = ev.payload or {}
+            rows.append(
+                {
+                    "decision": payload.get("decision"),
+                    "confidence": payload.get("confidence"),
+                    "reasoning": (payload.get("reasoning") or "")[:220],
+                    "step_index": payload.get("step_index"),
+                    "decision_context": payload.get("decision_context"),
+                }
+            )
+        rows.reverse()
+        return rows
+
+    async def _fail_on_step_recovery_timeout(
+        self,
+        run: ExecutionRun,
+        step_index: int,
+        ctx: Any,
+        trigger: str,
+    ) -> PollResponse | None:
+        run_id = str(run.id)
+        elapsed_seconds = self._seconds_in_recovery_window(run_id, step_index)
+        window_seconds = self._recovery_window_seconds()
+        if elapsed_seconds < window_seconds:
+            return None
+
+        decision_limit = max(1, int(getattr(settings, "ai_timeout_decision_history_limit", 6)))
+        recent_decisions = await self._recent_decision_digest(run_id, decision_limit)
+        diagnostic_payload = {
+            "trigger": trigger,
+            "step_index": step_index,
+            "elapsed_seconds": elapsed_seconds,
+            "window_seconds": window_seconds,
+            "page_context": self._page_context_digest(ctx),
+            "recent_decisions": recent_decisions,
+        }
+        summary = (
+            f"Step recovery window expired after {elapsed_seconds}s on step {step_index}. "
+            f"Recent decisions={len(recent_decisions)}. "
+            f"Page url={diagnostic_payload['page_context']['url'] or '(unknown)'}."
+        )
+        await self._append_recovery_event(
+            run_id,
+            {
+                "kind": "timeout",
+                **diagnostic_payload,
+                "summary": summary,
+            },
+        )
+        with contextlib.suppress(Exception):
+            await self.execution.fail(run_id, summary)
+        run.error_summary = summary
+        run.pause_reason = None
+        await self.session.flush()
+        self._clear_recovery_state(run_id)
+        return PollResponse(
+            decision=DecisionType.PAUSE,
+            confidence=1.0,
+            reasoning=summary,
+            pause_reason=summary,
+            requires_human=False,
+        )
+
+    async def _autonomous_recovery_cycle(
+        self,
+        run: ExecutionRun,
+        step_index: int,
+        step: dict[str, Any],
+        ctx: Any,
+        trigger: str,
+        prior_ai_decision: dict[str, Any] | None = None,
+    ) -> PollResponse:
+        run_id = str(run.id)
+        cycle_key = (run_id, step_index)
+        cycle = _run_step_recovery_cycles.get(cycle_key, 0) + 1
+        _run_step_recovery_cycles[cycle_key] = cycle
+        strategy_order = ("ADAPT", "RESTART", "ROLLBACK", "EXECUTE")
+        strategy = strategy_order[(cycle - 1) % len(strategy_order)]
+
+        await self._append_recovery_event(
+            run_id,
+            {
+                "kind": "cycle_started",
+                "trigger": trigger,
+                "step_index": step_index,
+                "cycle": cycle,
+                "strategy": strategy,
+                "elapsed_seconds": self._seconds_in_recovery_window(run_id, step_index),
+            },
+        )
+
+        ai_recovery = await self._consult_ai_for_step(
+            run=run,
+            step_index=step_index,
+            step=step,
+            _original_command=self._build_command(step),
+            analysis=(run.workflow_snapshot or {}).get("analysis", {}) or {},
+            ctx=ctx,
+            recovery_mode=True,
+            recovery_reason=trigger,
+            strategy_hint=strategy,
+            prior_ai_decision=prior_ai_decision,
+        )
+
+        if ai_recovery:
+            decision_type = DecisionType(ai_recovery.get("decision", "WAIT"))
+            if decision_type == DecisionType.ADAPT:
+                adapted_command = self._parse_adapted_command(ai_recovery.get("command", {}))
+                await self._audit_decision(
+                    run_id,
+                    DecisionType.ADAPT,
+                    ai_recovery.get("confidence", 0.65),
+                    ai_recovery.get("reasoning", "Recovery adaptation"),
+                    command=adapted_command or self._build_command(step),
+                    step_index=step_index,
+                    thinking_steps=ai_recovery.get("thinking_steps"),
+                    page_context=ctx,
+                    decision_context=ai_recovery.get("decision_context"),
+                    extra_payload={"recovery_cycle": cycle, "recovery_trigger": trigger},
+                )
+                return PollResponse(
+                    decision=DecisionType.ADAPT,
+                    confidence=ai_recovery.get("confidence", 0.65),
+                    reasoning=ai_recovery.get("reasoning", "Recovery adaptation"),
+                    command=adapted_command or self._build_command(step),
+                    next_step_index=step_index,
+                )
+            if decision_type == DecisionType.RESTART:
+                return await self._handle_restart_decision(run, step_index, ai_recovery, ctx)
+            if decision_type == DecisionType.ROLLBACK:
+                return await self._handle_rollback_decision(run, step_index, ai_recovery, ctx)
+            if decision_type == DecisionType.EXECUTE:
+                command = self._build_command(step)
+                await self._audit_decision(
+                    run_id,
+                    DecisionType.EXECUTE,
+                    ai_recovery.get("confidence", 0.6),
+                    ai_recovery.get("reasoning", "Recovery execute"),
+                    command=command,
+                    step_index=step_index,
+                    thinking_steps=ai_recovery.get("thinking_steps"),
+                    page_context=ctx,
+                    decision_context=ai_recovery.get("decision_context"),
+                    extra_payload={"recovery_cycle": cycle, "recovery_trigger": trigger},
+                )
+                return PollResponse(
+                    decision=DecisionType.EXECUTE,
+                    confidence=ai_recovery.get("confidence", 0.6),
+                    reasoning=ai_recovery.get("reasoning", "Recovery execute"),
+                    command=command,
+                    next_step_index=step_index,
+                )
+
+        # Always continue autonomously for non-blocking pages until timeout.
+        fallback_wait_ms = max(SAFETY_LIMITS["wait_min_ms"], 1200)
+        await self._audit_decision(
+            run_id,
+            DecisionType.WAIT,
+            0.45,
+            f"Recovery cycle {cycle} ({strategy}) still in progress",
+            step_index=step_index,
+            page_context=ctx,
+            decision_context={"strategy": strategy, "trigger": trigger, "cycle": cycle},
+            extra_payload={"wait_ms": fallback_wait_ms, "recovery_cycle": cycle},
+        )
+        timeout_response = await self._fail_on_step_recovery_timeout(
+            run=run,
+            step_index=step_index,
+            ctx=ctx,
+            trigger=f"{trigger}_cycle_{cycle}",
+        )
+        if timeout_response:
+            return timeout_response
+        return PollResponse(
+            decision=DecisionType.WAIT,
+            confidence=0.45,
+            reasoning=f"Recovery cycle {cycle} ({strategy}) still in progress",
+            next_step_index=step_index,
+            wait_ms=fallback_wait_ms,
+        )
+
     async def _fallback_after_ai_failure(
         self,
-        run_id: str,
+        run: ExecutionRun,
         step_index: int,
         step: dict[str, Any],
         ctx: Any,
     ) -> PollResponse | None:
+        run_id = str(run.id)
         # AI-first does not mean AI-only. If the model output is unusable but
         # the recorded step is a deterministic navigate, execute it instead of
         # pausing the run.
@@ -415,45 +679,34 @@ class AgentService:
 
         if self._is_transitional_page(ctx):
             return await self._handle_wait_decision(
-                run_id,
-                step_index,
-                {
+                run=run,
+                step_index=step_index,
+                ai_decision={
                     "confidence": 0.45,
                     "reasoning": "AI attempts failed while the page still looks transitional",
                     "wait_ms": 1500,
                     "thinking_steps": [],
                     "decision_context": {"origin": "ai-fallback"},
                 },
-                ctx,
+                ctx=ctx,
             )
-        pause_reason = f"AI could not produce a usable decision for step {step_index}"
-        await self._audit_decision(
-            run_id,
-            DecisionType.PAUSE,
-            0.55,
-            pause_reason,
-            pause_reason=pause_reason,
+        return await self._autonomous_recovery_cycle(
+            run=run,
             step_index=step_index,
-            page_context=ctx,
-            decision_context={"origin": "ai-fallback", "step_action": step.get("action_type")},
-        )
-        with contextlib.suppress(Exception):
-            await self.execution.pause(run_id, reason=pause_reason)
-        return PollResponse(
-            decision=DecisionType.PAUSE,
-            confidence=0.55,
-            reasoning=pause_reason,
-            pause_reason=pause_reason,
-            requires_human=True,
+            step=step,
+            ctx=ctx,
+            trigger="ai_unusable_output",
+            prior_ai_decision={"decision_context": {"origin": "ai-fallback", "step_action": step.get("action_type")}},
         )
 
     async def _handle_wait_decision(
         self,
-        run_id: str,
+        run: ExecutionRun,
         step_index: int,
         ai_decision: dict[str, Any],
         ctx: Any,
     ) -> PollResponse:
+        run_id = str(run.id)
         step_key = (run_id, step_index)
         step_waits = _run_step_wait_count.get(step_key, 0)
         total_waits = _run_total_waits.get(run_id, 0)
@@ -461,26 +714,15 @@ class AgentService:
             step_waits >= SAFETY_LIMITS["max_consecutive_waits_per_step"]
             or total_waits >= SAFETY_LIMITS["max_total_waits_per_run"]
         ):
-            reason = "WAIT budget exhausted"
-            await self._audit_decision(
-                run_id,
-                DecisionType.PAUSE,
-                0.6,
-                reason,
-                pause_reason=reason,
+            return await self._autonomous_recovery_cycle(
+                run=run,
                 step_index=step_index,
-                thinking_steps=ai_decision.get("thinking_steps"),
-                page_context=ctx,
-                decision_context=ai_decision.get("decision_context"),
-            )
-            with contextlib.suppress(Exception):
-                await self.execution.pause(run_id, reason=reason)
-            return PollResponse(
-                decision=DecisionType.PAUSE,
-                confidence=0.6,
-                reasoning=reason,
-                pause_reason=reason,
-                requires_human=True,
+                step=((run.workflow_snapshot or {}).get("steps", []) or [{}])[step_index]
+                if step_index < len((run.workflow_snapshot or {}).get("steps", []) or [])
+                else {},
+                ctx=ctx,
+                trigger="wait_limit_reached",
+                prior_ai_decision=ai_decision,
             )
         wait_ms = int(ai_decision.get("wait_ms") or 1500)
         wait_ms = max(SAFETY_LIMITS["wait_min_ms"], min(wait_ms, SAFETY_LIMITS["wait_max_ms"]))
@@ -515,12 +757,12 @@ class AgentService:
         run_id = str(run.id)
         restarts = _run_restart_count.get(run_id, 0)
         if restarts >= SAFETY_LIMITS["max_restarts_per_run"]:
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
         _run_restart_count[run_id] = restarts + 1
         await self.execution.reset_to_start(run_id)
         restart_url = self._resolve_restart_url(run, step_index, ai_decision)
         if not restart_url:
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
 
         command = AgentCommand(action=CommandAction.NAVIGATE, value=restart_url, target=restart_url)
         await self._audit_decision(
@@ -595,17 +837,17 @@ class AgentService:
         run_id = str(run.id)
         rollbacks = _run_rollback_count.get(run_id, 0)
         if rollbacks >= SAFETY_LIMITS["max_rollbacks_per_run"]:
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
         rollback_to = ai_decision.get("rollback_to")
         if not isinstance(rollback_to, int) or rollback_to >= step_index or rollback_to < 0:
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
         snapshot = run.workflow_snapshot or {}
         steps = snapshot.get("steps", []) or []
         if rollback_to >= len(steps) or not bool(steps[rollback_to].get("checkpoint")):
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
         checkpoint_url = await self._resolve_checkpoint_url(run, rollback_to)
         if not checkpoint_url:
-            return await self._fallback_after_ai_failure(run_id, step_index, {}, ctx)
+            return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
         run.current_step_index = rollback_to
         await self.session.flush()
         _run_rollback_count[run_id] = rollbacks + 1
@@ -853,6 +1095,10 @@ class AgentService:
         _original_command: AgentCommand,
         analysis: dict[str, Any],
         ctx: Any,
+        recovery_mode: bool = False,
+        recovery_reason: str | None = None,
+        strategy_hint: str | None = None,
+        prior_ai_decision: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         ai_api_key = settings.ai_api_key
         if not ai_api_key:
@@ -902,6 +1148,19 @@ class AgentService:
             step_stability_score=step_stability,
             workflow_expertise=workflow_expertise,
         )
+        if recovery_mode:
+            prompt += (
+                "\n\n## Recovery Mode (non-blocking)\n"
+                "You are in an autonomous recovery cycle. You MUST provide a concrete next action now. "
+                "Do not PAUSE unless there is explicit blocking evidence (captcha/login/2FA/unexpected modal). "
+                "If WAIT is absolutely needed, keep it short and explain exactly what signal is expected next."
+            )
+            if recovery_reason:
+                prompt += f"\nRecovery trigger: {recovery_reason}"
+            if strategy_hint:
+                prompt += f"\nPreferred strategy for this cycle: {strategy_hint}"
+            if prior_ai_decision:
+                prompt += f"\nPrevious failed decision context: {json.dumps(prior_ai_decision)[:1400]}"
 
         provider = get_ai_provider(api_key_override=ai_api_key)
         prompts = [
@@ -928,7 +1187,11 @@ class AgentService:
                 result = self._normalize_ai_decision(result)
                 if not result:
                     continue
-                if attempt < 3 and result["decision"] == "PAUSE" and not getattr(ctx, "is_blocking", False):
+                if (
+                    (attempt < 3 or recovery_mode)
+                    and result["decision"] == "PAUSE"
+                    and not getattr(ctx, "is_blocking", False)
+                ):
                     continue
                 result["thinking_steps"] = self._extract_thinking_steps(result)
                 result["prompt_summary"] = prompt[:500]
@@ -1081,9 +1344,7 @@ class AgentService:
             logger.debug("ai_outcomes.resolve_latest skipped: %s", exc)
 
         if req.success:
-            _run_retries[run_id] = 0
-            _run_heal_attempts[run_id] = 0
-            _run_step_wait_count.pop((run_id, req.step_index), None)
+            self._clear_recovery_state(run_id)
             snapshot_steps = (run.workflow_snapshot or {}).get("steps", []) or []
             action_type = snapshot_steps[req.step_index].get("action_type") if req.step_index < len(snapshot_steps) else None
             if run.status != RunStatus.RUNNING.value:
@@ -1117,6 +1378,7 @@ class AgentService:
             await self.session.refresh(run)
 
             if await self._goal_predicate_satisfied(run, req.page_context_after):
+                self._clear_recovery_state(run_id)
                 with contextlib.suppress(Exception):
                     await self.execution.complete(run_id)
                 with contextlib.suppress(Exception):
@@ -1129,6 +1391,7 @@ class AgentService:
                 )
 
             if run.current_step_index >= run.total_steps:
+                self._clear_recovery_state(run_id)
                 with contextlib.suppress(Exception):
                     await self.execution.complete(run_id)
                 with contextlib.suppress(Exception):
@@ -1403,6 +1666,8 @@ class AgentService:
             "reasoning": reasoning,
             "command": command.model_dump() if command else None,
             "pause_reason": pause_reason,
+            "step_index": step_index,
+            "decision_context": decision_context,
         }
         if extra_payload:
             payload.update(extra_payload)

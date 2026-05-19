@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,7 +16,13 @@ from services.agent_models import (
     PollRequest,
     ResultRequest,
 )
-from services.agent_service import AgentService, _run_adapt_count, _run_restart_count
+from services.agent_service import (
+    AgentService,
+    _run_adapt_count,
+    _run_active_step,
+    _run_restart_count,
+    _run_step_recovery_started_at,
+)
 from services.execution_service import ExecutionService
 from core.config import settings
 
@@ -164,6 +171,35 @@ async def test_result_success_advances_step(db_session: AsyncSession):
     assert result.accepted is True
     assert result.next_step_index == 1
     assert result.decision is None
+
+
+@pytest.mark.asyncio
+async def test_result_success_resets_recovery_window_state(db_session: AsyncSession):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Recovery Reset WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    wf_id = str(workflow.id)
+
+    run = await svc.create_run(workflow_id=wf_id)
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click"), _make_step(1, "click")])
+    run.total_steps = 2
+    run.status = "running"
+    await db_session.flush()
+    run_id = str(run.id)
+
+    _run_active_step[run_id] = 0
+    _run_step_recovery_started_at[(run_id, 0)] = datetime.now(UTC) - timedelta(seconds=10)
+
+    agent = AgentService(db_session)
+    result = await agent.report_result(
+        run_id,
+        ResultRequest(step_index=0, success=True),
+    )
+
+    assert result.accepted is True
+    assert run_id not in _run_active_step
+    assert all(key[0] != run_id for key in _run_step_recovery_started_at)
 
 
 @pytest.mark.asyncio
@@ -419,7 +455,7 @@ async def test_poll_returns_wait_keeps_run_running(
 
 
 @pytest.mark.asyncio
-async def test_consecutive_waits_escalate_to_pause(
+async def test_consecutive_waits_escalate_to_autonomous_recovery(
     db_session: AsyncSession,
     monkeypatch,
 ):
@@ -457,8 +493,78 @@ async def test_consecutive_waits_escalate_to_pause(
             PollRequest(page_context=_make_context(), current_step_index=0),
         )
     assert response is not None
-    assert response.decision == DecisionType.PAUSE
+    assert response.decision == DecisionType.WAIT
+    assert response.requires_human is False
 
+
+@pytest.mark.asyncio
+async def test_ai_unusable_output_stays_autonomous_not_waiting_for_user(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="AI Unusable WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    run.status = "running"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    monkeypatch.setattr(agent, "_consult_ai_for_step", AsyncMock(return_value=None))
+
+    resp = await agent.poll(
+        str(run.id),
+        PollRequest(page_context=_make_context(url="https://example.com/unstable"), current_step_index=0),
+    )
+    await db_session.refresh(run)
+
+    assert resp.decision == DecisionType.WAIT
+    assert resp.requires_human is False
+    assert run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_recovery_window_timeout_fails_run_with_no_human_pause(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "ai_step_recovery_window_seconds", 30, raising=False)
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Timeout WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    run.status = "running"
+    await db_session.flush()
+    run_id = str(run.id)
+
+    _run_active_step[run_id] = 0
+    _run_step_recovery_started_at[(run_id, 0)] = datetime.now(UTC) - timedelta(seconds=90)
+
+    agent = AgentService(db_session)
+    monkeypatch.setattr(agent, "_consult_ai_for_step", AsyncMock(return_value=None))
+
+    resp = await agent.poll(
+        run_id,
+        PollRequest(page_context=_make_context(url="https://example.com/stuck"), current_step_index=0),
+    )
+    await db_session.refresh(run)
+
+    assert resp.decision == DecisionType.PAUSE
+    assert resp.requires_human is False
+    assert run.status == "failed"
+    assert "window expired" in (run.error_summary or "").lower()
 
 @pytest.mark.asyncio
 async def test_poll_restart_restores_original_snapshot(
@@ -1124,7 +1230,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
 
 
 @pytest.mark.asyncio
-async def test_poll_ai_adapt_skip_pause_branches(db_session: AsyncSession, monkeypatch):
+async def test_poll_ai_adapt_skip_and_nonblocking_pause_recovery(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
     monkeypatch.setattr(settings, "deterministic_only", False, raising=False)
     svc = ExecutionService(db_session)
@@ -1187,8 +1293,8 @@ async def test_poll_ai_adapt_skip_pause_branches(db_session: AsyncSession, monke
 
     monkeypatch.setattr(agent, "_consult_ai_for_step", _pause)
     pause = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=1))
-    assert pause.decision == DecisionType.PAUSE
-    assert pause.requires_human is True
+    assert pause.decision == DecisionType.WAIT
+    assert pause.requires_human is False
 
 
 @pytest.mark.asyncio
@@ -1259,7 +1365,7 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
     assert AgentService._is_transitional_page(types.SimpleNamespace(page_diff={"url_changed": True}, visible_elements=[], visible_text="")) is True
 
     wait_fallback = await agent._fallback_after_ai_failure(
-        run_id,
+        run,
         0,
         {},
         types.SimpleNamespace(page_diff={"added": [1]}, visible_elements=[], visible_text=""),
@@ -1267,7 +1373,7 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
     assert wait_fallback is not None and wait_fallback.decision == DecisionType.WAIT
 
     execute_fallback = await agent._fallback_after_ai_failure(
-        run_id,
+        run,
         0,
         {"action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": []},
         types.SimpleNamespace(page_diff={}, visible_elements=[{"selector": "x"}], visible_text="ready"),
@@ -1278,14 +1384,14 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
 
     _run_restart_count[run_id] = 99
     restart = await agent._handle_restart_decision(run, 0, {}, _make_context())
-    assert restart.decision == DecisionType.PAUSE
+    assert restart.decision == DecisionType.WAIT
 
     rollback = await agent._handle_rollback_decision(run, 1, {"rollback_to": "x"}, _make_context())
-    assert rollback.decision == DecisionType.PAUSE
+    assert rollback.decision == DecisionType.WAIT
     rollback2 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 5}, _make_context())
-    assert rollback2.decision == DecisionType.PAUSE
+    assert rollback2.decision == DecisionType.WAIT
     rollback3 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 0}, _make_context())
-    assert rollback3.decision == DecisionType.PAUSE
+    assert rollback3.decision == DecisionType.WAIT
 
     from services.audit import AppendEvent, AuditService
     await AuditService(db_session).append(AppendEvent(event_type="checkpoint", payload={"step_index": 0, "success": False}, run_id=run_id))
