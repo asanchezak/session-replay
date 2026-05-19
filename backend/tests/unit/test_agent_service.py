@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import types
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,12 +15,12 @@ from services.agent_models import (
     PollRequest,
     ResultRequest,
 )
-from services.agent_service import AgentService
+from services.agent_service import AgentService, _run_adapt_count, _run_restart_count
 from services.execution_service import ExecutionService
 from core.config import settings
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def no_ai(monkeypatch):
     monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
 
@@ -683,3 +685,435 @@ async def test_load_previous_failures_reads_from_event_log(db_session: AsyncSess
     errors = [f["error"] for f in failures]
     assert "Element not found" in errors
     assert "Low confidence heal" in errors
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_and_classify_blockage_branches(db_session: AsyncSession, monkeypatch):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="AI Failure Branches", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click", value="v")])
+    run.total_steps = 1
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(
+        agent,
+        "_load_previous_failures",
+        AsyncMock(return_value=[{"step_index": 0, "action": "click", "error": "old"}]),
+    )
+
+    class _Provider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(
+                content='{"likely_cause":"stale","analysis":"use text","suggested_action":"navigate","suggested_value":"https://x","suggested_selectors":[{"type":"text","value":"Go","score":0.9}],"confidence":0.8,"should_retry":false,"should_skip":false,"thinking_steps":[{"question":"q","observation":"o","conclusion":"c"}]}'
+            )
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _Provider())
+    ok = await agent._analyze_failure(
+        run,
+        step_index=0,
+        error="not found",
+        error_context="DOM",
+        last_chance=True,
+    )
+    assert ok is not None
+    assert ok["suggested_action"] == "navigate"
+
+    class _BadJsonProvider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(content="not-json")
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _BadJsonProvider())
+    bad_json = await agent._analyze_failure(run, 0, "oops", None)
+    assert bad_json is not None
+    assert bad_json["confidence"] == 0.0
+
+    class _CrashProvider:
+        async def generate(self, *_args, **_kwargs):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _CrashProvider())
+    crashed = await agent._analyze_failure(run, 0, "oops", None)
+    assert crashed is None
+
+    monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
+    assert await agent._analyze_failure(run, 0, "oops", None) is None
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    assert await agent._analyze_failure(run, 9, "oops", None) is None
+
+    ctx_empty = types.SimpleNamespace(visible_text="", dom_snippet="")
+    assert await agent._classify_blockage(run, ctx_empty) is None
+
+    class _ClassifyProvider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(content='{"classification":"captcha","confidence":0.9,"reason":"challenge","suggested_action":"pause"}')
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _ClassifyProvider())
+    classified = await agent._classify_blockage(
+        run, types.SimpleNamespace(visible_text="verify human", dom_snippet="<iframe></iframe>")
+    )
+    assert classified is not None
+    assert classified["classification"] == "captcha"
+
+    class _ClassifyBadJsonProvider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(content="oops")
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _ClassifyBadJsonProvider())
+    assert await agent._classify_blockage(run, types.SimpleNamespace(visible_text="x", dom_snippet="y")) is None
+
+    class _ClassifyCrashProvider:
+        async def generate(self, *_args, **_kwargs):
+            raise RuntimeError("fail")
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _ClassifyCrashProvider())
+    assert await agent._classify_blockage(run, types.SimpleNamespace(visible_text="x", dom_snippet="y")) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_plan_update_phase_and_parse_helpers(db_session: AsyncSession, monkeypatch):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Plan Update Helpers", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click"), _make_step(1, "click")])
+    run.total_steps = 2
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    applied: list[dict] = []
+
+    async def _apply(_run, ops):
+        applied.extend(ops)
+
+    monkeypatch.setattr(agent.healing, "apply_plan_update", _apply)
+    out = await agent._apply_plan_updates_from_ai(
+        run,
+        [
+            {"operation": "MODIFY", "step_index": 0, "new_step": {"selector_chain": [{"type": "css", "value": "#x"}]}},
+            {"operation": "INVALID", "step_index": 0},
+            "bad-op",
+        ],
+    )
+    assert len(out) == 1
+    assert applied[0]["operation"] == "MODIFY"
+
+    assert agent._get_current_phase({"phases": []}, 0) is None
+    assert agent._get_current_phase({"phases": [{"start_step": 0, "end_step": 1, "name": "A"}]}, 0) == "A"
+    assert agent._get_current_phase({"phases": [{"start_step": 2, "end_step": 3, "name": "B"}]}, 0) is None
+
+    cmd = agent._parse_adapted_command({"action": "click", "selector_chain": ["#x", {"type": "text", "value": "Go"}], "value": "v"})
+    assert cmd is not None
+    assert cmd.selector_chain[0]["value"] == "#x"
+    assert agent._parse_adapted_command({}) is None
+
+
+@pytest.mark.asyncio
+async def test_last_chance_recovery_and_report_result_terminal_branches(db_session: AsyncSession, monkeypatch):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Terminal Branches", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click"), _make_step(1, "click")])
+    run.workflow_snapshot["analysis"] = {"goal_predicate": {"type": "extract_count", "min": 1}}
+    run.total_steps = 2
+    run.status = "recovering"
+    run.extracted_data = [{"row": 1}]
+    await db_session.flush()
+    run_id = str(run.id)
+
+    agent = AgentService(db_session)
+
+    monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
+    assert await agent._last_chance_recovery(run, 0, "err", None, 0) is None
+
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(agent, "_analyze_failure", AsyncMock(return_value=None))
+    assert await agent._last_chance_recovery(run, 0, "err", None, 0) is None
+
+    monkeypatch.setattr(
+        agent,
+        "_analyze_failure",
+        AsyncMock(
+            return_value={"should_skip": True, "confidence": 0.9, "analysis": "skip"}
+        ),
+    )
+    skip = await agent._last_chance_recovery(run, 0, "err", None, 0)
+    assert skip is not None
+    assert skip.decision == DecisionType.SKIP
+
+    monkeypatch.setattr(
+        agent,
+        "_analyze_failure",
+        AsyncMock(
+            return_value={
+                "should_skip": False,
+                "confidence": 0.8,
+                "analysis": "adapt",
+                "suggested_action": "navigate",
+                "suggested_value": "https://x",
+                "suggested_selectors": [],
+            }
+        ),
+    )
+    adapt = await agent._last_chance_recovery(run, 0, "err", None, 1)
+    assert adapt is not None
+    assert adapt.decision == DecisionType.ADAPT
+
+    monkeypatch.setattr(
+        agent,
+        "_analyze_failure",
+        AsyncMock(return_value={"should_skip": False, "suggested_selectors": []}),
+    )
+    assert await agent._last_chance_recovery(run, 0, "err", None, 1) is None
+
+    async def _boom_transition(*_args, **_kwargs):
+        raise RuntimeError("no transition")
+
+    monkeypatch.setattr(agent, "_transition_to_running", _boom_transition)
+
+    async def _boom_resolve(*_args, **_kwargs):
+        raise RuntimeError("resolve fail")
+
+    monkeypatch.setattr(agent.ai_outcomes, "resolve_latest", _boom_resolve)
+    async def _force_advance(_run_id):
+        target = await agent.execution.get_run(_run_id)
+        target.current_step_index += 1
+        await db_session.flush()
+        return target
+
+    monkeypatch.setattr(agent.execution, "advance_step", _force_advance)
+    result_completed = await agent.report_result(
+        run_id,
+        ResultRequest(step_index=0, success=True),
+    )
+    assert result_completed.decision == DecisionType.COMPLETED
+
+    run2 = await svc.create_run(workflow_id=str(workflow.id))
+    run2.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run2.total_steps = 1
+    run2.status = "running"
+    await db_session.flush()
+    result_terminal = await agent.report_result(str(run2.id), ResultRequest(step_index=0, success=True))
+    assert result_terminal.decision == DecisionType.COMPLETED
+
+    fail_result = await agent.report_result(
+        run_id,
+        ResultRequest(
+            step_index=0,
+            success=False,
+            error="boom",
+            page_context_after=PageContext(
+                url="https://x",
+                title="X",
+                visible_elements=[],
+                visible_text="",
+            ),
+        ),
+    )
+    assert fail_result.should_poll is True
+
+
+@pytest.mark.asyncio
+async def test_poll_ai_adapt_skip_pause_branches(db_session: AsyncSession, monkeypatch):
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "deterministic_only", False, raising=False)
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="AI Branch WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click"), _make_step(1, "click")])
+    run.total_steps = 2
+    run.status = "waiting_for_user"
+    await db_session.flush()
+    run_id = str(run.id)
+
+    agent = AgentService(db_session)
+
+    async def _adapt(*_args, **_kwargs):
+        return {
+            "decision": "ADAPT",
+            "confidence": 0.8,
+            "reasoning": "adapt it",
+            "command": {"action": "click", "selector_chain": ["#new"], "value": "v", "intent": "x", "methods": []},
+            "thinking_steps": [],
+            "decision_context": {},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", _adapt)
+    adapt = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
+    assert adapt.decision == DecisionType.ADAPT
+    assert _run_adapt_count[run_id] >= 1
+
+    run.status = "running"
+    run.current_step_index = 0
+    await db_session.flush()
+
+    async def _skip(*_args, **_kwargs):
+        return {
+            "decision": "SKIP",
+            "confidence": 0.7,
+            "reasoning": "skip this",
+            "thinking_steps": [],
+            "decision_context": {},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", _skip)
+    skip = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
+    assert skip.decision == DecisionType.SKIP
+    await db_session.refresh(run)
+    assert run.current_step_index == 1
+
+    async def _pause(*_args, **_kwargs):
+        return {
+            "decision": "PAUSE",
+            "confidence": 0.6,
+            "reasoning": "manual needed",
+            "pause_reason": "manual needed",
+            "thinking_steps": [],
+            "decision_context": {},
+        }
+
+    monkeypatch.setattr(agent, "_consult_ai_for_step", _pause)
+    pause = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=1))
+    assert pause.decision == DecisionType.PAUSE
+    assert pause.requires_human is True
+
+
+@pytest.mark.asyncio
+async def test_agent_transition_waiting_branch_and_get_decisions(db_session: AsyncSession):
+    from services.audit import AppendEvent, AuditService
+
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Transition Waiting WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.total_steps = 1
+    run.status = "waiting_for_user"
+    await db_session.flush()
+
+    agent = AgentService(db_session)
+    await agent._transition_to_running(run)
+    await db_session.refresh(run)
+    assert run.status == "running"
+
+    await AuditService(db_session).append(
+        AppendEvent(event_type="agent_decision", payload={"decision": "EXECUTE"}, run_id=str(run.id))
+    )
+    decisions = await agent.get_decisions(str(run.id), limit=10)
+    assert len(decisions) >= 1
+
+    assert agent._normalize_ai_decision({"decision": "ADAPT"}) is not None
+    assert agent._normalize_ai_decision({"decision": "UNKNOWN"}) is None
+    assert agent._normalize_ai_decision("bad") is None
+
+
+@pytest.mark.asyncio
+async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeypatch):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Branch Sweep WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click", selector_chain=[{"type": "css", "value": "#x"}])])
+    run.total_steps = 1
+    await db_session.flush()
+    run_id = str(run.id)
+    agent = AgentService(db_session)
+
+    monkeypatch.setattr(agent, "_classify_blockage", AsyncMock(return_value={"reason": "detected"}))
+    blocking = await agent.poll(
+        run_id,
+        PollRequest(
+            page_context=PageContext(url="u", title="t", is_blocking=True, blocking_type="captcha"),
+            current_step_index=0,
+        ),
+    )
+    assert blocking.decision == DecisionType.PAUSE
+
+    run.status = "queued"
+    await db_session.flush()
+    async def _boom_transition(*_args, **_kwargs):
+        raise RuntimeError("no transition")
+    monkeypatch.setattr(agent, "_transition_to_running", _boom_transition)
+    monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
+    fast = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
+    assert fast.decision == DecisionType.EXECUTE
+
+    assert AgentService._selectors_look_fragile([{"type": "css", "value": "[data-testid='x']", "score": 0.8}, "bad"]) is False
+    assert AgentService._extract_thinking_steps({"thinking_steps": "bad"}) == []
+    assert AgentService._extract_thinking_steps({"thinking_steps": [{"question": "q"}]})[0]["question"] == "q"
+    assert AgentService._is_transitional_page(types.SimpleNamespace(page_diff={"url_changed": True}, visible_elements=[], visible_text="")) is True
+
+    wait_fallback = await agent._fallback_after_ai_failure(
+        run_id,
+        0,
+        {},
+        types.SimpleNamespace(page_diff={"added": [1]}, visible_elements=[], visible_text=""),
+    )
+    assert wait_fallback is not None and wait_fallback.decision == DecisionType.WAIT
+
+    _run_restart_count[run_id] = 99
+    restart = await agent._handle_restart_decision(run, 0, {}, _make_context())
+    assert restart.decision == DecisionType.PAUSE
+
+    rollback = await agent._handle_rollback_decision(run, 1, {"rollback_to": "x"}, _make_context())
+    assert rollback.decision == DecisionType.PAUSE
+    rollback2 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 5}, _make_context())
+    assert rollback2.decision == DecisionType.PAUSE
+    rollback3 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 0}, _make_context())
+    assert rollback3.decision == DecisionType.PAUSE
+
+    from services.audit import AppendEvent, AuditService
+    await AuditService(db_session).append(AppendEvent(event_type="checkpoint", payload={"step_index": 0, "success": False}, run_id=run_id))
+    assert await agent._resolve_checkpoint_url(run, 0) == "https://example.com"
+
+    orig_execute = db_session.execute
+    async def _bad_execute(*_args, **_kwargs):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(db_session, "execute", _bad_execute)
+    assert await agent._load_previous_failures(run, 0) is None
+    assert await agent._load_workflow_expertise("wf", run_id) is None
+    monkeypatch.setattr(db_session, "execute", orig_execute)
+
+    monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
+    assert await agent._consult_ai_for_step(run, 0, run.workflow_snapshot["steps"][0], agent._build_command(run.workflow_snapshot["steps"][0]), {}, _make_context()) is None
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "deterministic_only", False, raising=False)
+    bad_ctx = types.SimpleNamespace(url="u", title="t", visible_text="", visible_elements=[{"x": 1}] * 30, page_diff=None, page_context_error=None, actual_url=None)
+
+    class _BadProvider:
+        async def generate(self, *_args, **_kwargs):
+            return types.SimpleNamespace(content='{"decision":"UNKNOWN"}')
+
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_kwargs: _BadProvider())
+    monkeypatch.setattr(agent.ai_outcomes, "load_run_memory", AsyncMock(return_value={}))
+    monkeypatch.setattr(agent, "_load_previous_failures", AsyncMock(return_value=[]))
+    monkeypatch.setattr(agent, "_load_workflow_expertise", AsyncMock(return_value=None))
+    assert await agent._consult_ai_for_step(run, 0, run.workflow_snapshot["steps"][0], agent._build_command(run.workflow_snapshot["steps"][0]), {}, bad_ctx) is None
+
+    monkeypatch.setattr(agent, "_apply_plan_updates_from_ai", AsyncMock(return_value=[]))
+    assert await agent._apply_plan_updates_from_ai(run, [{"operation": "INVALID"}]) == []
+    assert agent._parse_adapted_command({"action": "click", "selector_chain": 7}) is None
+
+    run.status = "paused"
+    await db_session.flush()
+    monkeypatch.setattr(agent, "_transition_to_running", _boom_transition)
+    monkeypatch.setattr(agent.ai_outcomes, "resolve_latest", AsyncMock(return_value=None))
+    await agent.report_result(run_id, ResultRequest(step_index=0, success=False, error="e"))
+
+    monkeypatch.setattr(agent.ai_outcomes, "record_decision", AsyncMock(side_effect=RuntimeError("nope")))
+    await agent._audit_decision(run_id, DecisionType.EXECUTE, 0.9, "x")

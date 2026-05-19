@@ -146,8 +146,8 @@ async def record_workflow(
     except Exception as exc:
         logger.warning("Auto-analysis failed for workflow=%s: %s", workflow.id, exc)
 
-    # Generate a meaningful workflow name using AI if a key is configured
-    if settings.ai_api_key and steps:
+    # Generate a meaningful workflow name using AI
+    if steps:
         try:
             step_lines = "; ".join(
                 f"{s.action_type} {s.intent or s.value or ''}".strip()
@@ -170,12 +170,34 @@ async def record_workflow(
         except Exception as exc:
             logger.warning("AI name generation failed for workflow=%s: %s", workflow.id, exc)
 
+    # Simplify the workflow — runs all 5 passes including AI holistic pass
+    original_count = len(steps)
+    try:
+        from services.workflow_simplifier import WorkflowSimplifier
+        analysis_svc2 = SemanticAnalysisService(db)
+        phases = await analysis_svc2.get_phases(str(workflow.id)) if analysis else []
+        simplifier = WorkflowSimplifier(
+            workflow_goal=analysis.workflow_goal if analysis else None,
+            target_url=req.target_url,
+        )
+        simplified_data = await simplifier.simplify(steps, phases=phases)
+        if simplified_data is not None:
+            svc3 = WorkflowService(db)
+            steps = await svc3.replace_steps(str(workflow.id), simplified_data)
+            logger.info(
+                "Simplified workflow=%s: %d → %d steps",
+                workflow.id, original_count, len(steps),
+            )
+    except Exception as exc:
+        logger.warning("Simplification failed for workflow=%s: %s", workflow.id, exc)
+
     return {
         "id": str(workflow.id),
         "name": workflow.name,
         "status": workflow.status,
         "version": workflow.version,
         "step_count": len(steps),
+        "simplified_from": original_count if len(steps) < original_count else None,
         "created_at": workflow.created_at.isoformat(),
         "analysis": {
             "goal": analysis.workflow_goal if analysis else None,
@@ -315,6 +337,35 @@ async def get_workflow(
             for s in steps
         ],
         "analysis": analysis_data,
+    }
+
+
+@router.put("/{workflow_id}/steps")
+async def replace_steps(
+    workflow_id: str,
+    steps: list[dict],
+    db: AsyncSession = Depends(get_db),
+):
+    svc = WorkflowService(db)
+    try:
+        await svc.get(workflow_id)
+    except NotFoundError:
+        return _not_found("Workflow not found")
+
+    new_steps = await svc.replace_steps(workflow_id, steps)
+    return {
+        "step_count": len(new_steps),
+        "steps": [
+            {
+                "id": str(s.id),
+                "step_index": s.step_index,
+                "action_type": s.action_type,
+                "intent": s.intent,
+                "value": s.value,
+                "checkpoint": s.checkpoint,
+            }
+            for s in new_steps
+        ],
     }
 
 

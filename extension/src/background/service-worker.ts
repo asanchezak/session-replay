@@ -380,10 +380,30 @@ async function executeWorkflowRun(
         allStepsSucceeded = false;
         break;
       }
-      // Navigate always causes navigation — don't check urlChanged (too early)
+      // Navigate always causes navigation — wait for load then check actual URL
+      if (navPromise) {
+        try { await navPromise; } catch { /* ignore load timeout */ }
+      }
       log.log(`Step ${i + 1} (navigate) completed`);
+
+      // Detect navigate mismatch: expected hostname vs actual hostname
+      let pageContextError: string | undefined;
+      let actualUrl: string | undefined;
       try {
-        await apiClient.reportStepResult(runId, i, true, undefined, actionType);
+        const tab = await chrome.tabs.get(targetTabId);
+        actualUrl = tab.url;
+        if (step.value && actualUrl) {
+          const expectedHost = new URL(step.value).hostname;
+          const actualHost = new URL(actualUrl).hostname;
+          if (expectedHost !== actualHost) {
+            pageContextError = "navigate_mismatch";
+            log.log(`Navigate mismatch: expected ${expectedHost}, got ${actualHost}`);
+          }
+        }
+      } catch { /* ignore URL parse errors */ }
+
+      try {
+        await apiClient.reportStepResult(runId, i, true, undefined, actionType, pageContextError, actualUrl);
       } catch (err) {
         log.error("Failed to confirm navigate step:", err);
       }
@@ -1107,6 +1127,7 @@ chrome.action.onClicked.addListener(() => {
 if (typeof self !== "undefined") {
   const g = self as unknown as Record<string, unknown>;
   g.__executeWorkflowRun = executeWorkflowRun;
+  g.__executeAgentRun = executeAgentRun;
   g.__SR_startRecording = () => orchestrator.startRecording();
   g.__SR_stopRecording = () => orchestrator.stopRecording();
 }

@@ -18,7 +18,7 @@ async def test_add_step_with_value(api_client: AsyncClient):
             "step_index": 0,
             "action_type": "type",
             "intent": "Type search",
-            "selector_chain": {"type": "css", "value": "#search"},
+            "selector_chain": [{"type": "css", "value": "#search"}],
             "value": "hello world",
         },
         headers=API_HEADERS,
@@ -43,7 +43,7 @@ async def test_add_step_with_methods(api_client: AsyncClient):
             "step_index": 0,
             "action_type": "click",
             "intent": "Click submit",
-            "selector_chain": {"type": "css", "value": "#submit"},
+            "selector_chain": [{"type": "css", "value": "#submit"}],
             "methods": [
                 {
                     "action_type": "click",
@@ -167,7 +167,7 @@ async def test_add_step_without_value_methods_legacy(api_client: AsyncClient):
             "step_index": 0,
             "action_type": "click",
             "intent": "Old style",
-            "selector_chain": {"type": "css", "value": "#old-btn"},
+            "selector_chain": [{"type": "css", "value": "#old-btn"}],
         },
         headers=API_HEADERS,
     )

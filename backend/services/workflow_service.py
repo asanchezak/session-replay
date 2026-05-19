@@ -166,6 +166,28 @@ class WorkflowService:
                 return step
         raise NotFoundError(f"Step {step_index} not found in workflow {workflow_id}")
 
+    async def replace_steps(self, workflow_id: str, steps_data: list[dict]) -> list[WorkflowStep]:
+        """Atomically replace all steps for a workflow with a new ordered list."""
+        await self.session.execute(
+            delete(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id)
+        )
+        new_steps: list[WorkflowStep] = []
+        for i, sd in enumerate(steps_data):
+            step = WorkflowStep(
+                workflow_id=workflow_id,
+                step_index=i,
+                action_type=sd["action_type"],
+                intent=sd.get("intent"),
+                selector_chain=sd.get("selector_chain"),
+                value=sd.get("value"),
+                methods=sd.get("methods"),
+                checkpoint=bool(sd.get("checkpoint", False)),
+            )
+            self.session.add(step)
+            new_steps.append(step)
+        await self.session.flush()
+        return new_steps
+
     async def delete(self, workflow_id: str) -> None:
         """Delete a workflow and its steps."""
         workflow = await self.get(workflow_id)

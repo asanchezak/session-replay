@@ -152,6 +152,7 @@ export interface StepToExecute {
 export interface StepResult {
   success: boolean;
   error?: string;
+  actual_url?: string;
 }
 
 function findElementBySelectors(chain: SelectorSet[]): Element | null {
@@ -423,28 +424,28 @@ function simulatePageScroll(): boolean {
   }
 }
 
-function simulateNavigate(value?: string): boolean {
-  if (!value) return false;
+function simulateNavigate(value?: string): { success: boolean; actual_url?: string } {
+  if (!value) return { success: false };
 
   try {
     if (value.startsWith("./") || value.startsWith("../") || value.startsWith("?") || value.startsWith("#")) {
       window.location.href = new URL(value, window.location.href).href;
-      return true;
+      return { success: true, actual_url: window.location.href };
     }
 
     if (value.startsWith("http") || value.startsWith("/")) {
       window.location.href = value;
-      return true;
+      return { success: true, actual_url: window.location.href };
     }
   } catch (err) {
     // JSDOM throws for full-document navigation; treat the assignment as
     // logically accepted so replay tests can verify command routing.
     if (err instanceof Error && err.message.includes("Not implemented: navigation")) {
-      return true;
+      return { success: true };
     }
     throw err;
   }
-  return false;
+  return { success: false };
 }
 
 export async function executeStep(step: StepToExecute): Promise<StepResult> {
@@ -525,9 +526,11 @@ export async function executeStep(step: StepToExecute): Promise<StepResult> {
         (element as HTMLElement)?.focus();
         break;
       }
-      case "navigate":
-        simulateNavigate(step.value);
-        break;
+      case "navigate": {
+        const navResult = simulateNavigate(step.value);
+        if (!navResult.success) return { success: false, error: "Navigate failed" };
+        return { success: true, actual_url: navResult.actual_url };
+      }
       default:
         return { success: false, error: `Unknown action type: ${step.action_type}` };
     }

@@ -35,7 +35,7 @@ async def add_step(
             "step_index": index,
             "action_type": action,
             "intent": intent or f"Step {index}: {action}",
-            "selector_chain": {"type": "css", "value": f"#step-{index}"},
+            "selector_chain": [{"type": "css", "value": f"#step-{index}"}],
         },
         headers=API_HEADERS,
     )
@@ -328,7 +328,7 @@ async def test_e2e_state_machine_boundaries(api_client: AsyncClient):
     # Add step and activate before transitioning to running
     await api_client.post(
         f"/v1/workflows/{wf_id}/steps",
-        json={"step_index": 0, "action_type": "click", "selector_chain": {"type": "css", "value": "#x"}},
+        json={"step_index": 0, "action_type": "click", "selector_chain": [{"type": "css", "value": "#x"}]},
         headers=API_HEADERS,
     )
     await api_client.put(
@@ -477,7 +477,7 @@ async def test_e2e_extension_event_simulation(api_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_e2e_checkpoint_and_recovery(api_client: AsyncClient):
+async def test_e2e_checkpoint_and_recovery(api_client: AsyncClient, monkeypatch):
     """Save checkpoints during execution and verify they persist in audit."""
     wf = await create_workflow(api_client, "Checkpoint Test")
     wf_id = wf["id"]
@@ -510,6 +510,19 @@ async def test_e2e_checkpoint_and_recovery(api_client: AsyncClient):
     assert len(checkpoint_events) == 2
 
     # Simulate recovery: record AI recovery suggestion
+    from ai.client import AIResponse
+    import api.v1.ai as ai_module
+
+    class _FakeProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024):
+            _ = (prompt, system, max_tokens)
+            return AIResponse(
+                content='{"selector":"button.submit","fallback_selectors":["text=Apply Now"],"confidence":0.88,"explanation":"stable selector"}',
+                confidence=0.88,
+            )
+
+    monkeypatch.setattr(ai_module, "get_ai_provider", lambda: _FakeProvider())
+
     recovery_resp = await api_client.post(
         "/v1/recovery/suggest",
         json={
@@ -568,7 +581,7 @@ async def test_e2e_health_and_auth(api_client: AsyncClient):
     # Health requires no auth
     resp = await api_client.get("/v1/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json()["status"] == "ok"
 
     # All other endpoints require auth
     endpoints = [

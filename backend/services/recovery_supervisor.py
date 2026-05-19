@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _auto_resume_count: dict[str, int] = {}
 
 MAX_AUTO_RESUMES_PER_RUN = 5
-STUCK_THRESHOLD_SECONDS = 300  # 5 minutes
+STUCK_THRESHOLD_SECONDS = 60  # 1 minute
 SUPERVISOR_POLL_INTERVAL = 30
 
 

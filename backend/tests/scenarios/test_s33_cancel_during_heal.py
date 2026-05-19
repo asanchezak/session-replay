@@ -15,7 +15,7 @@ async def test_cancel_then_heal_result_returns_409(api_client):
     wf = (await api_client.post("/v1/workflows", json={"name": "h"}, headers=_HEADERS)).json()
     await api_client.post(
         f"/v1/workflows/{wf['id']}/steps",
-        json={"step_index": 0, "action_type": "click", "selector_chain": {"type": "css", "value": "#x"}},
+        json={"step_index": 0, "action_type": "click", "selector_chain": [{"type": "css", "value": "#x"}]},
         headers=_HEADERS,
     )
     await api_client.put(

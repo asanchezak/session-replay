@@ -18,7 +18,7 @@ async def test_pause_checkpoint_resume_preserves_state(api_client):
     for i in range(3):
         await api_client.post(
             f"/v1/workflows/{wf['id']}/steps",
-            json={"step_index": i, "action_type": "click", "selector_chain": {"type": "css", "value": f"#x{i}"}},
+            json={"step_index": i, "action_type": "click", "selector_chain": [{"type": "css", "value": f"#x{i}"}]},
             headers=_HEADERS,
         )
     await api_client.put(

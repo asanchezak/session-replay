@@ -31,7 +31,7 @@ async def make_workflow_with_steps(api_client):
                     "step_index": i,
                     "action_type": at,
                     "intent": f"{at} #{i}",
-                    "selector_chain": {"type": "css", "value": f"#x{i}"},
+                    "selector_chain": [{"type": "css", "value": f"#x{i}"}],
                     "value": f"v{i}" if at in ("type", "select") else None,
                 },
                 headers=_HEADERS,

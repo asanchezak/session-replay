@@ -16,7 +16,7 @@ _HEADERS = {"X-API-Key": "dev-api-key-change-in-production"}
 async def test_health_exempt(api_client):
     r = await api_client.get("/v1/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio

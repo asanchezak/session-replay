@@ -41,10 +41,18 @@ async def test_no_ai_key_uses_heuristic(api_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_with_ai_key_calls_provider(api_client):
+async def test_with_ai_key_calls_provider(api_client, monkeypatch):
     from core.config import settings
-    if not settings.ai_api_key:
-        pytest.skip("AI_API_KEY not configured")
+    from ai.client import AIResponse
+    import api.v1.workflows as wf_module
+
+    class _OkProvider:
+        async def generate(self, prompt, system=None, max_tokens=1024) -> AIResponse:
+            _ = (prompt, system, max_tokens)
+            return AIResponse(content='"Summarized workflow sentence."', confidence=0.9)
+
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(wf_module, "get_ai_provider", lambda **_: _OkProvider())
 
     wf_id = await _make_workflow_with_steps(api_client)
     resp = await api_client.post(f"/v1/workflows/{wf_id}/generate-prompt", headers=_HEADERS)
@@ -58,8 +66,6 @@ async def test_with_ai_key_calls_provider(api_client):
 async def test_with_ai_key_handles_provider_error(api_client, monkeypatch):
     """When the provider fails the endpoint must fall back to the heuristic, not 500."""
     from core.config import settings
-    if not settings.ai_api_key:
-        pytest.skip("AI_API_KEY not configured")
 
     from ai.client import AIProvider, AIResponse
     import api.v1.workflows as wf_module
@@ -68,6 +74,7 @@ async def test_with_ai_key_handles_provider_error(api_client, monkeypatch):
         async def generate(self, prompt, system=None, max_tokens=1024) -> AIResponse:
             raise RuntimeError("provider unavailable")
 
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
     monkeypatch.setattr(wf_module, "get_ai_provider", lambda **_: _ErrorProvider())
 
     wf_id = await _make_workflow_with_steps(api_client)

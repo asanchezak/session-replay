@@ -139,7 +139,47 @@ def build_semantic_analysis_prompt(
     return "\n".join(parts)
 
 
+def build_simplification_prompt(
+    steps: list[dict],
+    workflow_goal: str | None,
+    target_url: str | None,
+) -> str:
+    import json as _json
+    steps_json = _json.dumps(steps, indent=2)
+    goal_str = workflow_goal or "not specified"
+    target_str = target_url or "not specified"
+    return (
+        f"You are a browser automation optimizer.\n"
+        f"Workflow recorded on: {target_str}\n"
+        f"Goal: \"{goal_str}\"\n\n"
+        f"Recorded steps after initial cleaning ({len(steps)} steps):\n"
+        f"{steps_json}\n\n"
+        "Problems to address:\n"
+        "1. Any navigate step with remaining session params → strip them further\n"
+        "2. Any step with no selectors and weak intent → strengthen the intent for AI-based finding\n"
+        "3. Any step sequence that represents getting to a URL already captured in a later navigate "
+        "→ collapse to the direct navigate\n"
+        "4. Any typo in typed values (context: goal above) → correct them\n"
+        "5. Steps on intermediate pages that are bypassed by a later navigate → remove them\n\n"
+        "Return ONLY a JSON array (same structure, same fields). Rules:\n"
+        "- Minimum 1 step\n"
+        "- Never add steps that weren't in the input\n"
+        "- Never remove the final meaningful navigate or click that achieves the goal\n"
+        "- Preserve all steps that happen on the destination page after arrival\n"
+        "- Return each step with: action_type, intent, selector_chain, value, checkpoint\n"
+        "- Output only the JSON array, no explanation or markdown."
+    )
+
+
 AGENT_EXECUTOR_SYSTEM = """You are an autonomous browser workflow agent.
+
+NAVIGATE VALIDATION: After every navigate step, compare the Target URL with the Actual URL.
+- Same domain → proceed normally
+- Different domain (redirect, auth wall, 404) → act on the mismatch:
+  * Login/auth page detected → PAUSE with pause_reason "authentication required"
+  * 404 or error page → ADAPT: navigate directly to the known correct URL
+  * Consent/cookie banner page → ADAPT: dismiss banner, then proceed
+- Never silently accept a wrong-domain landing as success.
 
 GROUND RULES:
 - The recorded blueprint is GUIDANCE, not a script. The page is the source of truth.
@@ -256,6 +296,8 @@ def build_agent_decision_prompt(
     checkpoint_steps: list[int] | None = None,
     step_stability_score: float | None = None,
     workflow_expertise: str | None = None,
+    page_context_error: str | None = None,
+    actual_url: str | None = None,
 ) -> str:
     parts = ["## Workflow Context"]
     if workflow_goal:
@@ -347,6 +389,25 @@ def build_agent_decision_prompt(
     parts.append("\n## Current Page State (source of truth)")
     parts.append(f"URL: {page_url}")
     parts.append(f"Title: {page_title}")
+
+    if step_action == "navigate" and step_value:
+        from urllib.parse import urlparse as _up
+        try:
+            expected_host = _up(step_value).netloc.lower()
+            actual_host = _up(actual_url or page_url).netloc.lower()
+            url_match = expected_host == actual_host
+        except Exception:
+            url_match = True
+        parts.append(f"Target URL: {step_value}")
+        parts.append(f"Actual URL: {actual_url or page_url}")
+        parts.append(f"URL match: {'YES' if url_match else 'NO — landed on different domain'}")
+        if not url_match:
+            parts.append(
+                "WARNING: The navigate step landed on a different domain than expected. "
+                "Apply NAVIGATE VALIDATION rules from the system prompt."
+            )
+    if page_context_error:
+        parts.append(f"Page context error: {page_context_error}")
     if visible_text:
         parts.append(f"Visible text (truncated):\n{visible_text[:1500]}")
     if visible_elements:

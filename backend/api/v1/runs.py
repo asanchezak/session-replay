@@ -431,6 +431,8 @@ class StepResultRequest(BaseModel):
     success: bool
     error: str | None = None
     screenshot_ref: str | None = None
+    page_context_error: str | None = None
+    actual_url: str | None = None
 
 
 @router.post("/{run_id}/step-result")
@@ -469,6 +471,8 @@ async def report_step_result(
             "success": req.success,
             "error": req.error,
             "screenshot_ref": req.screenshot_ref,
+            "page_context_error": req.page_context_error,
+            "actual_url": req.actual_url,
         },
         run_id=run_id,
     ))

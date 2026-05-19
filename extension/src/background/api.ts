@@ -99,10 +99,20 @@ export class ApiClient {
     );
   }
 
-  async reportStepResult(runId: string, stepIndex: number, success: boolean, error?: string, actionType?: string) {
+  async reportStepResult(
+    runId: string,
+    stepIndex: number,
+    success: boolean,
+    error?: string,
+    actionType?: string,
+    pageContextError?: string,
+    actualUrl?: string,
+  ) {
     const body: Record<string, unknown> = { step_index: stepIndex, success };
     if (error !== undefined) body.error = error;
     if (actionType !== undefined) body.action_type = actionType;
+    if (pageContextError !== undefined) body.page_context_error = pageContextError;
+    if (actualUrl !== undefined) body.actual_url = actualUrl;
     return this.request<{ id: string; status: string; current_step_index: number; error_summary: string | null }>(
       "POST", `/runs/${runId}/step-result`,
       body,

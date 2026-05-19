@@ -17,7 +17,7 @@ async def test_update_step_scores(db_session, api_client):
         json={
             "step_index": 0, "action_type": "click",
             "intent": "test",
-            "selector_chain": {"type": "css", "value": "#btn"},
+            "selector_chain": [{"type": "css", "value": "#btn"}],
         },
         headers=headers,
     )
@@ -66,15 +66,13 @@ async def test_workflow_get_returns_steps(db_session, api_client):
         json={
             "step_index": 0, "action_type": "click",
             "intent": "test",
-            "selector_chain": {
-                "type": "css", "value": "#btn", "score": 0.8,
-            },
+            "selector_chain": [{"type": "css", "value": "#btn", "score": 0.8}],
         },
         headers=headers,
     )
     resp = await api_client.get(f"/v1/workflows/{wf['id']}", headers=headers)
     steps = resp.json().get("steps", [])
     assert len(steps) >= 1
-    chain = steps[0].get("selector_chain", {})
-    if isinstance(chain, dict):
-        assert chain.get("score") == 0.8
+    chain = steps[0].get("selector_chain", [])
+    assert isinstance(chain, list)
+    assert chain[0]["score"] == 0.8

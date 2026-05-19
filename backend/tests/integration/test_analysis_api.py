@@ -33,14 +33,14 @@ async def test_full_semantic_analysis_flow(api_client, monkeypatch):
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")
 
     steps = [
-        {"step_index": 0, "action_type": "navigate", "value": "https://www.google.com", "intent": "Navigate to Google", "selector_chain": {"type": "css", "value": "#search"}},
-        {"step_index": 1, "action_type": "type", "value": "Indeed job search", "intent": "Search for Indeed", "selector_chain": {"type": "css", "value": "#q"}},
-        {"step_index": 2, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": {"type": "css", "value": "a[href*='indeed']"}},
-        {"step_index": 3, "action_type": "type", "value": "Python developer", "intent": "Type search term", "selector_chain": {"type": "css", "value": "#text-input-what"}},
-        {"step_index": 4, "action_type": "type", "value": "Alajuela", "intent": "Type location", "selector_chain": {"type": "css", "value": "#text-input-where"}},
-        {"step_index": 5, "action_type": "click", "intent": "Click search button", "selector_chain": {"type": "css", "value": "button[type='submit']"}},
-        {"step_index": 6, "action_type": "click", "intent": "Click listing title", "selector_chain": {"type": "css", "value": ".jobTitle a"}},
-        {"step_index": 7, "action_type": "click", "intent": "Click next page", "selector_chain": {"type": "css", "value": "a[data-testid='pagination-page-next']"}},
+        {"step_index": 0, "action_type": "navigate", "value": "https://www.google.com", "intent": "Navigate to Google", "selector_chain": [{"type": "css", "value": "#search"}]},
+        {"step_index": 1, "action_type": "type", "value": "Indeed job search", "intent": "Search for Indeed", "selector_chain": [{"type": "css", "value": "#q"}]},
+        {"step_index": 2, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": [{"type": "css", "value": "a[href*='indeed']"}]},
+        {"step_index": 3, "action_type": "type", "value": "Python developer", "intent": "Type search term", "selector_chain": [{"type": "css", "value": "#text-input-what"}]},
+        {"step_index": 4, "action_type": "type", "value": "Alajuela", "intent": "Type location", "selector_chain": [{"type": "css", "value": "#text-input-where"}]},
+        {"step_index": 5, "action_type": "click", "intent": "Click search button", "selector_chain": [{"type": "css", "value": "button[type='submit']"}]},
+        {"step_index": 6, "action_type": "click", "intent": "Click listing title", "selector_chain": [{"type": "css", "value": ".jobTitle a"}]},
+        {"step_index": 7, "action_type": "click", "intent": "Click next page", "selector_chain": [{"type": "css", "value": "a[data-testid='pagination-page-next']"}]},
     ]
     wf_id = await _create_active_workflow_with_steps(api_client, "E2E Job Search Analysis", steps)
 
@@ -88,7 +88,7 @@ async def test_full_semantic_analysis_flow(api_client, monkeypatch):
 @pytest.mark.asyncio
 async def test_workflow_no_analysis_returns_literal_plan(api_client):
     steps = [
-        {"step_index": 0, "action_type": "click", "intent": "Simple step", "selector_chain": {"type": "css", "value": "#btn"}},
+        {"step_index": 0, "action_type": "click", "intent": "Simple step", "selector_chain": [{"type": "css", "value": "#btn"}]},
     ]
     wf_id = await _create_active_workflow_with_steps(api_client, "No Analysis WF", steps)
 
@@ -117,7 +117,7 @@ async def test_analyze_then_reanalyze_works(api_client, monkeypatch):
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")
 
     steps = [
-        {"step_index": 0, "action_type": "type", "value": "search term", "intent": "Search", "selector_chain": {"type": "css", "value": "#q"}},
+        {"step_index": 0, "action_type": "type", "value": "search term", "intent": "Search", "selector_chain": [{"type": "css", "value": "#q"}]},
     ]
     wf_id = await _create_active_workflow_with_steps(api_client, "Reanalyze", steps)
 
@@ -137,7 +137,7 @@ async def test_update_analysis_user_edits_persist(api_client, monkeypatch):
     monkeypatch.setattr("core.config.settings.ai_api_key", "")
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")
 
-    steps = [{"step_index": 0, "action_type": "click", "intent": "Test", "selector_chain": {"type": "css", "value": "#x"}}]
+    steps = [{"step_index": 0, "action_type": "click", "intent": "Test", "selector_chain": [{"type": "css", "value": "#x"}]}]
     wf_id = await _create_active_workflow_with_steps(api_client, "User Edit", steps)
 
     await api_client.post(f"/v1/workflows/{wf_id}/analyze", headers=_HEADERS)
@@ -159,7 +159,7 @@ async def test_parameter_update_endpoint(api_client, monkeypatch):
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")
 
     steps = [
-        {"step_index": 0, "action_type": "type", "value": "hello", "intent": "Input", "selector_chain": {"type": "css", "value": "#test"}},
+        {"step_index": 0, "action_type": "type", "value": "hello", "intent": "Input", "selector_chain": [{"type": "css", "value": "#test"}]},
     ]
     wf_id = await _create_active_workflow_with_steps(api_client, "Param Update", steps)
 
@@ -210,9 +210,9 @@ async def test_run_with_params_requires_goal_for_ambiguous_semantic_workflow(api
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")
 
     steps = [
-        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": {"type": "css", "value": "#root"}},
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": [{"type": "css", "value": "#root"}]},
         {"step_index": 1, "action_type": "scroll", "intent": None, "selector_chain": None},
-        {"step_index": 2, "action_type": "copy", "intent": "Copy description", "selector_chain": {"type": "css", "value": ".job"}},
+        {"step_index": 2, "action_type": "copy", "intent": "Copy description", "selector_chain": [{"type": "css", "value": ".job"}]},
     ]
     wf_id = await _create_active_workflow_with_steps(api_client, "Need Goal", steps)
     await api_client.post(f"/v1/workflows/{wf_id}/analyze", headers=_HEADERS)
@@ -238,10 +238,10 @@ async def test_run_with_params_applies_execution_goal_and_semantic_plan(api_clie
     )
     wf_id = create.json()["id"]
     steps = [
-        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": {"type": "css", "value": "#root"}},
+        {"step_index": 0, "action_type": "navigate", "value": "https://indeed.com", "intent": "Open Indeed", "selector_chain": [{"type": "css", "value": "#root"}]},
         {"step_index": 1, "action_type": "scroll", "intent": None, "selector_chain": None},
         {"step_index": 2, "action_type": "scroll", "intent": None, "selector_chain": None},
-        {"step_index": 3, "action_type": "click", "intent": "Click listing title", "selector_chain": {"type": "css", "value": ".jobTitle a"}},
+        {"step_index": 3, "action_type": "click", "intent": "Click listing title", "selector_chain": [{"type": "css", "value": ".jobTitle a"}]},
     ]
     for i, s in enumerate(steps):
         body = {

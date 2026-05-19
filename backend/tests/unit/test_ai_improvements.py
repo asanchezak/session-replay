@@ -19,6 +19,7 @@ from ai.prompts import build_agent_decision_prompt
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow, WorkflowStep
+from core.config import settings
 from services.agent_models import DecisionType, PageContext, PollRequest
 from services.agent_service import AgentService
 from services.audit import AppendEvent, AuditService
@@ -27,6 +28,11 @@ from services.execution_service import ExecutionService
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_ai(monkeypatch):
+    monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
 
 
 def _make_step(index: int, action_type: str = "click", **extra) -> dict:
