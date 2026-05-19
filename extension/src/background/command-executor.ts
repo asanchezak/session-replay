@@ -9,6 +9,156 @@ import type {
 
 const log = createLogger("command-executor");
 
+interface HarnessOutput {
+  ok: boolean;
+  value?: unknown;
+  logs: string[];
+  durationMs: number;
+  error?: string;
+}
+
+/**
+ * Injected into the page's MAIN world via chrome.scripting.executeScript.
+ * Must be a top-level statically-analyzable function (no closure capture).
+ *
+ * Receives (sourceText, args, timeoutMs) and:
+ * - constructs an async function from the source with `args` bound
+ * - races the user code against a hard timeout
+ * - captures console.* output (max 10 entries, 200 chars each)
+ * - JSON-roundtrips the return value, replacing non-serializable values
+ *   with {"__nonserializable__": "<typename>"} sentinels
+ *
+ * Returns a JSON-serializable HarnessOutput. Errors do not throw — they
+ * surface as {ok: false, error: "..."}.
+ */
+function RUN_SCRIPT_HARNESS(
+  source: string,
+  args: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<HarnessOutput> {
+  const startedAt = Date.now();
+  const logs: string[] = [];
+  const origConsole = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+  };
+  const capture = (level: string) => (...parts: unknown[]) => {
+    if (logs.length < 10) {
+      try {
+        logs.push(`[${level}] ${parts.map((p) => {
+          try { return typeof p === "string" ? p : JSON.stringify(p); }
+          catch { return String(p); }
+        }).join(" ")}`.slice(0, 200));
+      } catch { /* never let logging break the script */ }
+    }
+  };
+  console.log = capture("log");
+  console.info = capture("info");
+  console.warn = capture("warn");
+  console.error = capture("error");
+
+  const sanitize = (v: unknown, seen: WeakSet<object>): unknown => {
+    if (v === null) return null;
+    const t = typeof v;
+    if (t === "string" || t === "number" || t === "boolean") return v;
+    if (t === "undefined") return null;
+    if (t === "bigint") return String(v);
+    if (t === "function" || t === "symbol") {
+      return { __nonserializable__: t };
+    }
+    if (typeof v === "object") {
+      // DOM nodes and other host objects
+      if (typeof (v as any).nodeType === "number" && typeof (v as any).nodeName === "string") {
+        return { __nonserializable__: (v as any).nodeName };
+      }
+      if (seen.has(v as object)) return { __nonserializable__: "circular" };
+      seen.add(v as object);
+      if (Array.isArray(v)) {
+        return (v as unknown[]).map((item) => sanitize(item, seen));
+      }
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>)) {
+        try {
+          out[k] = sanitize((v as Record<string, unknown>)[k], seen);
+        } catch {
+          out[k] = { __nonserializable__: "throws" };
+        }
+      }
+      return out;
+    }
+    return { __nonserializable__: String(t) };
+  };
+
+  return new Promise<HarnessOutput>((resolve) => {
+    let settled = false;
+    const finish = (out: HarnessOutput) => {
+      if (settled) return;
+      settled = true;
+      console.log = origConsole.log;
+      console.info = origConsole.info;
+      console.warn = origConsole.warn;
+      console.error = origConsole.error;
+      resolve(out);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        error: "SCRIPT_TIMEOUT",
+        logs,
+        durationMs: Date.now() - startedAt,
+      });
+    }, timeoutMs);
+    try {
+      // Build an async function from the user source with `args` bound.
+      // `return` inside source returns the value to us; expressions without
+      // `return` resolve to undefined (sanitized to null).
+      const userFn = new Function("args", `"use strict"; return (async () => { ${source} })();`);
+      Promise.resolve(userFn(args)).then(
+        (value) => {
+          clearTimeout(timer);
+          try {
+            finish({
+              ok: true,
+              value: sanitize(value, new WeakSet()),
+              logs,
+              durationMs: Date.now() - startedAt,
+            });
+          } catch (e) {
+            finish({
+              ok: false,
+              error: `SCRIPT_RESULT_SERIALIZATION_FAILED: ${(e as Error).message}`,
+              logs,
+              durationMs: Date.now() - startedAt,
+            });
+          }
+        },
+        (err: unknown) => {
+          clearTimeout(timer);
+          const msg = err instanceof Error
+            ? `${err.name}: ${err.message}`
+            : String(err);
+          finish({
+            ok: false,
+            error: `SCRIPT_THREW: ${msg}`.slice(0, 500),
+            logs,
+            durationMs: Date.now() - startedAt,
+          });
+        },
+      );
+    } catch (e) {
+      clearTimeout(timer);
+      finish({
+        ok: false,
+        error: `SCRIPT_PARSE_ERROR: ${(e as Error).message}`,
+        logs,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+  });
+}
+
 // Phase 2: per-tab cache of the last PageContext so the next capture can
 // emit a delta. Cleared automatically when the tab is closed.
 const prevContextByTab = new Map<number, PageContext>();
@@ -174,10 +324,74 @@ export class CommandExecutor {
     }
   }
 
+  /**
+   * Workstream A: god-mode JavaScript primitive. Executes an AI-supplied
+   * function body in the page's MAIN world (so it can reach page globals),
+   * with captured console.* output and a per-call timeout. Bytes returned
+   * by the page must be JSON-serializable — non-serializable values
+   * (DOM nodes, functions, circular refs) are replaced with sentinel objects.
+   */
+  async runScript(
+    tabId: number,
+    command: AgentCommand,
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    script_result?: unknown;
+    script_logs?: string[];
+    script_duration_ms?: number;
+  }> {
+    const source = command.script;
+    if (!source || typeof source !== "string") {
+      return { success: false, error: "run_script: missing 'script' source" };
+    }
+    const userTimeout = Math.min(
+      Math.max(command.script_timeout_ms ?? 5000, 100),
+      15_000,
+    );
+    const args = command.script_args ?? {};
+
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: RUN_SCRIPT_HARNESS,
+        args: [source, args as Record<string, unknown>, userTimeout],
+      });
+      const out = results?.[0]?.result as HarnessOutput | undefined;
+      if (!out) {
+        return { success: false, error: "run_script: no result returned" };
+      }
+      return {
+        success: out.ok,
+        error: out.error,
+        script_result: out.value,
+        script_logs: out.logs,
+        script_duration_ms: out.durationMs,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error("runScript failed:", msg);
+      return { success: false, error: `run_script injection failed: ${msg}` };
+    }
+  }
+
   async executeCommand(
     tabId: number,
     command: AgentCommand,
-  ): Promise<{ success: boolean; error?: string; via_method_index?: number }> {
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    via_method_index?: number;
+    script_result?: unknown;
+    script_logs?: string[];
+    script_duration_ms?: number;
+  }> {
+    // Workstream A: run_script bypasses the content-script messaging path
+    // — chrome.scripting.executeScript is a service-worker-only API.
+    if (command.action === "run_script") {
+      return await this.runScript(tabId, command);
+    }
     const timeoutMs = command.timeout_ms || 15000;
 
     // Retry up to 3 times when the content script is temporarily unavailable

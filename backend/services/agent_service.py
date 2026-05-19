@@ -52,6 +52,7 @@ _run_rollback_count: dict[str, int] = {}
 _run_active_step: dict[str, int] = {}
 _run_step_recovery_started_at: dict[tuple[str, int], datetime] = {}
 _run_step_recovery_cycles: dict[tuple[str, int], int] = {}
+_run_script_count: dict[str, int] = {}
 _pending_actions: dict[str, str] = {}
 
 
@@ -250,6 +251,16 @@ class AgentService:
                     adapted_command = self._parse_adapted_command(
                         ai_decision.get("command", {}),
                     )
+                    # Workstream A: enforce per-run quota on run_script primitive.
+                    if (
+                        adapted_command
+                        and adapted_command.action == CommandAction.RUN_SCRIPT
+                    ):
+                        quota_response = self._check_run_script_quota(
+                            run_id, step_index, ai_decision,
+                        )
+                        if quota_response:
+                            return quota_response
                     _run_adapt_count[run_id] = _run_adapt_count.get(run_id, 0) + 1
                     _run_step_wait_count.pop((run_id, step_index), None)
                     await self._audit_decision(
@@ -320,6 +331,14 @@ class AgentService:
                 wait_response = await self._fallback_after_ai_failure(run, step_index, step, ctx)
                 if wait_response:
                     return wait_response
+
+        # Workstream A: enforce per-run quota on run_script primitive (EXECUTE path).
+        if command.action == CommandAction.RUN_SCRIPT:
+            quota_response = self._check_run_script_quota(
+                run_id, step_index, ai_decision,
+            )
+            if quota_response:
+                return quota_response
 
         ai_confirmed = bool(ai_decision)
         reason_prefix = "AI confirmed EXECUTE" if ai_confirmed else "Fast path"
@@ -454,6 +473,7 @@ class AgentService:
         _run_restart_count.pop(run_id, None)
         _run_rollback_count.pop(run_id, None)
         _run_active_step.pop(run_id, None)
+        _run_script_count.pop(run_id, None)
         keys = [k for k in _run_step_wait_count if k[0] == run_id]
         for key in keys:
             _run_step_wait_count.pop(key, None)
@@ -461,6 +481,80 @@ class AgentService:
         for key in recovery_keys:
             _run_step_recovery_started_at.pop(key, None)
             _run_step_recovery_cycles.pop(key, None)
+
+    async def _audit_script_execution(
+        self, run_id: str, req: ResultRequest,
+    ) -> None:
+        """Emit a 'script_executed' EventLog row. The full script source is
+        recovered indirectly from the snapshot or AI decision audit; here we
+        only fingerprint the result + capture log/duration. Truncates large
+        values to keep the audit row compact."""
+        try:
+            result_preview: Any = None
+            result_len = 0
+            if req.script_result is not None:
+                try:
+                    as_json = json.dumps(req.script_result)
+                    result_len = len(as_json)
+                    result_preview = as_json[:1024]
+                except (TypeError, ValueError):
+                    result_preview = str(req.script_result)[:1024]
+            result_sha = (
+                hashlib.sha256(
+                    json.dumps(req.script_result, default=str).encode("utf-8"),
+                ).hexdigest()
+                if req.script_result is not None
+                else None
+            )
+            payload: dict[str, Any] = {
+                "step_index": req.step_index,
+                "success": req.success,
+                "error": req.error,
+                "result_sha256": result_sha,
+                "result_type": type(req.script_result).__name__ if req.script_result is not None else None,
+                "result_preview": result_preview,
+                "result_len_bytes": result_len,
+                "logs": (req.script_logs or [])[:10],
+                "duration_ms": req.script_duration_ms,
+            }
+            await self.audit.append(AppendEvent(
+                event_type="script_executed",
+                payload=payload,
+                run_id=run_id,
+            ))
+        except Exception as exc:
+            logger.debug("script_executed audit skipped: %s", exc)
+
+    def _check_run_script_quota(
+        self,
+        run_id: str,
+        step_index: int,
+        ai_decision: dict[str, Any] | None,
+    ) -> PollResponse | None:
+        """Workstream A: cap how many run_script primitives a single run can
+        invoke. Returns a PAUSE PollResponse when the budget is exhausted;
+        otherwise increments the counter and returns None so the caller can
+        proceed to emit the EXECUTE/ADAPT response."""
+        cap = int(SAFETY_LIMITS.get("max_run_script_per_run", 30))
+        current = _run_script_count.get(run_id, 0)
+        if current >= cap:
+            reason = f"run_script budget exhausted ({current}/{cap})"
+            logger.warning("Run %s exceeded run_script quota: %s", run_id, reason)
+            return PollResponse(
+                decision=DecisionType.PAUSE,
+                confidence=0.99,
+                reasoning=reason,
+                pause_reason="script_budget_exhausted",
+                next_step_index=step_index,
+                requires_human=False,
+            )
+        _run_script_count[run_id] = current + 1
+        # Annotate the audit context if we have an ai_decision dict in hand.
+        if isinstance(ai_decision, dict):
+            ctx = ai_decision.setdefault("decision_context", {}) or {}
+            ctx["run_script_count"] = current + 1
+            ai_decision["decision_context"] = ctx
+        return None
 
     def _recovery_window_seconds(self) -> int:
         return max(30, int(getattr(settings, "ai_step_recovery_window_seconds", 900)))
@@ -1443,6 +1537,17 @@ class AgentService:
             )
         except Exception as exc:
             logger.debug("ai_outcomes.resolve_latest skipped: %s", exc)
+
+        # Workstream A: audit run_script executions. Triggered whenever the
+        # extension reports back script outputs — success or failure. Never
+        # stores the full script source; only a SHA-256 and a short preview.
+        script_logged = (
+            req.script_result is not None
+            or (req.script_logs and len(req.script_logs) > 0)
+            or req.script_duration_ms is not None
+        )
+        if script_logged:
+            await self._audit_script_execution(run_id, req)
 
         if req.success:
             self._clear_recovery_state(run_id)

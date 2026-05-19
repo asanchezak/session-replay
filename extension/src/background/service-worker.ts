@@ -924,6 +924,16 @@ async function executeAgentRun(
             page_context_after: pageContextAfter,
             error_context: errorContext || undefined,
             via_method_index: execResult.via_method_index,
+            // Workstream A: surface run_script outputs to the backend audit.
+            ...(execResult.script_result !== undefined && {
+              script_result: execResult.script_result,
+            }),
+            ...(execResult.script_logs && execResult.script_logs.length > 0 && {
+              script_logs: execResult.script_logs,
+            }),
+            ...(execResult.script_duration_ms !== undefined && {
+              script_duration_ms: execResult.script_duration_ms,
+            }),
           });
 
           const next = resultResponse.decision;

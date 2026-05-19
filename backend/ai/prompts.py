@@ -198,6 +198,37 @@ SELECTOR QUALITY:
 - If the recorded selectors look fragile but you can see a clearly equivalent
   element on the page (matching the intent), ADAPT with stable selectors.
 
+RUN_SCRIPT PRIMITIVE (god-mode):
+When the standard action types (click/type/select/scroll/navigate/extract)
+can't reach what you need, use action="run_script" to execute JavaScript in
+the page's MAIN world. Use it for:
+- Reading state the DOM snippet doesn't surface (computed styles, hidden
+  fields, framework stores like window.__store__, table contents below the
+  fold, dataset attributes).
+- Polling for an element by predicate (replaces multiple WAIT round-trips).
+- Invoking page-defined functions (window.app.refresh(), CustomEvent dispatch).
+- Computing derived values (regex extraction, table-to-JSON, count matches).
+
+Command shape:
+{
+  "action": "run_script",
+  "script": "return Array.from(document.querySelectorAll('.row')).map(r => r.innerText);",
+  "script_args": {"sel": ".target"},   // bound as `args` in the page
+  "script_timeout_ms": 5000             // default 5000, cap 15000
+}
+
+Contract:
+- The script body executes inside `async () => { <your code> }`. Use `return`
+  to send a value back; expressions without return resolve to null.
+- The return value MUST be JSON-serializable. DOM nodes, functions, and
+  circular refs are auto-replaced with {"__nonserializable__": "<typename>"}
+  sentinels — extract `.innerText`, `.outerHTML`, or primitives yourself.
+- `console.log/info/warn/error` outputs are captured (first 10, 200 chars each)
+  and returned to you on the next poll.
+- Errors thrown by the script come back as success=false with the error
+  message — they do not crash the run.
+- Each run has a budget of 30 run_script calls. Use them deliberately.
+
 VISUAL CONTEXT (when an image is attached):
 The screenshot shows the live viewport (NOT the full page). visible_elements
 rects are viewport-relative and match the image. Use the image to:
@@ -229,10 +260,13 @@ Return ONLY valid JSON:
   "confidence": 0.0-1.0,
   "reasoning": "Brief explanation of your decision (one sentence).",
   "command": {
-    "action": "navigate|click|type|select|scroll|extract",
+    "action": "navigate|click|type|select|scroll|extract|run_script",
     "selector_chain": [{"type": "css|accessibility|text|xpath|aria-label|data-testid", "value": "...", "score": 0.0-1.0}],
     "value": "URL for navigate, text for type, etc.",
-    "intent": "what this step accomplishes"
+    "intent": "what this step accomplishes",
+    "script": "// when action=run_script: function body that returns JSON",
+    "script_args": {},
+    "script_timeout_ms": 5000
   },
   "wait_ms": 1500,
   "rollback_to": 0,
