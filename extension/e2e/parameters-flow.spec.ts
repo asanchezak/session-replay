@@ -28,12 +28,18 @@ test("parameters flow: run-with-params substitutes runtime values into workflow 
   const execPage = await context.newPage();
   await serveTestPage(execPage);
 
-  // Call run-with-params to substitute the placeholder
+  // Call run-with-params to substitute the placeholder. The autonomy WIP
+  // (commit b20edca) added a GOAL_REQUIRED check that 409s workflows with
+  // ambiguous clicks unless an execution_goal is supplied; we set one here
+  // since the test workflow has a generic "#submit-btn-v1" click.
   const runResp = await execPage.request.post(
     `${BACKEND}/v1/workflows/${wfId}/run-with-params`,
     {
       headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
-      data: { runtime_params: { target_url: TEST_PAGE_URL } },
+      data: {
+        runtime_params: { target_url: TEST_PAGE_URL },
+        execution_goal: "Submit the test form",
+      },
     },
   );
   expect(runResp.ok()).toBeTruthy();

@@ -70,14 +70,22 @@ chrome.runtime.onMessage.addListener(
           params?: Record<string, unknown>;
         };
         const tabId = msg.tabId ?? sender.tab?.id;
-        executeAgentRun(msg.workflowId, tabId, msg.goal, msg.params)
-          .then((result: { id: string; status: string; total_steps: number }) => {
-            sendResponse({ type: "RUN_STARTED", run: result });
-          })
-          .catch((err: unknown) => {
-            log.error("Failed to run workflow:", err);
+        // Respond as soon as the run is created so dashboards / bridges don't
+        // wait for the whole workflow loop to finish. Loop errors after the
+        // initial create are observable via the run record itself.
+        let responded = false;
+        executeAgentRun(msg.workflowId, tabId, msg.goal, msg.params, (runHandle) => {
+          if (!responded) {
+            responded = true;
+            sendResponse({ type: "RUN_STARTED", run: runHandle });
+          }
+        }).catch((err: unknown) => {
+          log.error("Failed to run workflow:", err);
+          if (!responded) {
+            responded = true;
             sendResponse({ type: "RUN_FAILED", error: String(err) });
-          });
+          }
+        });
         return true;
       }
       case "RECORD_EVENT": {
@@ -548,10 +556,21 @@ async function executeAgentRun(
   tabId?: number,
   goal?: string,
   runtimeParams?: Record<string, unknown>,
+  onStart?: (runHandle: { id: string; status: string; total_steps: number }) => void,
 ): Promise<{ id: string; status: string; total_steps: number }> {
   const run = await apiClient.runWithParams(workflowId, runtimeParams || {}, goal);
   const runId = run.id;
   log.log(`[Agent] Run ${runId} started for workflow ${workflowId}`);
+  // Workstream D follow-up: notify the caller as soon as the run is created
+  // (before the loop runs to completion) so the dashboard bridge can post
+  // RUN_STARTED without waiting for the entire workflow to finish.
+  if (onStart) {
+    try {
+      onStart({ id: runId, status: run.status || "running", total_steps: run.total_steps || 0 });
+    } catch (err) {
+      log.error("[Agent] onStart callback threw:", err);
+    }
+  }
 
   const workflow = await apiClient.getWorkflow(workflowId);
   const plannedSteps = run.execution_plan?.steps;
@@ -1145,9 +1164,24 @@ chrome.runtime.onMessageExternal.addListener(
     };
     if (msg.type === "RUN_WORKFLOW" && msg.workflowId) {
       log.log(`[External] RUN_WORKFLOW for ${msg.workflowId}`);
-      executeAgentRun(msg.workflowId, msg.tabId, msg.goal, msg.params)
-        .then((result) => sendResponse({ type: "RUN_STARTED", run: result }))
-        .catch((err) => sendResponse({ type: "RUN_FAILED", error: String(err) }));
+      // Respond as soon as the run is created (via the onStart callback) so
+      // dashboards / e2e helpers don't have to wait for the whole workflow to
+      // finish. Surface failures via RUN_FAILED only when the run *creation*
+      // itself fails — later loop errors are observable via the run record.
+      let responded = false;
+      executeAgentRun(msg.workflowId, msg.tabId, msg.goal, msg.params, (runHandle) => {
+        if (!responded) {
+          responded = true;
+          sendResponse({ type: "RUN_STARTED", run: runHandle });
+        }
+      }).catch((err) => {
+        if (!responded) {
+          responded = true;
+          sendResponse({ type: "RUN_FAILED", error: String(err) });
+        } else {
+          log.error("[External] RUN_WORKFLOW loop failed after start:", err);
+        }
+      });
       return true;
     }
     sendResponse({ type: "ERROR", code: "UNKNOWN_MESSAGE" });
