@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>run_script E2E — target page</title>
+</head>
+<body>
+  <h1>Run Script Target</h1>
+  <p>This page exposes a controlled window global that the agent's
+     run_script primitive can read.</p>
+  <div id="data" data-payload="42">payload visible in DOM</div>
+  <script>
+    // Page-global state only reachable from MAIN world.
+    window.__counter__ = 42;
+    window.__app__ = {
+      version: "1.2.3",
+      readData: () => Array.from(document.querySelectorAll("[data-payload]"))
+        .map((el) => Number(el.getAttribute("data-payload"))),
+    };
+  </script>
+</body>
+</html>

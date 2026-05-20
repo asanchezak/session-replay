@@ -1209,6 +1209,9 @@ if (typeof self !== "undefined") {
   g.__executeAgentRun = executeAgentRun;
   g.__SR_startRecording = () => orchestrator.startRecording();
   g.__SR_stopRecording = () => orchestrator.stopRecording();
+  // Workstream D: expose the CommandExecutor instance so E2E specs can
+  // invoke runScript / captureScreenshot without driving a full AI loop.
+  g.__SR_commandExecutor = commandExecutor;
 }
 
 export { detectChallenges };

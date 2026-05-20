@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Vision E2E — consent banner</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 24px; }
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    .consent {
+      background: white; padding: 24px; border-radius: 8px;
+      max-width: 480px; text-align: center;
+    }
+    .accept { background: #6c5ce7; color: white; padding: 8px 16px;
+      border: none; border-radius: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Welcome to the Page</h1>
+  <p>Below the overlay is the real content.</p>
+  <a href="#next" id="continue-link">Continue</a>
+
+  <!-- Consent banner intentionally rendered as role=dialog so the extension's
+       detector classifies the page as is_blocking with blocking_type=consent_banner. -->
+  <div class="overlay" role="dialog" aria-label="Cookie consent" aria-modal="true">
+    <div class="consent">
+      <h2>We use cookies</h2>
+      <p>Please accept cookies to continue.</p>
+      <button class="accept" id="accept-cookies">Accept All</button>
+    </div>
+  </div>
+</body>
+</html>
