@@ -159,6 +159,232 @@ function RUN_SCRIPT_HARNESS(
   });
 }
 
+/**
+ * Pre-compiled click-fallback harness — runs via executeScript({func:...}) so
+ * Chrome injects it via extension privilege (bypassing page CSP entirely).
+ * Contains NO new Function() / eval, so it is MV3-safe in both MAIN and
+ * ISOLATED worlds.  This is the CSP-safe replacement for the run_script path
+ * when script_args.__harness === "js_click".
+ *
+ * Receives the full script_args object and returns a click-result or throws
+ * JS_CLICK_FALLBACK_NO_TARGET:<label>.
+ */
+function JS_CLICK_HARNESS(
+  args: Record<string, unknown>,
+): { clicked: boolean; reason: string; tag: string; text: string; score?: number; originTag?: string | null } {
+  const label = String((args && args.label) || "").trim();
+  const labelLower = label.toLowerCase();
+  const selectors: string[] = Array.isArray(args?.selectorCandidates)
+    ? (args.selectorCandidates as unknown[]).map((s) => String(s))
+    : [];
+  const textCandidates: string[] = Array.isArray(args?.textCandidates)
+    ? (args.textCandidates as unknown[]).map((t) => String(t).trim()).filter(Boolean)
+    : [];
+  if (label) textCandidates.unshift(label);
+
+  const normalizeToken = (v: unknown) =>
+    String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  const isVisible = (el: Element | null): boolean => {
+    if (!el || !(el instanceof Element)) return false;
+    const s = window.getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+  };
+
+  const isDisabled = (el: Element | null): boolean => {
+    if (!el || !(el instanceof Element)) return false;
+    if (
+      el instanceof HTMLButtonElement || el instanceof HTMLInputElement ||
+      el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
+    ) return !!(el as HTMLButtonElement).disabled;
+    return el.getAttribute("aria-disabled") === "true";
+  };
+
+  const textFor = (el: Element): string =>
+    (
+      (el.getAttribute("aria-label") || "") + " " +
+      (el.getAttribute("title") || "") + " " +
+      (el.getAttribute("data-testid") || "") + " " +
+      ("value" in el ? String((el as HTMLInputElement).value || "") : "") + " " +
+      (el.textContent || "")
+    ).replace(/\s+/g, " ").trim();
+
+  const seemsInteractive = (el: Element | null): boolean => {
+    if (!el || !(el instanceof Element)) return false;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (el.matches("button,a,[role='button'],input[type='button'],input[type='submit'],input[type='radio'],input[type='checkbox'],summary,label")) return true;
+    if (role === "button" || role === "link" || role === "tab" || role === "option") return true;
+    if (el.hasAttribute("onclick") || el.hasAttribute("data-action")) return true;
+    if (el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex") || "0") >= 0) return true;
+    const cls = `${el.className || ""} ${el.getAttribute("data-testid") || ""}`.toLowerCase();
+    if (cls.includes("btn") || cls.includes("button") || cls.includes("click")) return true;
+    try { if (window.getComputedStyle(el).cursor === "pointer") return true; } catch { /**/ }
+    return false;
+  };
+
+  const bestActionableTarget = (node: Element | null): Element | null => {
+    if (!node || !(node instanceof Element)) return null;
+    let cur: Element | null = node;
+    for (let d = 0; d < 8 && cur; d++) {
+      if (isVisible(cur) && !isDisabled(cur) && seemsInteractive(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    cur = node;
+    for (let d = 0; d < 8 && cur; d++) {
+      if (isVisible(cur) && !isDisabled(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  };
+
+  const matchesNeedle = (text: string, needle: string): boolean => {
+    const hay = String(text || "").toLowerCase();
+    const needleL = String(needle || "").toLowerCase().trim();
+    if (!needleL || !hay) return false;
+    if (hay.includes(needleL) || needleL.includes(hay)) return true;
+    const hayN = normalizeToken(hay);
+    const needleN = normalizeToken(needleL);
+    if (!hayN || !needleN) return false;
+    return hayN.includes(needleN) || needleN.includes(hayN);
+  };
+
+  const scoreEl = (el: Element): number => {
+    if (!isVisible(el) || isDisabled(el)) return -1;
+    const t = textFor(el);
+    const tLower = t.toLowerCase();
+    const tNorm = normalizeToken(tLower);
+    const labelNorm = normalizeToken(labelLower);
+    if (!textCandidates.some((needle) => matchesNeedle(t, needle))) return -1;
+    let s = 0;
+    if (labelLower && tLower === labelLower) s += 120;
+    if (labelNorm && tNorm && tNorm === labelNorm) s += 120;
+    if (labelLower && tLower.includes(labelLower)) s += 70;
+    if (labelNorm && tNorm.includes(labelNorm)) s += 65;
+    if (textCandidates.some((n) => {
+      const nL = String(n || "").toLowerCase().trim();
+      const nN = normalizeToken(nL);
+      return (nL && tLower.includes(nL)) || (nN && tNorm.includes(nN));
+    })) s += 35;
+    if (seemsInteractive(el)) s += 12;
+    if (bestActionableTarget(el)) s += 8;
+    return s;
+  };
+
+  const clickNode = (
+    el: Element | Node | null,
+    reason: string,
+  ): { clicked: boolean; reason: string; tag: string; text: string; originTag: string | null } | null => {
+    if (!(el instanceof Element)) return null;
+    const target = bestActionableTarget(el) || el;
+    if (!isVisible(target) || isDisabled(target)) return null;
+    try { target.scrollIntoView({ block: "center", inline: "center" }); } catch { /**/ }
+    try { (target as HTMLElement).focus?.({ preventScroll: true }); } catch { /**/ }
+    const ptrDown = { bubbles: true, cancelable: true, composed: true, pointerType: "mouse", isPrimary: true, button: 0 };
+    const msBtn = { bubbles: true, cancelable: true, composed: true, button: 0 };
+    try { target.dispatchEvent(new PointerEvent("pointerdown", ptrDown)); } catch { /**/ }
+    try { target.dispatchEvent(new MouseEvent("mousedown", msBtn)); } catch { /**/ }
+    try { target.dispatchEvent(new PointerEvent("pointerup", { ...ptrDown })); } catch { /**/ }
+    try { target.dispatchEvent(new MouseEvent("mouseup", msBtn)); } catch { /**/ }
+    try { (target as HTMLElement).click(); } catch { /**/ }
+    try { target.dispatchEvent(new MouseEvent("click", msBtn)); } catch { /**/ }
+    return {
+      clicked: true,
+      reason,
+      tag: target.tagName,
+      text: textFor(target).slice(0, 160),
+      originTag: el.tagName,
+    };
+  };
+
+  // Helper: find the best interactive descendant of a container element.
+  const bestInteractiveChild = (container: Element): Element | null => {
+    const children = Array.from(container.querySelectorAll(
+      "button,a,[role='button'],input[type='button'],input[type='submit'],[role='link'],[role='tab'],[tabindex],[onclick],[aria-label]"
+    ));
+    for (const child of children) {
+      if (isVisible(child) && !isDisabled(child)) return child;
+    }
+    return null;
+  };
+
+  // 1. Try recorded CSS/XPath selectors.
+  //    If a selector matches but the element is not interactive (e.g. a generic
+  //    container like #interop-outlet), fall through to its interactive children.
+  for (const candidate of selectors) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    try {
+      let node: Element | Node | null = null;
+      if (candidate.startsWith("/") || candidate.startsWith("(")) {
+        node = document.evaluate(candidate, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      } else {
+        node = document.querySelector(candidate);
+      }
+      if (!(node instanceof Element)) continue;
+      const clicked = clickNode(node, "selector_css");
+      if (clicked) return clicked;
+      // Container matched but wasn't interactive — try its interactive children.
+      const child = bestInteractiveChild(node);
+      if (child) {
+        const childClicked = clickNode(child, "selector_child");
+        if (childClicked) return childClicked;
+      }
+    } catch { /**/ }
+  }
+
+  // 2. Anchor-point hit-test: anchor selector gives us the recorded click
+  //    position relative to a stable ancestor element. Using elementFromPoint
+  //    finds the exact element the user originally clicked, even when CSS
+  //    selectors are stale or overly generic.
+  const anchorPoints = Array.isArray(args?.anchorPoints) ? args.anchorPoints as Array<{anchorSelector?: string; offsetX?: number; offsetY?: number}> : [];
+  for (const ap of anchorPoints) {
+    if (!ap || typeof ap.anchorSelector !== "string") continue;
+    try {
+      const anchorEl = document.querySelector(ap.anchorSelector);
+      if (!anchorEl) continue;
+      const rect = anchorEl.getBoundingClientRect();
+      const vx = rect.left + (ap.offsetX ?? 0);
+      const vy = rect.top + (ap.offsetY ?? 0);
+      // elementFromPoint uses viewport coordinates; anchor offsets are from
+      // the anchor element's top-left, so rect.left/top already accounts for scroll.
+      let target = document.elementFromPoint(vx, vy) as Element | null;
+      if (!target && ap.offsetY) {
+        // Try scroll-adjusted (document coordinates) in case offsets were absolute
+        const vy2 = (ap.offsetY ?? 0) - window.scrollY;
+        target = document.elementFromPoint(ap.offsetX ?? 0, vy2) as Element | null;
+      }
+      if (!target) continue;
+      const clicked = clickNode(target, "anchor_point");
+      if (clicked) return clicked;
+      // If the hit element is not interactive, look upward and then at children.
+      const upClicked = clickNode(target.parentElement, "anchor_point_parent");
+      if (upClicked) return upClicked;
+      const child = bestInteractiveChild(target);
+      if (child) {
+        const childClicked = clickNode(child, "anchor_point_child");
+        if (childClicked) return childClicked;
+      }
+    } catch { /**/ }
+  }
+
+  // 3. Text / label ranking across interactive elements.
+  const nodes = Array.from(document.querySelectorAll(
+    "button,a,[role='button'],input[type='button'],input[type='submit'],input[type='radio'],input[type='checkbox'],summary,label,[aria-label],[data-testid],[onclick],[tabindex],span,div,p,li,strong,b"
+  ));
+  let best: Element | null = null;
+  let bestScore = -1;
+  for (const el of nodes) {
+    const s = scoreEl(el);
+    if (s > bestScore) { bestScore = s; best = el; }
+  }
+  if (best && bestScore >= 18) {
+    const clicked = clickNode(best, "text_rank");
+    if (clicked) return { ...clicked, score: bestScore };
+  }
+
+  throw new Error(`JS_CLICK_FALLBACK_NO_TARGET:${label}`);
+}
+
 // Phase 2: per-tab cache of the last PageContext so the next capture can
 // emit a delta. Cleared automatically when the tab is closed.
 const prevContextByTab = new Map<number, PageContext>();
@@ -341,6 +567,41 @@ export class CommandExecutor {
     script_logs?: string[];
     script_duration_ms?: number;
   }> {
+    const args = command.script_args ?? {};
+
+    // Route to the pre-compiled JS_CLICK_HARNESS when the backend marks this
+    // as a js_click fallback.  JS_CLICK_HARNESS uses NO new Function()/eval so
+    // it is safe under Chrome MV3 CSP and strict-CSP pages like LinkedIn.
+    if (args.__harness === "js_click") {
+      const start = Date.now();
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: JS_CLICK_HARNESS,
+          args: [args as Record<string, unknown>],
+        });
+        const out = results?.[0]?.result as ReturnType<typeof JS_CLICK_HARNESS> | undefined;
+        if (!out) {
+          return { success: false, error: "run_script: no result returned" };
+        }
+        return {
+          success: true,
+          script_result: out,
+          script_logs: [],
+          script_duration_ms: Date.now() - start,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Re-surface JS_CLICK_FALLBACK_NO_TARGET so the backend can classify it.
+        if (msg.includes("JS_CLICK_FALLBACK_NO_TARGET")) {
+          return { success: false, error: msg, script_duration_ms: Date.now() - start };
+        }
+        log.error("JS_CLICK_HARNESS failed:", msg);
+        return { success: false, error: `run_script injection failed: ${msg}`, script_duration_ms: Date.now() - start };
+      }
+    }
+
     const source = command.script;
     if (!source || typeof source !== "string") {
       return { success: false, error: "run_script: missing 'script' source" };
@@ -349,7 +610,6 @@ export class CommandExecutor {
       Math.max(command.script_timeout_ms ?? 5000, 100),
       15_000,
     );
-    const args = command.script_args ?? {};
 
     try {
       const results = await chrome.scripting.executeScript({

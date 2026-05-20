@@ -315,3 +315,124 @@ def test_openai_provider_builds_multipart_user_content_when_images_present():
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert content[1]["image_url"]["detail"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_vision_image_attached_only_on_first_tool_attempt(monkeypatch):
+    from core.config import settings
+
+    captured_images: list[Any] = []
+
+    svc = AgentService.__new__(AgentService)
+    svc.ai_outcomes = AsyncMock()
+    svc.ai_outcomes.load_run_memory = AsyncMock(return_value={"decisions": [], "traces": []})
+    svc.session = AsyncMock()
+    svc.session.flush = AsyncMock()
+    svc._load_previous_failures = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    svc._load_workflow_expertise = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    svc._get_current_phase = lambda _a, _b: None  # type: ignore[method-assign]
+    svc._apply_plan_updates_from_ai = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    calls = [
+        ToolUseResponse(
+            tool_calls=[ToolCall(
+                id="plan-1",
+                name="update_plan",
+                arguments={"operations": [{"operation": "INSERT", "step_index": 0, "new_step": {"action_type": "click"}}]},
+            )],
+            content="",
+            model="gpt-4o-mini",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+            stop_reason="tool_calls",
+        ),
+        ToolUseResponse(
+            tool_calls=[ToolCall(
+                id="exec-1",
+                name="execute_action",
+                arguments={
+                    "action": "click",
+                    "selector_chain": [{"type": "css", "value": "#x"}],
+                    "intent": "click",
+                    "confidence": 0.9,
+                    "reasoning": "ok",
+                },
+            )],
+            content="",
+            model="gpt-4o-mini",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+            stop_reason="tool_calls",
+        ),
+    ]
+
+    async def _generate_with_tools(messages, tools, system=None, max_tokens=2048, images=None):
+        captured_images.append(images)
+        return calls[len(captured_images) - 1]
+
+    fake_provider = AsyncMock()
+    fake_provider.generate_with_tools = _generate_with_tools
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_: fake_provider)
+    monkeypatch.setattr("services.agent_service.build_agent_decision_prompt", lambda **_: "prompt")
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "vision_enabled", True, raising=False)
+
+    b64 = base64.b64encode(_make_jpeg_bytes()).decode()
+    run, step, ctx = _make_run_and_ctx()
+
+    out = await svc._consult_ai_for_step(
+        run=run,
+        step_index=0,
+        step=step,
+        _original_command=None,
+        analysis={},
+        ctx=ctx,
+        screenshot_b64=b64,
+        screenshot_mime="image/jpeg",
+        screenshot_trigger="first_poll",
+    )
+
+    assert out is not None
+    assert out["decision"] == "EXECUTE"
+    assert len(captured_images) == 2
+    assert captured_images[0] is not None
+    assert captured_images[1] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_exhaustion_returns_bounded_wait(monkeypatch):
+    from core.config import settings
+
+    svc = AgentService.__new__(AgentService)
+    svc.ai_outcomes = AsyncMock()
+    svc.ai_outcomes.load_run_memory = AsyncMock(return_value={"decisions": [], "traces": []})
+    svc.session = AsyncMock()
+    svc.session.flush = AsyncMock()
+    svc._load_previous_failures = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    svc._load_workflow_expertise = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    svc._get_current_phase = lambda _a, _b: None  # type: ignore[method-assign]
+    svc._apply_plan_updates_from_ai = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    fake_provider = AsyncMock()
+    fake_provider.generate_with_tools = AsyncMock(return_value=ToolUseResponse(
+        tool_calls=[],
+        content="",
+        model="gpt-4o-mini",
+        usage={"prompt_tokens": 10, "completion_tokens": 3},
+        stop_reason="stop",
+    ))
+    monkeypatch.setattr("services.agent_service.get_ai_provider", lambda **_: fake_provider)
+    monkeypatch.setattr("services.agent_service.build_agent_decision_prompt", lambda **_: "prompt")
+    monkeypatch.setattr(settings, "ai_api_key", "test-key", raising=False)
+
+    run, step, ctx = _make_run_and_ctx()
+    out = await svc._consult_ai_for_step(
+        run=run,
+        step_index=0,
+        step=step,
+        _original_command=None,
+        analysis={},
+        ctx=ctx,
+    )
+
+    assert out is not None
+    assert out["decision"] == "WAIT"
+    assert out["decision_context"]["reason_code"] == "tool_loop_invalid_or_unmappable"

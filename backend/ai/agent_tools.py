@@ -55,6 +55,13 @@ class ExecuteActionInput(BaseModel):
     script: str | None = Field(None, description="When action=run_script: function body returning JSON.")
     script_args: dict[str, Any] = Field(default_factory=dict, description="Bound as `args` inside the script.")
     script_timeout_ms: int = Field(5000, ge=100, le=15_000)
+    delay_before_ms: int = Field(
+        0, ge=0, le=10_000,
+        description=(
+            "Milliseconds to wait before executing. Use when the recording shows a pause "
+            "before this step, or the page needs time to settle after a prior action."
+        ),
+    )
     # Decision metadata
     confidence: float = Field(0.7, ge=0.0, le=1.0)
     reasoning: str = Field("", description="Brief explanation (one sentence).")

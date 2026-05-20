@@ -163,3 +163,12 @@ def test_multiple_terminal_tools_first_wins():
         _tc("mark_complete", reason="done"),
     ])
     assert out["decision"] == "WAIT"
+
+
+def test_multiple_terminal_tools_uses_first_valid_when_first_invalid():
+    out = translate_tool_calls([
+        _tc("wait", wait_ms=99, reason="invalid"),  # rejected by model validation
+        _tc("mark_complete", reason="done"),
+    ])
+    assert out is not None
+    assert out["decision"] == "COMPLETED"

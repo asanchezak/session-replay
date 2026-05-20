@@ -35,7 +35,9 @@ const chromeMock = {
 vi.stubGlobal("chrome", chromeMock);
 
 vi.mock("../src/background/api", () => ({
-  apiClient: { recordWorkflow: vi.fn(async () => ({ id: "wf-1", name: "test", step_count: 0 })) },
+  apiClient: {
+    recordWorkflow: vi.fn(async () => ({ id: "wf-1", name: "test", step_count: 0 })),
+  },
 }));
 
 describe("Orchestrator", () => {
@@ -58,6 +60,34 @@ describe("Orchestrator", () => {
     await new Promise((r) => setTimeout(r, 5));
     const result = await orchestrator.stopRecording();
     expect(result).toBeNull();
+  });
+
+  it("stopRecording preserves events when save fails so it can retry", async () => {
+    const { orchestrator } = await import("../src/background/orchestrator");
+    const { apiClient } = await import("../src/background/api");
+    const recordWorkflow = vi.mocked(apiClient.recordWorkflow);
+    recordWorkflow.mockRejectedValueOnce(new Error("backend unavailable"));
+
+    orchestrator.startRecording();
+    await new Promise((r) => setTimeout(r, 5));
+    await orchestrator.pushEvent({
+      event_type: "click", payload: {},
+      page_url: "https://x", page_title: "t", timestamp: "2026-05-12T00:00:00Z",
+    });
+
+    const result = await orchestrator.stopRecording();
+    expect(result).toBeNull();
+    expect(orchestrator.eventBuffer.length).toBe(1);
+    expect(storage.recording_state).toMatchObject({
+      pendingSave: true,
+      isRecording: false,
+    });
+    expect(typeof (storage.recording_state as { name?: unknown }).name).toBe("string");
+    expect(((storage.recording_state as { name?: string }).name || "").length).toBeGreaterThan(0);
+
+    recordWorkflow.mockResolvedValueOnce({ id: "wf-2", name: "recovered", step_count: 1 });
+    await orchestrator.retryPendingSaveIfAny();
+    expect(storage.recording_state).toBeUndefined();
   });
 
   it("pushEvent during recording grows the buffer", async () => {

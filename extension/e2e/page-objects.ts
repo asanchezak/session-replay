@@ -3,6 +3,19 @@ import type { Page, BrowserContext } from "@playwright/test";
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
+function extractId(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const b = body as Record<string, unknown>;
+  const direct = b.id;
+  if (typeof direct === "string" && direct) return direct;
+  const nestedWorkflow = b.workflow;
+  if (nestedWorkflow && typeof nestedWorkflow === "object") {
+    const nestedId = (nestedWorkflow as Record<string, unknown>).id;
+    if (typeof nestedId === "string" && nestedId) return nestedId;
+  }
+  return undefined;
+}
+
 export class PopupPage {
   constructor(
     public page: Page,
@@ -113,13 +126,28 @@ export class ExtensionHelper {
     events: Array<{ event_type: string; payload: Record<string, unknown> }>,
   ): Promise<string> {
     const page = await this.context.newPage();
-    const resp = await page.request.post(`${BACKEND}/v1/workflows/record`, {
-      headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
-      data: { name, events },
-    });
-    const body = await resp.json();
+    let lastBody: unknown = null;
+    let lastStatus: number | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const resp = await page.request.post(`${BACKEND}/v1/workflows/record`, {
+        headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
+        data: { name, events },
+      });
+      lastStatus = resp.status();
+      lastBody = await resp.json().catch(() => null);
+      const workflowId = extractId(lastBody);
+      if (resp.ok() && workflowId) {
+        await page.close();
+        return workflowId;
+      }
+      if (attempt < 3) {
+        await page.waitForTimeout(400 * attempt);
+      }
+    }
     await page.close();
-    return body.id;
+    throw new Error(
+      `createWorkflowViaAPI failed after retries (status=${lastStatus}, body=${JSON.stringify(lastBody)})`,
+    );
   }
 
   async activateWorkflowViaAPI(workflowId: string): Promise<void> {
@@ -134,16 +162,39 @@ export class ExtensionHelper {
   async runWorkflowViaAPI(workflowId: string): Promise<string> {
     const page = await this.context.newPage();
     // Activate the workflow first (required before running)
-    await page.request.put(`${BACKEND}/v1/workflows/${workflowId}/status`, {
+    const activateResp = await page.request.put(`${BACKEND}/v1/workflows/${workflowId}/status`, {
       headers: { "X-API-Key": API_KEY, "Content-Type": "application/json" },
       data: { status: "active" },
     });
-    const resp = await page.request.post(`${BACKEND}/v1/workflows/${workflowId}/run`, {
-      headers: { "X-API-Key": API_KEY },
-    });
-    const body = await resp.json();
+    if (!activateResp.ok()) {
+      const body = await activateResp.json().catch(() => null);
+      await page.close();
+      throw new Error(
+        `activate workflow failed (status=${activateResp.status()}, body=${JSON.stringify(body)})`,
+      );
+    }
+
+    let lastBody: unknown = null;
+    let lastStatus: number | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const resp = await page.request.post(`${BACKEND}/v1/workflows/${workflowId}/run`, {
+        headers: { "X-API-Key": API_KEY },
+      });
+      lastStatus = resp.status();
+      lastBody = await resp.json().catch(() => null);
+      const runId = extractId(lastBody);
+      if (resp.ok() && runId) {
+        await page.close();
+        return runId;
+      }
+      if (attempt < 3) {
+        await page.waitForTimeout(400 * attempt);
+      }
+    }
     await page.close();
-    return body.id;
+    throw new Error(
+      `runWorkflowViaAPI failed after retries (status=${lastStatus}, body=${JSON.stringify(lastBody)})`,
+    );
   }
 
   async getRunStatus(runId: string): Promise<string> {

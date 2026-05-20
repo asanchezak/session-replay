@@ -22,11 +22,7 @@ async def test_workflow_delete_with_queued_run_does_not_crash(api_client):
     run = (await api_client.post("/v1/runs", json={"workflow_id": wf["id"]}, headers=_HEADERS)).json()
     assert run["status"] == "queued"
 
-    # No DELETE endpoint exists today, but the bug is reachable via the service.
-    # Skip if the API doesn't expose DELETE.
     r = await api_client.delete(f"/v1/workflows/{wf['id']}", headers=_HEADERS)
-    if r.status_code == 404 or r.status_code == 405:
-        pytest.skip("DELETE /v1/workflows/{id} not yet exposed")
     assert r.status_code in (200, 204)
 
 

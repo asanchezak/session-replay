@@ -255,3 +255,30 @@ async def test_supervisor_pauses_running_run_after_stale_auto_resume(db_session)
     assert "extension did not report progress" in (run.pause_reason or "")
     assert len(run.workflow_snapshot["steps"]) == 2
     supervisor.agent._analyze_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_does_not_auto_resume_terminal_run(db_session, with_ai):
+    svc = ExecutionService(db_session)
+    wf = Workflow(name="Terminal Supervisor Guard", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(wf.id))
+    run.workflow_snapshot = _snapshot([_step(0)])
+    run.total_steps = 1
+    run.status = "completed"
+    await db_session.flush()
+
+    supervisor = RecoverySupervisor(db_session)
+    supervisor.agent._analyze_failure = AsyncMock(return_value={"should_skip": True})
+
+    resumed = await supervisor.attempt_resume(run, forced=True)
+    assert resumed is False
+
+    result = await db_session.execute(
+        select(EventLog)
+        .where(EventLog.run_id == run.id)
+        .where(EventLog.event_type == "run_auto_resumed")
+    )
+    assert result.scalar_one_or_none() is None
+    supervisor.agent._analyze_failure.assert_not_awaited()

@@ -188,6 +188,31 @@ async function waitForTabLoad(tabId: number, timeoutMs: number = 15000): Promise
   });
 }
 
+async function waitForTabLoadBestEffort(
+  tabId: number,
+  contextLabel: string,
+  timeoutMs: number = 15000,
+): Promise<void> {
+  try {
+    await waitForTabLoad(tabId, timeoutMs);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      log.log(
+        `[Agent] ${contextLabel}: load wait timed out; continuing ` +
+        `(status=${tab.status}, url=${tab.url || ""})`,
+      );
+      // Give the page a brief settle window even if Chrome never emitted
+      // a definitive "complete" transition in time.
+      await new Promise((r) => setTimeout(r, 1500));
+      return;
+    } catch {
+      throw new Error(`Page load timed out (${contextLabel}): ${message}`);
+    }
+  }
+}
+
 async function reportStepFailure(runId: string, stepIndex: number, error: string, actionType?: string): Promise<void> {
   try {
     await apiClient.reportStepResult(runId, stepIndex, false, error, actionType);
@@ -612,6 +637,10 @@ async function executeAgentRun(
     }
   }
 
+  const FATAL_ERROR_PREFIXES = ["SCRIPT_PARSE_ERROR"];
+  const isFatalError = (err: string | null | undefined): boolean =>
+    !!err && FATAL_ERROR_PREFIXES.some((p) => err.startsWith(p));
+
   let currentStepIndex = 0;
   let pollCount = 0;
   let finalStatus = "running"; // "running" = in-progress; set to terminal value to exit loop
@@ -783,7 +812,7 @@ async function executeAgentRun(
         }
         log.log(`[Agent] Restarting run from ${url}`);
         await chrome.tabs.update(targetTabId, { url });
-        await waitForTabLoad(targetTabId);
+        await waitForTabLoadBestEffort(targetTabId, "restart");
         commandExecutor.clearTabCache(targetTabId);
         currentStepIndex = 0;
         continue;
@@ -798,7 +827,7 @@ async function executeAgentRun(
         }
         log.log(`[Agent] Rolling back to step ${pollResponse.next_step_index}: ${url}`);
         await chrome.tabs.update(targetTabId, { url });
-        await waitForTabLoad(targetTabId);
+        await waitForTabLoadBestEffort(targetTabId, "rollback");
         commandExecutor.clearTabCache(targetTabId);
         currentStepIndex = pollResponse.next_step_index ?? currentStepIndex;
         continue;
@@ -835,6 +864,11 @@ async function executeAgentRun(
 
         const adaptResult = await commandExecutor.executeCommand(targetTabId, adaptCmd);
         lastResultSuccess = adaptResult.success;
+        if (!adaptResult.success && isFatalError(adaptResult.error)) {
+          await apiClient.failRun(runId, adaptResult.error!);
+          finalStatus = "failed";
+          break;
+        }
         const adaptResultResponse = await apiClient.agentResult(runId, {
           step_index: currentStepIndex,
           success: adaptResult.success,
@@ -879,7 +913,7 @@ async function executeAgentRun(
           const url = cmd.value || cmd.target;
           if (url) {
             await chrome.tabs.update(targetTabId, { url });
-            await waitForTabLoad(targetTabId);
+            await waitForTabLoadBestEffort(targetTabId, "execute_navigate");
             // Allow SPA re-render after hash-based navigation (waitForTabLoad
             // returns immediately for same-origin hash changes).
             await new Promise((r) => setTimeout(r, 1500));
@@ -897,6 +931,11 @@ async function executeAgentRun(
           }
           currentStepIndex++;
         } else {
+          // Honour pre-execution delay requested by the AI (e.g. page settling).
+          if (cmd.delay_before_ms && cmd.delay_before_ms > 0) {
+            await new Promise((r) => setTimeout(r, cmd.delay_before_ms));
+          }
+
           // Capture URL before so we can detect click-triggered navigation
           let agentBeforeUrl: string | undefined;
           try { agentBeforeUrl = (await chrome.tabs.get(targetTabId)).url; } catch { /* no-op */ }
@@ -905,6 +944,11 @@ async function executeAgentRun(
             targetTabId, cmd,
           );
           lastResultSuccess = execResult.success;
+          if (!execResult.success && isFatalError(execResult.error)) {
+            await apiClient.failRun(runId, execResult.error!);
+            finalStatus = "failed";
+            break;
+          }
 
           if (execResult.success) {
             log.log(`[Agent] Step ${currentStepIndex} OK`);

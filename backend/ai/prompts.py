@@ -422,6 +422,7 @@ def build_agent_decision_prompt(
     page_context_error: str | None = None,
     actual_url: str | None = None,
     has_screenshot: bool = False,
+    surrounding_steps: list[dict] | None = None,
 ) -> str:
     parts = ["## Workflow Context"]
     if workflow_goal:
@@ -479,7 +480,27 @@ def build_agent_decision_prompt(
     if workflow_expertise:
         parts.append(f"\n{workflow_expertise}")
 
-    parts.append(f"Step {step_index} (recorded action: {step_action})")
+    # Surrounding step context: shows the recorded sequence around the current
+    # step so the AI can understand causality, decide on skips, and set timing.
+    if surrounding_steps:
+        parts.append("\n## Step Context (Recorded Sequence)")
+        parts.append("Format: [index] action — intent  (flags)")
+        for s in surrounding_steps:
+            idx = s.get("step_index", "?")
+            action = s.get("action_type", "?")
+            intent = (s.get("intent") or "")[:80]
+            flags = []
+            if s.get("caused_url_change"):
+                flags.append("→ caused URL change in recording")
+            gap_ms = s.get("time_since_previous_ms")
+            if gap_ms is not None and gap_ms >= 1500:
+                flags.append(f"preceded by {gap_ms // 1000}s pause")
+            marker = "→" if idx == step_index else " "
+            flag_str = f"  ({', '.join(flags)})" if flags else ""
+            current_marker = "  ← CURRENT" if idx == step_index else ""
+            parts.append(f"  {marker} [{idx}] {action} — {intent}{flag_str}{current_marker}")
+
+    parts.append(f"\n## Current Step\nStep {step_index} (recorded action: {step_action})")
     if step_intent:
         parts.append(f"Intent: {step_intent}")
     if step_value:
@@ -509,6 +530,35 @@ def build_agent_decision_prompt(
 
     if checkpoint_steps:
         parts.append(f"Available checkpoint steps: {checkpoint_steps}")
+
+    # Contextual hints derived from recording metadata.
+    if surrounding_steps:
+        current_meta = next((s for s in surrounding_steps if s.get("step_index") == step_index), {})
+        hints = []
+        if step_action == "navigate" and step_value and page_url:
+            # Strip trailing slashes for comparison
+            target = step_value.rstrip("/")
+            current = page_url.rstrip("/")
+            if current == target or current.startswith(target):
+                hints.append(
+                    "⚡ Skip hint: you are already on the recorded destination URL — "
+                    "consider skip_step unless further navigation is needed"
+                )
+        if current_meta.get("caused_url_change"):
+            hints.append(
+                "ℹ️  This action triggered a URL change in the recording "
+                "(the next recorded step was a navigation caused by this action)"
+            )
+        gap_ms = current_meta.get("time_since_previous_ms")
+        if gap_ms is not None and gap_ms >= 1500:
+            hints.append(
+                f"⏱️  A ~{gap_ms // 1000}s pause preceded this step in the recording — "
+                "the page may need time to settle; use delay_before_ms or a wait if needed"
+            )
+        if hints:
+            parts.append("Step hints (from recording analysis):")
+            for h in hints:
+                parts.append(f"  {h}")
 
     parts.append("\n## Current Page State (source of truth)")
     parts.append(f"URL: {page_url}")

@@ -171,6 +171,7 @@ export interface AgentCommand {
   script?: string;
   script_args?: Record<string, unknown>;
   script_timeout_ms?: number;
+  delay_before_ms?: number;
 }
 
 export interface AgentDecision {

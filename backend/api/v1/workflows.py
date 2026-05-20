@@ -138,6 +138,7 @@ async def _do_record_workflow(
         target_url=req.target_url,
         prompt=req.prompt,
     )
+    step_objs = []
     for i, ev in enumerate(req.events):
         payload = ev.payload
 
@@ -169,7 +170,7 @@ async def _do_record_workflow(
                 for m in methods if isinstance(m, dict)
             ]
 
-        await svc.add_step(
+        step = await svc.add_step(
             workflow_id=str(workflow.id),
             step_index=i,
             action_type=ev.event_type,
@@ -178,6 +179,49 @@ async def _do_record_workflow(
             value=value,
             methods=methods,
         )
+        step_objs.append(step)
+
+    # Causal enrichment: annotate each step with timing and navigation causality
+    # derived from the raw event stream.  Stored in accessibility_metadata (no
+    # migration needed) so the AI can surface skip hints and timing guidance.
+    from datetime import datetime, timezone
+    for i, ev in enumerate(req.events):
+        prev = req.events[i - 1] if i > 0 else None
+        nxt = req.events[i + 1] if i < len(req.events) - 1 else None
+
+        time_gap: int | None = None
+        if prev and prev.timestamp and ev.timestamp:
+            try:
+                t0 = datetime.fromisoformat(prev.timestamp.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(ev.timestamp.replace("Z", "+00:00"))
+                time_gap = max(0, int((t1 - t0).total_seconds() * 1000))
+            except Exception:
+                pass
+
+        # Causal check: gap from THIS event to the NEXT (not from prev → this)
+        gap_to_next: int | None = None
+        if nxt and nxt.timestamp and ev.timestamp:
+            try:
+                tc = datetime.fromisoformat(ev.timestamp.replace("Z", "+00:00"))
+                tn = datetime.fromisoformat(nxt.timestamp.replace("Z", "+00:00"))
+                gap_to_next = max(0, int((tn - tc).total_seconds() * 1000))
+            except Exception:
+                pass
+
+        caused_nav = bool(
+            ev.event_type == "click"
+            and nxt is not None
+            and nxt.event_type == "navigate"
+            and (gap_to_next is None or gap_to_next < 1500)
+        )
+
+        step_objs[i].accessibility_metadata = {
+            "time_since_previous_ms": time_gap,
+            "context_url_before": ev.page_url,
+            "caused_url_change": caused_nav,
+        }
+
+    await db.flush()
     steps = await svc.get_steps(str(workflow.id))
 
     analysis = None
@@ -213,31 +257,7 @@ async def _do_record_workflow(
         except Exception as exc:
             logger.warning("AI name generation failed for workflow=%s: %s", workflow.id, exc)
 
-    # Simplify the workflow — runs all 5 passes including AI holistic pass
-    original_count = len(steps)
-    simplification_status: str = "not_attempted"
-    simplification_error: str | None = None
-    try:
-        from services.workflow_simplifier import WorkflowSimplifier
-        analysis_svc2 = SemanticAnalysisService(db)
-        phases = await analysis_svc2.get_phases(str(workflow.id)) if analysis else []
-        simplifier = WorkflowSimplifier(
-            workflow_goal=analysis.workflow_goal if analysis else None,
-            target_url=req.target_url,
-        )
-        simplified_data = await simplifier.simplify(steps, phases=phases)
-        if simplified_data is not None:
-            svc3 = WorkflowService(db)
-            steps = await svc3.replace_steps(str(workflow.id), simplified_data)
-            logger.info(
-                "Simplified workflow=%s: %d → %d steps",
-                workflow.id, original_count, len(steps),
-            )
-            simplification_status = "succeeded"
-    except Exception as exc:
-        logger.warning("Simplification failed for workflow=%s: %s", workflow.id, exc)
-        simplification_status = "failed"
-        simplification_error = str(exc)[:200]
+    logger.info("Recording workflow=%s: keeping all %d steps (simplification disabled)", workflow.id, len(steps))
 
     return {
         "id": str(workflow.id),
@@ -245,9 +265,9 @@ async def _do_record_workflow(
         "status": workflow.status,
         "version": workflow.version,
         "step_count": len(steps),
-        "simplified_from": original_count if len(steps) < original_count else None,
-        "simplification_status": simplification_status,
-        "simplification_error": simplification_error,
+        "simplified_from": None,
+        "simplification_status": "skipped",
+        "simplification_error": None,
         "created_at": workflow.created_at.isoformat(),
         "analysis": {
             "goal": analysis.workflow_goal if analysis else None,
@@ -512,6 +532,29 @@ async def update_workflow(
         "status": workflow.status,
         "version": workflow.version,
     }
+
+
+@router.delete("")
+async def delete_all_workflows(db: AsyncSession = Depends(get_db)):
+    logger.info("Deleting all workflows")
+    svc = WorkflowService(db)
+    deleted = await svc.delete_all()
+    logger.info("delete_all_workflows complete: %s", deleted)
+    return {"deleted": deleted}
+
+
+@router.delete("/{workflow_id}")
+async def delete_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    logger.info("Deleting workflow workflow_id=%s", workflow_id)
+    svc = WorkflowService(db)
+    try:
+        await svc.delete(workflow_id)
+    except NotFoundError:
+        return _not_found("Workflow not found")
+    return {"deleted": {"workflow_id": workflow_id}}
 
 
 @router.post("/{workflow_id}/generate-prompt")

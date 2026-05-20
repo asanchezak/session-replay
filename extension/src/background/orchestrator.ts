@@ -18,6 +18,14 @@ let _initPromise: Promise<void> | null = null;
 let _eventQueue: ActionEvent[] = [];
 let _drainTimeout: ReturnType<typeof setTimeout> | null = null;
 
+interface RecordingStorageState {
+  isRecording: boolean;
+  events: ActionEvent[];
+  name: string;
+  goal?: string;
+  pendingSave?: boolean;
+}
+
 function drainQueue(orchestrator: Orchestrator): void {
   const batch = _eventQueue.splice(0);
   if (batch.length === 0) return;
@@ -40,6 +48,7 @@ export class Orchestrator {
   private _isRecording = false;
   private _recordingName = "";
   private _recordingGoal = "";
+  private _pendingSave: RecordingStorageState | null = null;
   private _ready = false;
 
   get isRecording(): boolean {
@@ -56,18 +65,27 @@ export class Orchestrator {
     await _initPromise;
     this._ready = true;
     drainQueue(this);
+    await this._flushPendingSave();
   }
 
   private async _tryRestore(): Promise<void> {
     try {
       const stored = await chrome.storage.session.get(STORAGE_KEY);
-      const data = stored[STORAGE_KEY] as
-        | { isRecording: true; events: ActionEvent[]; name: string }
-        | undefined;
-      if (data?.isRecording && Array.isArray(data.events)) {
+      const data = stored[STORAGE_KEY] as RecordingStorageState | undefined;
+      if (data?.pendingSave && Array.isArray(data.events) && data.events.length > 0) {
+        this._pendingSave = {
+          isRecording: false,
+          events: [...data.events],
+          name: data.name || "",
+          goal: data.goal,
+          pendingSave: true,
+        };
+        log.log(`Restored pending recording save (${data.events.length} events)`);
+      } else if (data?.isRecording && Array.isArray(data.events)) {
         this._isRecording = true;
         this.eventBuffer = [...data.events];
         this._recordingName = data.name || "";
+        this._recordingGoal = data.goal || "";
         log.log(`Restored recording session (${this.eventBuffer.length} buffered events)`);
         this.broadcastState();
       }
@@ -83,6 +101,7 @@ export class Orchestrator {
           isRecording: this._isRecording,
           events: this.eventBuffer,
           name: this._recordingName,
+          goal: this._recordingGoal,
         },
       });
     } catch {
@@ -98,10 +117,48 @@ export class Orchestrator {
     }
   }
 
+  private async _persistPendingSave(events: ActionEvent[], name: string, goal: string): Promise<void> {
+    this._pendingSave = {
+      isRecording: false,
+      events: [...events],
+      name,
+      goal: goal || undefined,
+      pendingSave: true,
+    };
+    try {
+      await chrome.storage.session.set({
+        [STORAGE_KEY]: this._pendingSave,
+      });
+    } catch {
+      // storage write failed; keep the in-memory snapshot for this session
+    }
+  }
+
+  private async _flushPendingSave(): Promise<void> {
+    if (!this._pendingSave || this._pendingSave.events.length === 0) return;
+    const pending = this._pendingSave;
+    try {
+      const targetUrl = pending.events.find((e) => e.page_url)?.page_url || null;
+      const result = await apiClient.recordWorkflow(
+        pending.name || `Recording ${new Date().toLocaleString()}`,
+        targetUrl,
+        pending.events,
+        pending.goal,
+      );
+      log.log(`Recovered pending workflow recording: ${result.id} (${result.step_count} steps)`);
+      this._pendingSave = null;
+      await this._clearStorage();
+    } catch (err) {
+      log.error("Failed to save pending workflow recording:", err);
+      await this._persistPendingSave(pending.events, pending.name, pending.goal || "");
+    }
+  }
+
   async startRecording(): Promise<void> {
     this._isRecording = true;
     this.eventBuffer = [];
     this._recordingName = "";
+    this._pendingSave = null;
     await this.persist();
     this.broadcastState();
   }
@@ -109,10 +166,11 @@ export class Orchestrator {
   async stopRecording(): Promise<{ id: string; name: string; step_count: number } | null> {
     this._isRecording = false;
     const events = [...this.eventBuffer];
-    this.eventBuffer = [];
-    await this._clearStorage();
 
     if (events.length === 0) {
+      this.eventBuffer = [];
+      this._pendingSave = null;
+      await this._clearStorage();
       this.broadcastState();
       return null;
     }
@@ -124,10 +182,15 @@ export class Orchestrator {
     try {
       const result = await apiClient.recordWorkflow(name, targetUrl, events, goal);
       log.log(`Workflow recorded: ${result.id} (${result.step_count} steps)`);
+      this.eventBuffer = [];
+      this._pendingSave = null;
+      await this._clearStorage();
       this.broadcastState();
       return result;
     } catch (err) {
       log.error("Failed to save workflow recording:", err);
+      this.eventBuffer = events;
+      await this._persistPendingSave(events, name, goal || "");
       this.broadcastState();
       return null;
     }
@@ -236,6 +299,13 @@ export class Orchestrator {
     return this._isRecording
       ? { type: "recording", step_count: this.eventBuffer.length }
       : { type: "idle" };
+  }
+
+  async retryPendingSaveIfAny(): Promise<void> {
+    await this._flushPendingSave();
+    if (!this._isRecording) {
+      this.broadcastState();
+    }
   }
 }
 

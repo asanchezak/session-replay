@@ -79,9 +79,11 @@ class AgentCommand(BaseModel):
     script: str | None = None
     script_args: dict[str, Any] = Field(default_factory=dict)
     script_timeout_ms: int = 5000
+    delay_before_ms: int = 0
 
 
 class PlanUpdateOperation(str, Enum):
+    INSERT = "INSERT"
     ADD = "ADD"
     REMOVE = "REMOVE"
     MODIFY = "MODIFY"
@@ -178,6 +180,7 @@ SAFETY_LIMITS = {
     "max_rollbacks_per_run": 3,
     "max_ai_attempts_per_poll": 3,
     "max_consecutive_failures": 5,
+    "max_ai_unusable_output_wait_cycles": 4,
     "max_loop_iterations": 200,
     "max_dom_snippet_bytes": 8192,
     "max_visible_text_bytes": 2048,
@@ -186,4 +189,5 @@ SAFETY_LIMITS = {
     "max_tokens_per_run": 200000,
     "stale_poll_timeout_seconds": 300,
     "max_run_script_per_run": 30,
+    "max_script_no_target_repeats": 2,
 }

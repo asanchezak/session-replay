@@ -49,4 +49,42 @@ describe("useWorkflows", () => {
     result.current.refetch();
     await waitFor(() => expect(count).toBe(2));
   });
+
+  it("deleteAllWorkflows sends DELETE to /workflows", async () => {
+    (global as any).fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "DELETE") {
+        return { ok: true, status: 200, json: async () => ({ deleted: { workflows: 1 } }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [] } as Response;
+    });
+
+    const { result } = renderHook(() => useWorkflows());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await result.current.deleteAllWorkflows();
+
+    const deleteCalls = (global as any).fetch.mock.calls.filter(
+      ([url, init]: [string, RequestInit | undefined]) =>
+        (init?.method ?? "GET").toUpperCase() === "DELETE" && url.endsWith("/workflows"),
+    );
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("deleteAllWorkflows throws when the server returns an error", async () => {
+    (global as any).fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "DELETE") {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: { message: "server down" } }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [] } as Response;
+    });
+
+    const { result } = renderHook(() => useWorkflows());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await expect(result.current.deleteAllWorkflows()).rejects.toThrow("server down");
+  });
 });

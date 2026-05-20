@@ -27,6 +27,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
+from core.utils import to_uuid
 from services.agent_service import AgentService
 from services.audit import AppendEvent, AuditService
 
@@ -94,6 +95,13 @@ class RecoverySupervisor:
 
         Returns True if the run was successfully kicked back into motion.
         """
+        await self.session.refresh(run)
+        if run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.CANCELED.value,
+        }:
+            return False
         run_id = str(run.id)
         prior = _auto_resume_count.get(run_id, 0)
         if not forced and prior >= MAX_AUTO_RESUMES_PER_RUN:
@@ -179,6 +187,13 @@ class RecoverySupervisor:
             logger.info("Supervisor: AI had no actionable advice for run %s", run_id)
             return False
 
+        await self.session.refresh(run)
+        if run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.CANCELED.value,
+        }:
+            return False
         await self.agent.healing.apply_plan_update(run, ops)
 
         # Reset transient retry/heal counters so the agent loop gets a fresh budget
@@ -197,6 +212,13 @@ class RecoverySupervisor:
                 logger.warning("Supervisor could not transition run %s to running", run_id)
                 return False
 
+        await self.session.refresh(run)
+        if run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.CANCELED.value,
+        }:
+            return False
         _auto_resume_count[run_id] = prior + 1
         await self.audit.append(AppendEvent(
             event_type="run_auto_resumed",
@@ -272,6 +294,16 @@ class RecoverySupervisor:
         reason: str,
         extra_payload: dict | None = None,
     ) -> None:
+        run_result = await self.session.execute(
+            select(ExecutionRun.status).where(ExecutionRun.id == to_uuid(run_id))
+        )
+        status = run_result.scalar_one_or_none()
+        if status in {
+            RunStatus.FAILED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.CANCELED.value,
+        }:
+            return
         payload = {
             "decision": "PAUSE",
             "confidence": 0.95,

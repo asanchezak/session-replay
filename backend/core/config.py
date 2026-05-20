@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True
-    rate_limit_per_minute: int = 600
+    # Higher default to accommodate dashboard polling and extension traffic.
+    rate_limit_per_minute: int = 6000
     seq_url: str = "http://localhost:5341"
     ai_step_recovery_window_seconds: int = 900
     ai_timeout_decision_history_limit: int = 6

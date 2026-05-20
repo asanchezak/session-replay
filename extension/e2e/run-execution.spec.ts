@@ -3,6 +3,18 @@ import { test, expect } from "./fixtures";
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
+function asRunArray(body: unknown): any[] {
+  if (Array.isArray(body)) return body;
+  if (
+    body
+    && typeof body === "object"
+    && Array.isArray((body as { runs?: unknown[] }).runs)
+  ) {
+    return (body as { runs: unknown[] }).runs as any[];
+  }
+  return [];
+}
+
 test("create workflow via API and run it", async ({ context, extensionId, errors }) => {
   const ext = new (await import("./page-objects")).ExtensionHelper(context, extensionId);
 
@@ -46,7 +58,12 @@ test("run appears in dashboard after creation", async ({ context, extensionId, e
   const runsResp = await page.request.get(`${BACKEND}/v1/runs`, {
     headers: { "X-API-Key": API_KEY },
   });
-  const runs = await runsResp.json() as any[];
+  const runsBody = await runsResp.json().catch(() => null);
+  const runs = asRunArray(runsBody);
+  expect(
+    runsResp.ok() && runs.length >= 0,
+    `Unexpected runs response status=${runsResp.status()} body=${JSON.stringify(runsBody)}`,
+  ).toBeTruthy();
   const ourRun = runs.find((r: any) => r.id === runId);
   expect(ourRun).toBeDefined();
   expect(ourRun.status).toBe("running");
@@ -96,8 +113,12 @@ test("complete workflow lifecycle via API", async ({ context, extensionId, error
     const currentResp = await page.request.get(`${BACKEND}/v1/runs/${runId}`, {
       headers: { "X-API-Key": API_KEY },
     });
-    const current = await currentResp.json() as { status: string };
-    expect(current.status).toBe("completed");
+    const currentBody = await currentResp.json().catch(() => null);
+    const current = (currentBody || {}) as { status?: string };
+    expect(
+      current.status,
+      `Expected terminal run status after non-OK /complete, got status=${currentResp.status()} body=${JSON.stringify(currentBody)}`,
+    ).toBe("completed");
   }
 
   const finalStatus = await ext.getRunStatus(runId);

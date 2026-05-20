@@ -108,6 +108,7 @@ const actionIcons: Record<string, typeof MousePointer> = {
   navigate: Navigation,
   scroll: Eye,
   extract: Database,
+  run_script: Database,
   wait: CircleDot,
 };
 
@@ -133,6 +134,10 @@ const eventColors: Record<string, string> = {
   screenshot: "var(--color-text-secondary)",
   dom_snapshot: "var(--color-text-secondary)",
   extraction: "var(--color-accent)",
+  script_executed: "var(--color-accent)",
+  recovery_cycle: "var(--color-warning)",
+  run_auto_resumed: "var(--color-info)",
+  run_auto_completed: "var(--color-success)",
 };
 
 const CANCELABLE_STATUSES = ["queued", "running", "waiting_for_user", "recovering"];
@@ -177,6 +182,54 @@ function truncatePayload(payload: Record<string, unknown>, maxLen = 80): string 
   return raw.slice(0, maxLen) + "...";
 }
 
+function formatEventSummary(event: RunEvent): string {
+  const payload = event.payload || {};
+  const decisionContext = (payload.decision_context as Record<string, unknown> | undefined) || {};
+  const stepIndex = typeof payload.step_index === "number" ? payload.step_index + 1 : null;
+
+  if (event.event_type === "agent_decision") {
+    const decision = String(payload.decision || "unknown");
+    const pauseReason = payload.pause_reason ? `pause=${String(payload.pause_reason)}` : "";
+    const reasonCode = decisionContext.reason_code ? `code=${String(decisionContext.reason_code)}` : "";
+    const origin = decisionContext.origin ? `origin=${String(decisionContext.origin)}` : "";
+    const fallback = decisionContext.fallback ? `fallback=${String(decisionContext.fallback)}` : "";
+    const strategy = decisionContext.strategy ? `strategy=${String(decisionContext.strategy)}` : "";
+    const parts = [stepIndex ? `step ${stepIndex}` : "", decision, reasonCode, origin, fallback, strategy, pauseReason]
+      .filter(Boolean);
+    return parts.join(" · ");
+  }
+
+  if (event.event_type === "recovery_cycle") {
+    const kind = String(payload.kind || "cycle");
+    const trigger = payload.trigger ? `trigger=${String(payload.trigger)}` : "";
+    const cycle = typeof payload.cycle === "number" ? `cycle=${payload.cycle}` : "";
+    const strategy = payload.strategy ? `strategy=${String(payload.strategy)}` : "";
+    return [kind, trigger, cycle, strategy].filter(Boolean).join(" · ");
+  }
+
+  if (event.event_type === "script_executed") {
+    const success = payload.success === true ? "success" : "failure";
+    const error = payload.error ? `error=${String(payload.error).slice(0, 80)}` : "";
+    const duration = typeof payload.duration_ms === "number" ? `${payload.duration_ms}ms` : "";
+    const resultType = payload.result_type ? `result=${String(payload.result_type)}` : "";
+    return [stepIndex ? `step ${stepIndex}` : "", success, duration, resultType, error].filter(Boolean).join(" · ");
+  }
+
+  if (event.event_type === "run_auto_resumed") {
+    const attempt = payload.attempt ? `attempt ${String(payload.attempt)}` : "";
+    const ops = Array.isArray(payload.ops) ? `${payload.ops.length} ops` : "";
+    return [attempt, ops].filter(Boolean).join(" · ") || "auto resume";
+  }
+
+  if (event.event_type === "step_executed") {
+    const success = payload.success === true ? "success" : payload.success === false ? "failure" : "";
+    const error = payload.error ? String(payload.error).slice(0, 90) : "";
+    return [stepIndex ? `step ${stepIndex}` : "", success, error].filter(Boolean).join(" · ");
+  }
+
+  return truncatePayload(payload);
+}
+
 function describeEventType(eventType: string): string {
   const map: Record<string, string> = {
     run_started: "Started",
@@ -193,7 +246,11 @@ function describeEventType(eventType: string): string {
     recovery_attempt: "Recovery attempt",
     recovery_success: "Recovery succeeded",
     recovery_failure: "Recovery failed",
+    recovery_cycle: "Recovery cycle",
+    run_auto_resumed: "Auto resumed",
+    run_auto_completed: "Auto completed",
     extraction: "Data extraction",
+    script_executed: "Script executed",
     intervention: "Human intervention",
   };
   return map[eventType] || eventType.replace(/_/g, " ");
@@ -773,7 +830,7 @@ export default function RunDetailPage() {
                       </span>
                       <span className="text-text-gray text-xs flex-shrink-0 w-14">{event.actor_type}</span>
                       <span className="text-text-secondary text-xs font-mono truncate flex-1">
-                        {truncatePayload(event.payload)}
+                        {formatEventSummary(event)}
                       </span>
                       {event.payload && Object.keys(event.payload).length > 0 && (
                         <span className="text-text-gray text-xs flex-shrink-0">{isExpanded ? "▲" : "▼"}</span>

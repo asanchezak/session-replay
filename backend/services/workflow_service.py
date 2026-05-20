@@ -7,6 +7,14 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.exceptions import NotFoundError, StateTransitionError
+from core.models.analysis import (
+    OutputSpecification,
+    SemanticAction,
+    SemanticPhase,
+    WorkflowAnalysis,
+    WorkflowParameter,
+    WorkflowTemplate,
+)
 from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep
 from services.audit import AppendEvent, AuditService
 
@@ -191,7 +199,39 @@ class WorkflowService:
     async def delete(self, workflow_id: str) -> None:
         """Delete a workflow and its steps."""
         workflow = await self.get(workflow_id)
-        await self.session.execute(
-            delete(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id)
-        )
+        await self._delete_workflow_dependent_records(workflow_id)
         await self.session.delete(workflow)
+        await self.session.flush()
+
+    async def delete_all(self) -> dict[str, int]:
+        """Delete all workflows and their workflow-scoped records."""
+        counts: dict[str, int] = {}
+        for model, key in [
+            (SemanticAction, "semantic_actions"),
+            (SemanticPhase, "semantic_phases"),
+            (WorkflowParameter, "workflow_parameters"),
+            (WorkflowAnalysis, "workflow_analyses"),
+            (OutputSpecification, "output_specifications"),
+            (WorkflowTemplate, "workflow_templates"),
+            (WorkflowStep, "workflow_steps"),
+            (Workflow, "workflows"),
+        ]:
+            resp = await self.session.execute(delete(model))
+            counts[key] = resp.rowcount or 0
+        await self.session.flush()
+        return counts
+
+    async def _delete_workflow_dependent_records(self, workflow_id: str) -> None:
+        """Delete records that are scoped to a single workflow."""
+        for model in [
+            SemanticAction,
+            SemanticPhase,
+            WorkflowParameter,
+            WorkflowAnalysis,
+            OutputSpecification,
+            WorkflowTemplate,
+            WorkflowStep,
+        ]:
+            await self.session.execute(
+                delete(model).where(model.workflow_id == workflow_id)
+            )

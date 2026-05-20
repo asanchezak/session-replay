@@ -66,12 +66,28 @@ _run_rollback_count: dict[str, int] = {}
 _run_active_step: dict[str, int] = {}
 _run_step_recovery_started_at: dict[tuple[str, int], datetime] = {}
 _run_step_recovery_cycles: dict[tuple[str, int], int] = {}
+_run_unusable_output_waits: dict[tuple[str, int], int] = {}
 _run_script_count: dict[str, int] = {}
+_run_script_failure_counts: dict[tuple[str, int, str], int] = {}
 _pending_actions: dict[str, str] = {}
+TERMINAL_RUN_STATUSES = {
+    RunStatus.FAILED.value,
+    RunStatus.COMPLETED.value,
+    RunStatus.CANCELED.value,
+}
 
 
 def _is_http_url(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
+def _extract_first_http_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"https?://[^\s)>\"]+", value)
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;:!?)]}")
 
 
 def _peek_jpeg_dimensions(data: bytes) -> tuple[int, int]:
@@ -151,11 +167,7 @@ class AgentService:
                 requires_human=True,
             )
 
-        if run.status in {
-            RunStatus.FAILED.value,
-            RunStatus.COMPLETED.value,
-            RunStatus.CANCELED.value,
-        }:
+        if run.status in TERMINAL_RUN_STATUSES:
             self._clear_recovery_state(run_id)
             return PollResponse(
                 decision="COMPLETED",
@@ -198,15 +210,16 @@ class AgentService:
         # This prevents over-execution when the goal is met before all steps run.
         if await self._goal_predicate_satisfied(run, ctx):
             self._clear_recovery_state(run_id)
-            with contextlib.suppress(Exception):
-                await self.execution.complete(run_id)
-            with contextlib.suppress(Exception):
-                await self._maybe_persist_plan_mutations(run)
+            # Audit BEFORE completing so _is_run_terminal guard doesn't skip the event.
             await self._audit_decision(
                 run_id, "COMPLETED", 0.99,
                 "Goal predicate satisfied — workflow objective achieved early",
                 page_context=ctx,
             )
+            with contextlib.suppress(Exception):
+                await self.execution.complete(run_id)
+            with contextlib.suppress(Exception):
+                await self._maybe_persist_plan_mutations(run)
             return PollResponse(
                 decision="COMPLETED",
                 confidence=0.99,
@@ -240,6 +253,11 @@ class AgentService:
                 applied_updates = await self._apply_plan_updates_from_ai(
                     run, ai_decision.get("plan_updates"),
                 )
+                terminal = await self._terminal_response_if_needed(
+                    run, fallback_step_index=step_index,
+                )
+                if terminal:
+                    return terminal
                 snapshot = run.workflow_snapshot or {}
                 steps = snapshot.get("steps", [])
                 total_steps = len(steps)
@@ -342,6 +360,11 @@ class AgentService:
                         prior_ai_decision=ai_decision,
                     )
             else:
+                terminal = await self._terminal_response_if_needed(
+                    run, fallback_step_index=step_index,
+                )
+                if terminal:
+                    return terminal
                 wait_response = await self._fallback_after_ai_failure(run, step_index, step, ctx)
                 if wait_response:
                     return wait_response
@@ -358,6 +381,11 @@ class AgentService:
         reason_prefix = "AI confirmed EXECUTE" if ai_confirmed else "Fast path"
         ai_conf = (ai_decision or {}).get("confidence", 0.99) if ai_confirmed else 0.99
         _run_step_wait_count.pop((run_id, step_index), None)
+        terminal = await self._terminal_response_if_needed(
+            run, fallback_step_index=step_index,
+        )
+        if terminal:
+            return terminal
         await self._audit_decision(
             run_id,
             "EXECUTE",
@@ -495,6 +523,46 @@ class AgentService:
         for key in recovery_keys:
             _run_step_recovery_started_at.pop(key, None)
             _run_step_recovery_cycles.pop(key, None)
+            _run_unusable_output_waits.pop(key, None)
+        script_keys = [k for k in _run_script_failure_counts if k[0] == run_id]
+        for key in script_keys:
+            _run_script_failure_counts.pop(key, None)
+
+    @staticmethod
+    def _classify_script_failure(error: str | None) -> str | None:
+        if not isinstance(error, str) or not error.strip():
+            return None
+        normalized = error.strip().lower()
+        if "script_parse_error" in normalized or "content security policy" in normalized:
+            return "fatal"
+        if "js_click_fallback_no_target" in normalized:
+            return "no-target"
+        if "script_timeout" in normalized or "timed out" in normalized:
+            return "timeout"
+        if "run_script injection failed" in normalized or "referenceerror" in normalized:
+            return "threw"
+        if "missing 'script' source" in normalized or "no result returned" in normalized:
+            return "no-target"
+        return "threw"
+
+    def _record_script_failure(
+        self,
+        run_id: str,
+        step_index: int,
+        category: str,
+    ) -> int:
+        key = (run_id, step_index, category)
+        count = _run_script_failure_counts.get(key, 0) + 1
+        _run_script_failure_counts[key] = count
+        return count
+
+    def _clear_script_failure_counts(self, run_id: str, step_index: int) -> None:
+        keys = [
+            key for key in _run_script_failure_counts
+            if key[0] == run_id and key[1] == step_index
+        ]
+        for key in keys:
+            _run_script_failure_counts.pop(key, None)
 
     async def _audit_script_execution(
         self, run_id: str, req: ResultRequest,
@@ -573,6 +641,47 @@ class AgentService:
     def _recovery_window_seconds(self) -> int:
         return max(30, int(getattr(settings, "ai_step_recovery_window_seconds", 900)))
 
+    async def _is_run_terminal(self, run_id: str) -> bool:
+        """Read status from DB to avoid writing recovery/decision events after terminal."""
+        try:
+            run_uuid = to_uuid(run_id)
+        except Exception:
+            # Test stubs may use synthetic IDs; fail-open to keep behavior
+            # deterministic outside the real DB-backed runtime.
+            return False
+        try:
+            result = await self.session.execute(
+                select(ExecutionRun.status).where(ExecutionRun.id == run_uuid)
+            )
+            status = result.scalar_one_or_none()
+        except Exception:
+            return False
+        return bool(status in TERMINAL_RUN_STATUSES)
+
+    async def _terminal_response_if_needed(
+        self,
+        run: ExecutionRun,
+        *,
+        fallback_step_index: int | None = None,
+    ) -> PollResponse | None:
+        """Refresh run status and short-circuit decision loops when terminal."""
+        with contextlib.suppress(Exception):
+            await self.session.refresh(run)
+        if run.status not in TERMINAL_RUN_STATUSES:
+            return None
+        run_id = str(run.id)
+        self._clear_recovery_state(run_id)
+        return PollResponse(
+            decision="COMPLETED",
+            confidence=0.99,
+            reasoning=f"Run already terminal: {run.status}",
+            next_step_index=(
+                run.current_step_index
+                if fallback_step_index is None
+                else fallback_step_index
+            ),
+        )
+
     def _seconds_in_recovery_window(self, run_id: str, step_index: int) -> int:
         started = _run_step_recovery_started_at.get((run_id, step_index))
         if not started:
@@ -580,6 +689,8 @@ class AgentService:
         return int((datetime.now(UTC) - started).total_seconds())
 
     async def _append_recovery_event(self, run_id: str, payload: dict[str, Any]) -> None:
+        if await self._is_run_terminal(run_id):
+            return
         await self.audit.append(
             AppendEvent(
                 event_type="recovery_cycle",
@@ -598,6 +709,89 @@ class AgentService:
             "visible_text_excerpt": visible_text[:400],
             "visible_elements_count": len(visible_elements),
             "page_diff": getattr(ctx, "page_diff", None),
+        }
+
+    @staticmethod
+    def _build_ai_page_signals(ctx: Any, step: dict[str, Any]) -> dict[str, Any]:
+        visible_elements = getattr(ctx, "visible_elements", None) or []
+        page_diff = getattr(ctx, "page_diff", None) or {}
+        visible_text = str(getattr(ctx, "visible_text", "") or "")
+
+        def _normalize_number(raw: str) -> str:
+            value = raw.strip()
+            if "," in value and "." in value:
+                if value.rfind(",") > value.rfind("."):
+                    value = value.replace(".", "").replace(",", ".")
+                else:
+                    value = value.replace(",", "")
+            elif "," in value:
+                value = value.replace(".", "").replace(",", ".")
+            return value
+
+        candidates: list[dict[str, Any]] = []
+        for raw in visible_elements:
+            if not isinstance(raw, dict):
+                continue
+            selector = str(raw.get("selector") or "").strip()
+            text = str(
+                raw.get("text")
+                or raw.get("aria_label")
+                or raw.get("value")
+                or raw.get("label")
+                or ""
+            ).strip()
+            role = str(raw.get("role") or "").strip().lower()
+            tag = str(raw.get("tag") or "").strip().lower()
+            clickable = bool(raw.get("clickable")) or (
+                role in {"button", "link", "tab", "option"}
+                or tag in {"button", "a", "input", "label", "summary"}
+            )
+            score = 0
+            if clickable:
+                score += 8
+            if text:
+                score += min(len(text), 30) // 5
+            if selector.startswith("#") or "[data-testid" in selector or "aria-" in selector:
+                score += 3
+            if "button" in selector.lower():
+                score += 2
+            candidates.append(
+                {
+                    "selector": selector[:200],
+                    "text": text[:120],
+                    "role": role[:40],
+                    "tag": tag[:20],
+                    "score": score,
+                }
+            )
+        candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
+
+        number_tokens = re.findall(r"\d[\d.,]*", visible_text)
+        for candidate in candidates[:8]:
+            text = str(candidate.get("text") or "")
+            number_tokens.extend(re.findall(r"\d[\d.,]*", text))
+        normalized_numbers = []
+        for token in number_tokens:
+            normalized = _normalize_number(token)
+            if normalized and normalized not in normalized_numbers:
+                normalized_numbers.append(normalized)
+
+        return {
+            "step_action": str(step.get("action_type") or "")[:40],
+            "step_intent": str(step.get("intent") or "")[:180],
+            "interactive_candidates": candidates[:8],
+            "normalized_numbers": normalized_numbers[:10],
+            "settle_signals": {
+                "page_unchanged": bool(getattr(ctx, "page_unchanged", False)),
+                "url_changed": bool(page_diff.get("url_changed")),
+                "title_changed": bool(page_diff.get("title_changed")),
+                "dom_added_count": len(page_diff.get("added") or []),
+                "dom_removed_count": len(page_diff.get("removed") or []),
+            },
+            "delta_summary": {
+                "added_sample": (page_diff.get("added") or [])[:5],
+                "removed_sample": (page_diff.get("removed") or [])[:5],
+            },
         }
 
     async def _recent_decision_digest(self, run_id: str, limit: int) -> list[dict[str, Any]]:
@@ -635,6 +829,14 @@ class AgentService:
         window_seconds = self._recovery_window_seconds()
         if elapsed_seconds < window_seconds:
             return None
+        if await self._is_run_terminal(run_id):
+            self._clear_recovery_state(run_id)
+            return PollResponse(
+                decision="COMPLETED",
+                confidence=0.99,
+                reasoning=f"Run already terminal: {run.status}",
+                next_step_index=run.current_step_index,
+            )
 
         decision_limit = max(1, int(getattr(settings, "ai_timeout_decision_history_limit", 6)))
         recent_decisions = await self._recent_decision_digest(run_id, decision_limit)
@@ -659,6 +861,14 @@ class AgentService:
                 "summary": summary,
             },
         )
+        if await self._is_run_terminal(run_id):
+            self._clear_recovery_state(run_id)
+            return PollResponse(
+                decision="COMPLETED",
+                confidence=0.99,
+                reasoning=f"Run already terminal: {run.status}",
+                next_step_index=run.current_step_index,
+            )
         with contextlib.suppress(Exception):
             await self.execution.fail(run_id, summary)
         run.error_summary = summary
@@ -683,6 +893,11 @@ class AgentService:
         prior_ai_decision: dict[str, Any] | None = None,
     ) -> PollResponse:
         run_id = str(run.id)
+        terminal = await self._terminal_response_if_needed(
+            run, fallback_step_index=step_index,
+        )
+        if terminal:
+            return terminal
         cycle_key = (run_id, step_index)
         cycle = _run_step_recovery_cycles.get(cycle_key, 0) + 1
         _run_step_recovery_cycles[cycle_key] = cycle
@@ -718,6 +933,7 @@ class AgentService:
             decision_type: DecisionValue = ai_recovery.get("decision", "WAIT")
             if decision_type == "ADAPT":
                 adapted_command = self._parse_adapted_command(ai_recovery.get("command", {}))
+                _run_unusable_output_waits.pop(cycle_key, None)
                 await self._audit_decision(
                     run_id,
                     "ADAPT",
@@ -738,10 +954,13 @@ class AgentService:
                     next_step_index=step_index,
                 )
             if decision_type == "RESTART":
+                _run_unusable_output_waits.pop(cycle_key, None)
                 return await self._handle_restart_decision(run, step_index, ai_recovery, ctx)
             if decision_type == "ROLLBACK":
+                _run_unusable_output_waits.pop(cycle_key, None)
                 return await self._handle_rollback_decision(run, step_index, ai_recovery, ctx)
             if decision_type == "EXECUTE":
+                _run_unusable_output_waits.pop(cycle_key, None)
                 command = self._build_command(step)
                 await self._audit_decision(
                     run_id,
@@ -762,9 +981,52 @@ class AgentService:
                     command=command,
                     next_step_index=step_index,
                 )
-
         # Always continue autonomously for non-blocking pages until timeout.
         fallback_wait_ms = max(SAFETY_LIMITS["wait_min_ms"], 1200)
+        if trigger == "ai_unusable_output":
+            stalled = _run_unusable_output_waits.get(cycle_key, 0) + 1
+            _run_unusable_output_waits[cycle_key] = stalled
+            stall_budget = int(SAFETY_LIMITS.get("max_ai_unusable_output_wait_cycles", 4))
+            if stalled >= stall_budget:
+                reason = "ai_unusable_output_budget_exhausted"
+                await self._append_recovery_event(
+                    run_id,
+                    {
+                        "kind": "budget_exhausted",
+                        "trigger": trigger,
+                        "step_index": step_index,
+                        "cycle": cycle,
+                        "stalled_wait_cycles": stalled,
+                        "stall_budget": stall_budget,
+                    },
+                )
+                await self._audit_decision(
+                    run_id,
+                    "PAUSE",
+                    0.8,
+                    "AI could not produce a usable decision within the bounded recovery budget.",
+                    pause_reason=reason,
+                    step_index=step_index,
+                    page_context=ctx,
+                    decision_context={
+                        "reason_code": reason,
+                        "stalled_wait_cycles": stalled,
+                        "stall_budget": stall_budget,
+                        "trigger": trigger,
+                    },
+                )
+                with contextlib.suppress(Exception):
+                    await self.execution.pause(run_id, reason=reason)
+                return PollResponse(
+                    decision="PAUSE",
+                    confidence=0.8,
+                    reasoning="AI recovery budget exhausted; pausing for deterministic handoff.",
+                    pause_reason=reason,
+                    next_step_index=step_index,
+                    requires_human=False,
+                )
+        else:
+            _run_unusable_output_waits.pop(cycle_key, None)
         await self._audit_decision(
             run_id,
             "WAIT",
@@ -799,15 +1061,22 @@ class AgentService:
         ctx: Any,
     ) -> PollResponse | None:
         run_id = str(run.id)
+        navigate_url: str | None = None
         # AI-first does not mean AI-only. If the model output is unusable but
         # the recorded step is a deterministic navigate, execute it instead of
         # pausing the run.
+        if isinstance(step, dict) and step.get("action_type") == "navigate":
+            navigate_url = self._resolve_step_navigate_url(step)
+            if not navigate_url:
+                navigate_url = _extract_first_http_url((step.get("intent") or ""))
         if (
             isinstance(step, dict)
             and step.get("action_type") == "navigate"
-            and _is_http_url(step.get("value"))
+            and navigate_url
         ):
             command = self._build_command(step)
+            command.value = navigate_url
+            command.target = navigate_url
             reasoning = "AI output unusable; executing deterministic navigate fallback"
             await self._audit_decision(
                 run_id,
@@ -824,6 +1093,32 @@ class AgentService:
                 confidence=0.7,
                 reasoning=reasoning,
                 command=command,
+                next_step_index=step_index,
+            )
+
+        js_click_command = self._build_js_click_fallback_command(step, ctx)
+        if js_click_command:
+            reasoning = "AI output unusable; executing deterministic JS click fallback"
+            await self._audit_decision(
+                run_id,
+                "EXECUTE",
+                0.65,
+                reasoning,
+                command=js_click_command,
+                step_index=step_index,
+                page_context=ctx,
+                decision_context={
+                    "origin": "ai-fallback",
+                    "fallback": "js-click",
+                    "page_content_analyzed": True,
+                    "step_action": step.get("action_type"),
+                },
+            )
+            return PollResponse(
+                decision="EXECUTE",
+                confidence=0.65,
+                reasoning=reasoning,
+                command=js_click_command,
                 next_step_index=step_index,
             )
 
@@ -849,6 +1144,299 @@ class AgentService:
             prior_ai_decision={"decision_context": {"origin": "ai-fallback", "step_action": step.get("action_type")}},
         )
 
+    @staticmethod
+    def _extract_click_label(step: dict[str, Any]) -> str | None:
+        if not isinstance(step, dict):
+            return None
+        raw_value = step.get("value")
+        if isinstance(raw_value, str):
+            value = raw_value.strip()
+            if value:
+                return value[:120]
+        raw_intent = step.get("intent")
+        if not isinstance(raw_intent, str):
+            return None
+        intent = raw_intent.strip()
+        if not intent:
+            return None
+        cleaned = re.sub(
+            r"^(click|tap|press|select|choose|open)\s+",
+            "",
+            intent,
+            flags=re.IGNORECASE,
+        ).strip()
+        return (cleaned or intent)[:120]
+
+    @staticmethod
+    def _analyze_click_candidates_from_page_content(
+        ctx: Any,
+        label: str,
+    ) -> dict[str, list[str]]:
+        label_l = label.lower()
+        label_n = re.sub(r"[^a-z0-9]+", "", label_l)
+        selectors: list[str] = []
+        texts: list[str] = []
+        visible_elements = getattr(ctx, "visible_elements", None) or []
+        for raw in visible_elements:
+            if not isinstance(raw, dict):
+                continue
+            text = str(
+                raw.get("text")
+                or raw.get("aria_label")
+                or raw.get("value")
+                or raw.get("label")
+                or "",
+            ).strip()
+            selector = str(raw.get("selector") or "").strip()
+            hay = text.lower()
+            hay_n = re.sub(r"[^a-z0-9]+", "", hay)
+            fuzzy_match = bool(
+                label_l
+                and hay
+                and (
+                    label_l in hay
+                    or hay in label_l
+                    or (label_n and hay_n and (label_n in hay_n or hay_n in label_n))
+                )
+            )
+            if fuzzy_match:
+                if selector and selector not in selectors:
+                    selectors.append(selector[:220])
+                if text and text not in texts:
+                    texts.append(text[:120])
+            if len(selectors) >= 8 and len(texts) >= 8:
+                break
+        visible_text = str(getattr(ctx, "visible_text", "") or "").strip()
+        visible_text_l = visible_text.lower()
+        visible_text_n = re.sub(r"[^a-z0-9]+", "", visible_text_l)
+        if (
+            not texts
+            and label_l
+            and (
+                label_l in visible_text_l
+                or (label_n and label_n in visible_text_n)
+            )
+        ):
+            texts.append(label[:120])
+        return {"selectors": selectors, "texts": texts}
+
+    @staticmethod
+    def _looks_like_dom_selector(candidate: str) -> bool:
+        value = candidate.strip()
+        if not value:
+            return False
+        if value.startswith("/") or value.startswith("("):
+            return True
+        if re.fullmatch(r"[0-9\s,._-]+", value):
+            return False
+        if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*", value):
+            return True
+        return bool(re.search(r"[#\[\]>\+~:]", value)) or ("." in value and bool(re.search(r"[a-zA-Z]", value)))
+
+    def _build_js_click_fallback_command(
+        self, step: dict[str, Any], ctx: Any,
+    ) -> AgentCommand | None:
+        if not isinstance(step, dict):
+            return None
+        action_type = str(step.get("action_type") or "").lower()
+        if action_type not in {"click", "select"}:
+            return None
+        label = self._extract_click_label(step)
+        if not label:
+            return None
+        selector_chain = step.get("selector_chain") or []
+        raw_candidates: list[str] = []
+        if isinstance(selector_chain, list):
+            for sel in selector_chain:
+                if not isinstance(sel, dict):
+                    continue
+                value = sel.get("value")
+                if isinstance(value, str) and value.strip():
+                    raw_candidates.append(value.strip()[:220])
+        page_candidates = self._analyze_click_candidates_from_page_content(ctx, label)
+        for candidate in page_candidates["selectors"]:
+            if candidate not in raw_candidates:
+                raw_candidates.append(candidate)
+        selector_candidates: list[str] = []
+        text_candidates: list[str] = [label]
+        # Extract anchor points (offset-from-anchor-element coordinates) so
+        # JS_CLICK_HARNESS can use document.elementFromPoint() as a precise
+        # fallback when CSS/text matching fails (e.g. generic "#interop-outlet").
+        anchor_points: list[dict] = []
+        for sel in selector_chain:
+            if not isinstance(sel, dict):
+                continue
+            if sel.get("type") == "anchor":
+                try:
+                    import json as _json
+                    anchor_data = _json.loads(sel.get("value", "{}"))
+                    if isinstance(anchor_data, dict) and "anchor_selector" in anchor_data:
+                        anchor_points.append({
+                            "anchorSelector": anchor_data["anchor_selector"],
+                            "offsetX": int(anchor_data.get("offset_x", 0)),
+                            "offsetY": int(anchor_data.get("offset_y", 0)),
+                        })
+                except Exception:
+                    pass
+        for candidate in raw_candidates:
+            if self._looks_like_dom_selector(candidate):
+                if candidate not in selector_candidates:
+                    selector_candidates.append(candidate)
+                continue
+            if candidate not in text_candidates:
+                text_candidates.append(candidate)
+        for candidate in page_candidates["texts"]:
+            if candidate not in text_candidates:
+                text_candidates.append(candidate)
+        script = """
+const label = String((args && args.label) || "").trim();
+const labelLower = label.toLowerCase();
+const selectors = Array.isArray(args?.selectorCandidates) ? args.selectorCandidates : [];
+const textCandidates = Array.isArray(args?.textCandidates) ? args.textCandidates.map((t) => String(t).trim()).filter(Boolean) : [];
+if (label) textCandidates.unshift(label);
+const normalizeToken = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+const isVisible = (el) => {
+  if (!el || !(el instanceof Element)) return false;
+  const s = window.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  return s && s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+};
+const isDisabled = (el) => {
+  if (!el || !(el instanceof Element)) return false;
+  if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+    return !!el.disabled;
+  }
+  return el.getAttribute("aria-disabled") === "true";
+};
+const textFor = (el) => (
+  (el.getAttribute("aria-label") || "") + " " +
+  (el.getAttribute("title") || "") + " " +
+  (el.getAttribute("data-testid") || "") + " " +
+  ("value" in el ? String(el.value || "") : "") + " " +
+  (el.textContent || "")
+).replace(/\\s+/g, " ").trim();
+const seemsInteractive = (el) => {
+  if (!el || !(el instanceof Element)) return false;
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  if (el.matches("button, a, [role='button'], input[type='button'], input[type='submit'], input[type='radio'], input[type='checkbox'], summary, label")) return true;
+  if (role === "button" || role === "link" || role === "tab" || role === "option") return true;
+  if (el.hasAttribute("onclick") || el.hasAttribute("data-action")) return true;
+  if (el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex") || "0") >= 0) return true;
+  const cls = `${el.className || ""} ${(el.getAttribute("data-testid") || "")}`.toLowerCase();
+  if (cls.includes("btn") || cls.includes("button") || cls.includes("click")) return true;
+  try {
+    const cursor = window.getComputedStyle(el).cursor;
+    if (cursor === "pointer") return true;
+  } catch {}
+  return false;
+};
+const bestActionableTarget = (node) => {
+  if (!node || !(node instanceof Element)) return null;
+  let current = node;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (isVisible(current) && !isDisabled(current) && seemsInteractive(current)) return current;
+    current = current.parentElement;
+  }
+  current = node;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (isVisible(current) && !isDisabled(current)) return current;
+    current = current.parentElement;
+  }
+  return null;
+};
+const matchesNeedle = (text, needle) => {
+  const hay = String(text || "").toLowerCase();
+  const needleL = String(needle || "").toLowerCase().trim();
+  if (!needleL || !hay) return false;
+  if (hay.includes(needleL) || needleL.includes(hay)) return true;
+  const hayN = normalizeToken(hay);
+  const needleN = normalizeToken(needleL);
+  if (!hayN || !needleN) return false;
+  return hayN.includes(needleN) || needleN.includes(hayN);
+};
+const score = (el) => {
+  if (!isVisible(el) || isDisabled(el)) return -1;
+  const t = textFor(el);
+  const tLower = t.toLowerCase();
+  const tNorm = normalizeToken(tLower);
+  const labelNorm = normalizeToken(labelLower);
+  const needleHit = textCandidates.some((needle) => matchesNeedle(t, needle));
+  if (!needleHit) return -1;
+  let s = 0;
+  if (labelLower && tLower === labelLower) s += 120;
+  if (labelNorm && tNorm && tNorm === labelNorm) s += 120;
+  if (labelLower && tLower.includes(labelLower)) s += 70;
+  if (labelNorm && tNorm.includes(labelNorm)) s += 65;
+  if (textCandidates.some((needle) => {
+    const nL = String(needle || "").toLowerCase().trim();
+    const nN = normalizeToken(nL);
+    return (nL && tLower.includes(nL)) || (nN && tNorm.includes(nN));
+  })) s += 35;
+  if (seemsInteractive(el)) s += 12;
+  if (bestActionableTarget(el)) s += 8;
+  return s;
+};
+const clickNode = (el, reason) => {
+  const target = bestActionableTarget(el) || (el instanceof Element ? el : null);
+  if (!target || !isVisible(target) || isDisabled(target)) return null;
+  try { target.scrollIntoView({ block: "center", inline: "center" }); } catch {}
+  try { target.focus?.({ preventScroll: true }); } catch {}
+  try { target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true, pointerType: "mouse", isPrimary: true, button: 0 })); } catch {}
+  try { target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, composed: true, button: 0 })); } catch {}
+  try { target.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, composed: true, pointerType: "mouse", isPrimary: true, button: 0 })); } catch {}
+  try { target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, composed: true, button: 0 })); } catch {}
+  try { target.click(); } catch {}
+  try { target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, button: 0 })); } catch {}
+  return {
+    clicked: true,
+    reason,
+    tag: target.tagName,
+    text: textFor(target).slice(0, 160),
+    originTag: el instanceof Element ? el.tagName : null,
+  };
+};
+for (const candidate of selectors) {
+  if (typeof candidate !== "string" || !candidate) continue;
+  try {
+    if (candidate.startsWith("/") || candidate.startsWith("(")) {
+      const node = document.evaluate(candidate, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      const clicked = clickNode(node, "selector_xpath");
+      if (clicked) return clicked;
+      continue;
+    }
+    const node = document.querySelector(candidate);
+    const clicked = clickNode(node, "selector_css");
+    if (clicked) return clicked;
+  } catch {}
+}
+const nodes = Array.from(document.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit'],input[type='radio'],input[type='checkbox'],summary,label,[aria-label],[data-testid],[onclick],[tabindex],span,div,p,li,strong,b"));
+let best = null;
+let bestScore = -1;
+for (const el of nodes) {
+  const s = score(el);
+  if (s > bestScore) { bestScore = s; best = el; }
+}
+if (best && bestScore >= 18) {
+  const clicked = clickNode(best, "text_rank");
+  if (clicked) return { ...clicked, score: bestScore };
+}
+throw new Error(`JS_CLICK_FALLBACK_NO_TARGET:${label}`);
+""".strip()
+        return AgentCommand(
+            action=CommandAction.RUN_SCRIPT,
+            intent=f"click target via JS fallback: {label}",
+            script=script,
+            script_args={
+                "__harness": "js_click",
+                "label": label,
+                "selectorCandidates": selector_candidates,
+                "textCandidates": text_candidates,
+                "anchorPoints": anchor_points,
+            },
+            script_timeout_ms=5000,
+            timeout_ms=15000,
+        )
+
     async def _handle_wait_decision(
         self,
         run: ExecutionRun,
@@ -857,6 +1445,11 @@ class AgentService:
         ctx: Any,
     ) -> PollResponse:
         run_id = str(run.id)
+        terminal = await self._terminal_response_if_needed(
+            run, fallback_step_index=step_index,
+        )
+        if terminal:
+            return terminal
         step_key = (run_id, step_index)
         step_waits = _run_step_wait_count.get(step_key, 0)
         total_waits = _run_total_waits.get(run_id, 0)
@@ -905,6 +1498,11 @@ class AgentService:
         ctx: Any,
     ) -> PollResponse:
         run_id = str(run.id)
+        terminal = await self._terminal_response_if_needed(
+            run, fallback_step_index=step_index,
+        )
+        if terminal:
+            return terminal
         restarts = _run_restart_count.get(run_id, 0)
         if restarts >= SAFETY_LIMITS["max_restarts_per_run"]:
             return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
@@ -953,18 +1551,19 @@ class AgentService:
 
         if 0 <= step_index < len(steps):
             current = steps[step_index] or {}
-            current_value = current.get("value")
-            if current.get("action_type") == "navigate" and _is_http_url(current_value):
-                return str(current_value)
+            if current.get("action_type") == "navigate":
+                current_url = self._resolve_step_navigate_url(current)
+                if current_url:
+                    return current_url
 
         for step in steps:
             if not isinstance(step, dict):
                 continue
             if step.get("action_type") != "navigate":
                 continue
-            value = step.get("value")
-            if _is_http_url(value):
-                return str(value)
+            value = self._resolve_step_navigate_url(step)
+            if value:
+                return value
 
         ai_command = ai_decision.get("command")
         if isinstance(ai_command, dict):
@@ -985,6 +1584,11 @@ class AgentService:
         ctx: Any,
     ) -> PollResponse:
         run_id = str(run.id)
+        terminal = await self._terminal_response_if_needed(
+            run, fallback_step_index=step_index,
+        )
+        if terminal:
+            return terminal
         rollbacks = _run_rollback_count.get(run_id, 0)
         if rollbacks >= SAFETY_LIMITS["max_rollbacks_per_run"]:
             return await self._fallback_after_ai_failure(run, step_index, {}, ctx)
@@ -1025,6 +1629,26 @@ class AgentService:
             next_step_index=rollback_to,
             rollback_to=rollback_to,
         )
+
+    @staticmethod
+    def _resolve_step_navigate_url(step: dict[str, Any]) -> str | None:
+        if not isinstance(step, dict):
+            return None
+        raw_value = step.get("value")
+        if _is_http_url(raw_value):
+            return str(raw_value)
+        from_intent = _extract_first_http_url(step.get("intent"))
+        if from_intent:
+            return from_intent
+        selector_chain = step.get("selector_chain") or []
+        if isinstance(selector_chain, list):
+            for selector in selector_chain:
+                if not isinstance(selector, dict):
+                    continue
+                resolved = _extract_first_http_url(selector.get("value"))
+                if resolved:
+                    return resolved
+        return None
 
     async def _resolve_checkpoint_url(self, run: ExecutionRun, target_step_index: int) -> str | None:
         result = await self.session.execute(
@@ -1253,6 +1877,8 @@ class AgentService:
         screenshot_mime: str | None = None,
         screenshot_trigger: str | None = None,
     ) -> dict[str, Any] | None:
+        if await self._is_run_terminal(str(run.id)):
+            return None
         ai_api_key = settings.ai_api_key
         if not ai_api_key:
             return None
@@ -1326,6 +1952,26 @@ class AgentService:
         # Injects known-problem steps so the AI handles them proactively.
         workflow_id = str((run.workflow_snapshot or {}).get("workflow", {}).get("id") or "")
         workflow_expertise = await self._load_workflow_expertise(workflow_id, str(run.id)) if workflow_id else None
+        page_signals = self._build_ai_page_signals(ctx, step)
+
+        # Surrounding steps window (±2): gives the AI causal and sequence context
+        # so it can decide on skips, delays, and find-element strategies.
+        snapshot_steps: list[dict[str, Any]] = (run.workflow_snapshot or {}).get("steps", []) or []
+        surrounding_steps: list[dict[str, Any]] = []
+        window_start = max(0, step_index - 2)
+        window_end = min(len(snapshot_steps), step_index + 3)
+        for win_i in range(window_start, window_end):
+            s = snapshot_steps[win_i]
+            meta = s.get("accessibility_metadata") or {}
+            surrounding_steps.append({
+                "step_index": win_i,
+                "action_type": s.get("action_type", ""),
+                "intent": s.get("intent") or "",
+                "value": s.get("value"),
+                "caused_url_change": bool(meta.get("caused_url_change", False)),
+                "time_since_previous_ms": meta.get("time_since_previous_ms"),
+                "context_url_before": meta.get("context_url_before"),
+            })
 
         prompt = build_agent_decision_prompt(
             workflow_goal=analysis.get("workflow_goal"),
@@ -1348,6 +1994,12 @@ class AgentService:
             step_stability_score=step_stability,
             workflow_expertise=workflow_expertise,
             has_screenshot=bool(images_kwarg),
+            surrounding_steps=surrounding_steps or None,
+        )
+        prompt += (
+            "\n\n## Actionable Page Signals\n"
+            "Use these ranked candidates/deltas to converge quickly and avoid fragile selectors.\n"
+            f"{json.dumps(page_signals, ensure_ascii=True)[:3000]}"
         )
         if recovery_mode:
             prompt += (
@@ -1372,8 +2024,11 @@ class AgentService:
 
         _ai_start = time.monotonic()
         result: dict[str, Any] | None = None
+        loop_exhaust_reason: str | None = None
         inner_max = max(2, int(SAFETY_LIMITS.get("max_ai_attempts_per_poll", 3)))
         for attempt in range(1, inner_max + 1):
+            if await self._is_run_terminal(str(run.id)):
+                return None
             try:
                 tool_resp = await provider.generate_with_tools(
                     messages=messages,
@@ -1408,11 +2063,13 @@ class AgentService:
                             messages, tc.id,
                             {"ok": True, "applied": len(applied)},
                         )
+                loop_exhaust_reason = "tool_loop_plan_only_exhausted"
                 continue
 
             if not translated:
                 # Empty turn or unmappable tool — give the model one more
                 # chance by appending a nudge tool_result and iterating.
+                loop_exhaust_reason = "tool_loop_invalid_or_unmappable"
                 if attempt < inner_max:
                     messages.append({
                         "role": "user",
@@ -1467,7 +2124,34 @@ class AgentService:
         save_conversation(run, messages)
         with contextlib.suppress(Exception):
             await self.session.flush()
+        if result is None and loop_exhaust_reason:
+            return {
+                "decision": "WAIT",
+                "confidence": 0.4,
+                "reasoning": "AI tool loop produced no actionable terminal tool; using bounded fallback wait.",
+                "wait_ms": 1200,
+                "thinking_steps": [],
+                "decision_context": {
+                    "strategy": "tool_use",
+                    "reason_code": loop_exhaust_reason,
+                    "attempts": inner_max,
+                },
+            }
         return result
+
+    @staticmethod
+    def _canonical_plan_operation(operation: Any) -> str:
+        op = str(operation or "").upper()
+        alias = {
+            "ADD": "INSERT",
+            "INSERT": "INSERT",
+            "SKIP": "REMOVE",
+            "REMOVE": "REMOVE",
+            "MODIFY": "MODIFY",
+            "REORDER": "REORDER",
+            "SIMPLIFY": "SIMPLIFY",
+        }
+        return alias.get(op, op)
 
     async def _apply_plan_updates_from_ai(
         self, run: ExecutionRun, raw: Any,
@@ -1483,13 +2167,17 @@ class AgentService:
         for raw_op in raw[:budget]:
             if not isinstance(raw_op, dict):
                 continue
+            normalized = dict(raw_op)
+            normalized["operation"] = self._canonical_plan_operation(
+                normalized.get("operation"),
+            )
             try:
-                op = PlanUpdate(**raw_op)
+                op = PlanUpdate(**normalized)
             except Exception as exc:
-                logger.debug("Rejected invalid plan_update from LLM: %s (%s)", raw_op, exc)
+                logger.debug("Rejected invalid plan_update from LLM: %s (%s)", normalized, exc)
                 continue
             ops_to_apply.append({
-                "operation": op.operation.value,
+                "operation": self._canonical_plan_operation(op.operation.value),
                 "step_index": op.step_index,
                 "new_step": op.new_step,
                 "reason": op.reason,
@@ -1575,6 +2263,14 @@ class AgentService:
 
     async def report_result(self, run_id: str, req: ResultRequest) -> ResultResponse:
         run = await self._get_run(run_id)
+        if run.status in TERMINAL_RUN_STATUSES:
+            self._clear_recovery_state(run_id)
+            return ResultResponse(
+                accepted=False,
+                decision="COMPLETED",
+                next_step_index=run.current_step_index,
+                should_poll=False,
+            )
         if req.step_index != run.current_step_index:
             logger.warning(
                 "Rejecting stale result for run %s: expected step %s, got %s",
@@ -1617,6 +2313,7 @@ class AgentService:
             await self._audit_script_execution(run_id, req)
 
         if req.success:
+            self._clear_script_failure_counts(run_id, req.step_index)
             self._clear_recovery_state(run_id)
             snapshot_steps = (run.workflow_snapshot or {}).get("steps", []) or []
             action_type = snapshot_steps[req.step_index].get("action_type") if req.step_index < len(snapshot_steps) else None
@@ -1712,6 +2409,47 @@ class AgentService:
             run_id=run_id,
         ))
         await self.session.flush()
+
+        script_failure_category = self._classify_script_failure(req.error)
+        if script_failure_category == "fatal":
+            with contextlib.suppress(Exception):
+                await self.execution.fail(run_id, req.error or "fatal script error")
+            self._clear_recovery_state(run_id)
+            return ResultResponse(
+                accepted=True,
+                next_step_index=req.step_index,
+                should_poll=False,
+            )
+        if script_failure_category:
+            failure_count = self._record_script_failure(
+                run_id, req.step_index, script_failure_category,
+            )
+            if (
+                script_failure_category == "no-target"
+                and failure_count >= int(SAFETY_LIMITS.get("max_script_no_target_repeats", 2))
+            ):
+                reason = "script_no_target_repeated"
+                await self._audit_decision(
+                    run_id,
+                    "PAUSE",
+                    0.82,
+                    "run_script hit the same no-target error repeatedly on this step.",
+                    pause_reason=reason,
+                    step_index=req.step_index,
+                    decision_context={
+                        "reason_code": reason,
+                        "script_failure_category": script_failure_category,
+                        "repeat_count": failure_count,
+                    },
+                )
+                with contextlib.suppress(Exception):
+                    await self.execution.pause(run_id, reason=reason)
+                return ResultResponse(
+                    accepted=True,
+                    decision="PAUSE",
+                    next_step_index=req.step_index,
+                    should_poll=True,
+                )
 
         return ResultResponse(
             accepted=True,
@@ -1848,10 +2586,13 @@ class AgentService:
     def _build_command(self, step: dict[str, Any]) -> AgentCommand:
         action_type = step.get("action_type", "click")
         action = self._map_action_type(action_type)
+        value = step.get("value")
+        if action == CommandAction.NAVIGATE:
+            value = self._resolve_step_navigate_url(step) or value
         return AgentCommand(
             action=action,
-            target=step.get("value"),
-            value=step.get("value"),
+            target=value,
+            value=value,
             selector_chain=step.get("selector_chain") or [],
             intent=step.get("intent"),
             methods=step.get("methods") or [],
@@ -1933,7 +2674,14 @@ class AgentService:
         page_context: Any | None = None,
         decision_context: dict | None = None,
         screenshot_meta: dict | None = None,
-    ) -> None:
+    ) -> bool:
+        if await self._is_run_terminal(run_id):
+            logger.info(
+                "Skipping agent_decision audit for terminal run %s (%s)",
+                run_id,
+                decision,
+            )
+            return False
         payload: dict[str, Any] = {
             "decision": decision,
             "confidence": confidence,
@@ -2007,6 +2755,7 @@ class AgentService:
                     trigger="before_step",
                     ctx=page_context,
                 )
+        return True
 
     async def _analyze_failure(
         self,

@@ -120,7 +120,7 @@ async def test_poll_pauses_on_blocking_challenge(db_session: AsyncSession):
     wf_id = str(workflow.id)
 
     run = await svc.create_run(workflow_id=wf_id)
-    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "scroll")])
     run.total_steps = 1
     await db_session.flush()
     run_id = str(run.id)
@@ -213,7 +213,7 @@ async def test_result_success_with_via_method_index_audit(db_session: AsyncSessi
     wf_id = str(workflow.id)
 
     run = await svc.create_run(workflow_id=wf_id)
-    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "scroll")])
     run.total_steps = 1
     await db_session.flush()
     run_id = str(run.id)
@@ -246,7 +246,7 @@ async def test_result_success_omits_via_method_index_when_not_provided(db_sessio
     await db_session.flush()
 
     run = await svc.create_run(workflow_id=str(workflow.id))
-    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "scroll")])
     run.total_steps = 1
     await db_session.flush()
 
@@ -509,7 +509,7 @@ async def test_ai_unusable_output_stays_autonomous_not_waiting_for_user(
     await db_session.flush()
 
     run = await svc.create_run(workflow_id=str(workflow.id))
-    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
+    run.workflow_snapshot = _make_run_snapshot([_make_step(0, "scroll")])
     run.total_steps = 1
     run.status = "running"
     await db_session.flush()

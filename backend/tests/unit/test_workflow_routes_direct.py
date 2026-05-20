@@ -6,11 +6,14 @@ import uuid
 import pytest
 from fastapi.responses import JSONResponse
 
+from core.exceptions import NotFoundError
 from api.v1.workflows import (
     RecordEventInput,
     RecordWorkflowRequest,
     RunWithParamsRequest,
     UpdateStatusRequest,
+    delete_all_workflows,
+    delete_workflow,
     create_workflow,
     generate_workflow_prompt,
     get_workflow,
@@ -54,17 +57,6 @@ async def test_record_workflow_direct_success_and_failure_paths(db_session, monk
     async def _phases(_self, _workflow_id):
         return []
 
-    async def _simplify(_self, steps, phases):  # noqa: ARG001
-        return [
-            {
-                "action_type": steps[0].action_type,
-                "intent": steps[0].intent,
-                "selector_chain": steps[0].selector_chain,
-                "value": steps[0].value,
-                "methods": steps[0].methods,
-            }
-        ]
-
     monkeypatch.setattr("api.v1.workflows.get_ai_provider", lambda **_kwargs: _Provider())
     monkeypatch.setattr(
         "services.semantic_analysis_service.SemanticAnalysisService.analyze_workflow", _analysis
@@ -72,7 +64,6 @@ async def test_record_workflow_direct_success_and_failure_paths(db_session, monk
     monkeypatch.setattr(
         "services.semantic_analysis_service.SemanticAnalysisService.get_phases", _phases
     )
-    monkeypatch.setattr("services.workflow_simplifier.WorkflowSimplifier.simplify", _simplify)
 
     req = RecordWorkflowRequest(
         name="recorded",
@@ -90,8 +81,10 @@ async def test_record_workflow_direct_success_and_failure_paths(db_session, monk
     )
     out = await record_workflow(req, db=db_session)
     assert out["name"] == "Direct Name"
-    assert out["step_count"] == 1
-    assert out["simplified_from"] == 2
+    # Simplification disabled: all 2 events are kept
+    assert out["step_count"] == 2
+    assert out["simplified_from"] is None
+    assert out["simplification_status"] == "skipped"
 
     class _BrokenProvider:
         async def generate(self, *_args, **_kwargs):
@@ -100,14 +93,10 @@ async def test_record_workflow_direct_success_and_failure_paths(db_session, monk
     async def _analysis_fail(_self, _workflow_id):
         raise RuntimeError("analysis down")
 
-    async def _simplify_fail(_self, _steps, phases):  # noqa: ARG001
-        raise RuntimeError("simplifier down")
-
     monkeypatch.setattr("api.v1.workflows.get_ai_provider", lambda **_kwargs: _BrokenProvider())
     monkeypatch.setattr(
         "services.semantic_analysis_service.SemanticAnalysisService.analyze_workflow", _analysis_fail
     )
-    monkeypatch.setattr("services.workflow_simplifier.WorkflowSimplifier.simplify", _simplify_fail)
 
     failed = await record_workflow(
         RecordWorkflowRequest(
@@ -346,3 +335,115 @@ async def test_workflow_status_create_and_blueprint_direct(db_session):
     missing = await analyze_workflow_blueprint(str(uuid.uuid4()), db=db_session)
     assert isinstance(missing, JSONResponse)
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_workflow_routes_direct(db_session):
+    created = await create_workflow(
+        req=types.SimpleNamespace(name="gone", description=None, prompt=None, target_url=None, created_by=None),
+        db=db_session,
+    )
+    svc = WorkflowService(db_session)
+    await svc.add_step(created["id"], 0, "click", selector_chain=[{"type": "css", "value": "#x"}])
+
+    deleted = await delete_workflow(created["id"], db=db_session)
+    assert deleted["deleted"]["workflow_id"] == created["id"]
+    with pytest.raises(NotFoundError):
+        await svc.get(created["id"])
+
+
+@pytest.mark.asyncio
+async def test_delete_all_workflows_routes_direct(db_session):
+    svc = WorkflowService(db_session)
+    first = await svc.create(name="one")
+    second = await svc.create(name="two")
+    await svc.add_step(str(first.id), 0, "click", selector_chain=[{"type": "css", "value": "#a"}])
+    await svc.add_step(str(second.id), 0, "click", selector_chain=[{"type": "css", "value": "#b"}])
+
+    deleted = await delete_all_workflows(db=db_session)
+    assert deleted["deleted"]["workflows"] == 2
+    assert deleted["deleted"]["workflow_steps"] == 2
+    assert await svc.list() == []
+
+
+@pytest.mark.asyncio
+async def test_record_workflow_no_simplification_and_causal_enrichment(db_session, monkeypatch):
+    """All events are kept and accessibility_metadata is populated with causal data."""
+    class _Provider:
+        async def generate(self, *_a, **_kw):
+            return types.SimpleNamespace(content="LinkedIn Message Sender")
+
+    async def _analysis(_self, _wf_id):
+        return types.SimpleNamespace(workflow_goal="send message", confidence_overall=0.8)
+
+    async def _phases(_self, _wf_id):
+        return []
+
+    monkeypatch.setattr("api.v1.workflows.get_ai_provider", lambda **_kw: _Provider())
+    monkeypatch.setattr(
+        "services.semantic_analysis_service.SemanticAnalysisService.analyze_workflow", _analysis
+    )
+    monkeypatch.setattr(
+        "services.semantic_analysis_service.SemanticAnalysisService.get_phases", _phases
+    )
+
+    req = RecordWorkflowRequest(
+        name="linkedin test",
+        target_url="https://www.linkedin.com/",
+        events=[
+            RecordEventInput(
+                event_type="navigate",
+                payload={"value": "https://www.linkedin.com/feed/"},
+                page_url="https://www.linkedin.com/",
+                timestamp="2026-05-20T10:00:00.000Z",
+            ),
+            RecordEventInput(
+                event_type="click",
+                payload={"target": {"selector": "#search-box"}, "intent": "Click Search"},
+                page_url="https://www.linkedin.com/feed/",
+                timestamp="2026-05-20T10:00:02.000Z",
+            ),
+            RecordEventInput(
+                event_type="navigate",
+                payload={"value": "https://www.linkedin.com/search/results/"},
+                page_url="https://www.linkedin.com/feed/",
+                timestamp="2026-05-20T10:00:02.300Z",
+            ),
+            RecordEventInput(
+                event_type="type",
+                payload={"value": "John Smith", "intent": "Type name"},
+                page_url="https://www.linkedin.com/search/results/",
+                timestamp="2026-05-20T10:00:06.000Z",
+            ),
+            RecordEventInput(
+                event_type="click",
+                payload={"target": {"selector": "#send-btn"}, "intent": "Click Send"},
+                page_url="https://www.linkedin.com/search/results/",
+                timestamp="2026-05-20T10:00:07.000Z",
+            ),
+        ],
+    )
+    out = await record_workflow(req, db=db_session)
+
+    # All 5 events kept — no simplification
+    assert out["step_count"] == 5
+    assert out["simplification_status"] == "skipped"
+    assert out["simplified_from"] is None
+
+    # Causal enrichment: the click at index 1 is followed by a navigate within 300ms
+    svc = WorkflowService(db_session)
+    steps = await svc.get_steps(out["id"])
+    assert len(steps) == 5
+
+    click_step = steps[1]
+    meta = click_step.accessibility_metadata or {}
+    assert meta.get("caused_url_change") is True
+    assert meta.get("context_url_before") == "https://www.linkedin.com/feed/"
+    assert meta.get("time_since_previous_ms") == 2000  # 2s gap from navigate to click
+
+    # Type step preceded by a ~3.7s gap
+    type_step = steps[3]
+    type_meta = type_step.accessibility_metadata or {}
+    assert type_meta.get("caused_url_change") is False
+    assert type_meta.get("time_since_previous_ms") is not None
+    assert type_meta.get("time_since_previous_ms") > 3000  # 3.7s gap

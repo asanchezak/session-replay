@@ -3,6 +3,18 @@ import { test, expect } from "./fixtures";
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 
+function asWorkflowArray(body: unknown): any[] {
+  if (Array.isArray(body)) return body;
+  if (
+    body
+    && typeof body === "object"
+    && Array.isArray((body as { workflows?: unknown[] }).workflows)
+  ) {
+    return (body as { workflows: unknown[] }).workflows as any[];
+  }
+  return [];
+}
+
 test("record clicks across page navigation", async ({ context, extensionId, errors }) => {
   const ext = new (await import("./page-objects")).ExtensionHelper(context, extensionId);
   const recordingStartedAt = Date.now();
@@ -68,10 +80,24 @@ test("record clicks across page navigation", async ({ context, extensionId, erro
   console.log("  Recording stopped");
 
   // Verify workflow
-  const wfResp = await page.request.get(`${BACKEND}/v1/workflows`, {
-    headers: { "X-API-Key": API_KEY },
-  });
-  const workflows = (await wfResp.json()) as any[];
+  let workflows: any[] = [];
+  let lastStatus = 0;
+  let lastBody: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const wfResp = await page.request.get(`${BACKEND}/v1/workflows`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    lastStatus = wfResp.status();
+    lastBody = await wfResp.json().catch(() => null);
+    workflows = asWorkflowArray(lastBody);
+    if (wfResp.ok() && workflows.length > 0) break;
+    if (attempt < 3) await page.waitForTimeout(400 * attempt);
+  }
+  expect(
+    workflows.length,
+    `Expected workflow list; status=${lastStatus}, body=${JSON.stringify(lastBody)}`,
+  ).toBeGreaterThan(0);
+
   const workflow = [...workflows]
     .filter((w: any) => new Date(w.created_at).getTime() >= recordingStartedAt)
     .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]

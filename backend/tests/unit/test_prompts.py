@@ -102,3 +102,53 @@ def test_agent_decision_prompt_covers_all_optional_blocks():
     assert "URL match: NO" in prompt
     assert "Page Diff" in prompt
     assert "Known problem steps" in prompt
+
+
+def test_surrounding_steps_section_appears_in_prompt():
+    surrounding = [
+        {"step_index": 3, "action_type": "navigate", "intent": "Go to LinkedIn feed", "value": "https://linkedin.com/feed/", "caused_url_change": False, "time_since_previous_ms": None, "context_url_before": None},
+        {"step_index": 4, "action_type": "click", "intent": "Click search box", "value": None, "caused_url_change": True, "time_since_previous_ms": 500, "context_url_before": "https://linkedin.com/feed/"},
+        {"step_index": 5, "action_type": "type", "intent": "Type John Smith", "value": "John Smith", "caused_url_change": False, "time_since_previous_ms": 3700, "context_url_before": "https://linkedin.com/search/"},
+        {"step_index": 6, "action_type": "click", "intent": "Click first result", "value": None, "caused_url_change": False, "time_since_previous_ms": 1000, "context_url_before": None},
+        {"step_index": 7, "action_type": "navigate", "intent": "Open profile", "value": None, "caused_url_change": False, "time_since_previous_ms": 800, "context_url_before": None},
+    ]
+    prompt = build_agent_decision_prompt(
+        workflow_goal="Send a LinkedIn message",
+        current_phase="Messaging",
+        step_index=5,
+        step_intent="Type John Smith",
+        step_action="type",
+        step_selectors=[],
+        step_value="John Smith",
+        page_url="https://linkedin.com/search/",
+        page_title="LinkedIn Search",
+        visible_text="Search results",
+        visible_elements=[],
+        surrounding_steps=surrounding,
+    )
+    assert "Step Context (Recorded Sequence)" in prompt
+    assert "← CURRENT" in prompt
+    assert "caused URL change in recording" in prompt
+    assert "3s pause" in prompt
+
+
+def test_skip_hint_fires_for_matching_navigate_url():
+    surrounding = [
+        {"step_index": 0, "action_type": "navigate", "intent": "Go to feed", "value": "https://linkedin.com/feed/", "caused_url_change": False, "time_since_previous_ms": None, "context_url_before": None},
+    ]
+    prompt = build_agent_decision_prompt(
+        workflow_goal="browse feed",
+        current_phase=None,
+        step_index=0,
+        step_intent="Go to feed",
+        step_action="navigate",
+        step_selectors=[],
+        step_value="https://linkedin.com/feed/",
+        page_url="https://linkedin.com/feed/",
+        page_title="LinkedIn",
+        visible_text="",
+        visible_elements=[],
+        surrounding_steps=surrounding,
+    )
+    assert "Skip hint" in prompt
+    assert "already on the recorded destination" in prompt

@@ -91,19 +91,26 @@ def translate_tool_calls(
 
     if len(terminal_tools) > 1:
         logger.warning(
-            "Model emitted %d terminal tool calls in one turn; honoring '%s' and dropping rest",
-            len(terminal_tools), terminal_tools[0].name,
+            "Model emitted %d terminal tool calls in one turn; selecting first valid call",
+            len(terminal_tools),
         )
 
-    tc = terminal_tools[0]
-    model_cls = TOOL_INPUT_MODELS.get(tc.name)
-    if model_cls is None:
-        logger.warning("Unknown tool name: %s", tc.name)
-        return None
-    try:
-        validated = model_cls(**tc.arguments)
-    except ValidationError as exc:
-        logger.warning("Invalid arguments for tool '%s': %s", tc.name, exc)
+    tc = None
+    validated = None
+    for candidate in terminal_tools:
+        model_cls = TOOL_INPUT_MODELS.get(candidate.name)
+        if model_cls is None:
+            logger.warning("Unknown tool name: %s", candidate.name)
+            continue
+        try:
+            validated = model_cls(**candidate.arguments)
+            tc = candidate
+            break
+        except ValidationError as exc:
+            logger.warning("Invalid arguments for tool '%s': %s", candidate.name, exc)
+            continue
+
+    if tc is None or validated is None:
         return None
 
     result: dict[str, Any] = {
@@ -134,6 +141,7 @@ def translate_tool_calls(
                 "script": validated.script,
                 "script_args": validated.script_args,
                 "script_timeout_ms": validated.script_timeout_ms,
+                "delay_before_ms": validated.delay_before_ms,
             },
         })
         return result
