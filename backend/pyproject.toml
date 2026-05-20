@@ -15,6 +15,7 @@ dependencies = [
     "httpx>=0.28.0",
     "python-multipart>=0.0.12",
     "fsspec>=2026.4.0",
+    "openai>=1.51,<2.0",
 ]
 
 [tool.setuptools.packages.find]

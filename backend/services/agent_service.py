@@ -13,8 +13,22 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ai.agent_tools import ALL_TOOLS
 from ai.client import get_ai_provider
-from ai.prompts import AGENT_EXECUTOR_SYSTEM, build_agent_decision_prompt, build_classify_prompt
+from ai.prompts import (
+    AGENT_EXECUTOR_SYSTEM,
+    AGENT_TOOL_USE_SYSTEM,
+    build_agent_decision_prompt,
+    build_classify_prompt,
+)
+from services.agent_conversation import (
+    append_assistant_turn,
+    append_tool_result,
+    append_user_turn,
+    load_conversation,
+    save_conversation,
+)
+from services.agent_tool_dispatcher import translate_tool_calls
 from core.config import settings
 from core.exceptions import NotFoundError
 from core.models.event import EventLog
@@ -1349,58 +1363,111 @@ class AgentService:
             if prior_ai_decision:
                 prompt += f"\nPrevious failed decision context: {json.dumps(prior_ai_decision)[:1400]}"
 
+        # Workstream C: tool-use loop. The model emits one or more tool_calls
+        # per turn; the dispatcher translates them back into the legacy
+        # ai_decision dict so the rest of poll() works unchanged.
         provider = get_ai_provider(api_key_override=ai_api_key)
-        prompts = [
-            prompt,
-            prompt + "\n\n## Repair\nYour previous answer may have been malformed or incomplete. "
-            "Return valid JSON only and do not change successful prior context.",
-            prompt + "\n\n## Recovery Reframe\nThe previous strategy was unusable or too passive. "
-            "Choose a different bounded approach that advances the goal from this page and do not repeat a failed strategy.",
-        ]
-        last_response: str | None = None
-        for attempt, attempt_prompt in enumerate(prompts[:SAFETY_LIMITS.get("max_ai_attempts_per_poll", 3)], start=1):
-            _ai_start = time.monotonic()
+        messages = load_conversation(run)
+        messages = append_user_turn(messages, prompt)
+
+        _ai_start = time.monotonic()
+        result: dict[str, Any] | None = None
+        inner_max = max(2, int(SAFETY_LIMITS.get("max_ai_attempts_per_poll", 3)))
+        for attempt in range(1, inner_max + 1):
             try:
-                effective_prompt = attempt_prompt
-                if last_response:
-                    effective_prompt += f"\n\n## Previous AI output to avoid repeating\n{last_response[:1200]}"
-                response = await provider.generate(
-                    effective_prompt,
-                    system=AGENT_EXECUTOR_SYSTEM,
-                    max_tokens=1024,
-                    images=images_kwarg,
+                tool_resp = await provider.generate_with_tools(
+                    messages=messages,
+                    tools=ALL_TOOLS,
+                    system=AGENT_TOOL_USE_SYSTEM,
+                    max_tokens=2048,
+                    images=images_kwarg if attempt == 1 else None,
                 )
-                last_response = response.content[:2000]
-                result = json.loads(response.content)
-                result = self._normalize_ai_decision(result)
-                if not result:
-                    continue
-                if (
-                    (attempt < 3 or recovery_mode)
-                    and result["decision"] == "PAUSE"
-                    and not getattr(ctx, "is_blocking", False)
-                ):
-                    continue
-                result["thinking_steps"] = self._extract_thinking_steps(result)
-                result["prompt_summary"] = prompt[:500]
-                result["latency_ms"] = int((time.monotonic() - _ai_start) * 1000)
-                result["decision_context"] = {
-                    "attempt": attempt,
-                    "strategy": "primary" if attempt == 1 else "repair" if attempt == 2 else "reframe",
-                }
-                # Stash screenshot metadata on the result for the audit path
-                # to persist into AIDecisionOutcome.screenshot_meta. Bytes are
-                # already discarded — only the small meta dict travels onward.
-                if screenshot_meta:
-                    result["screenshot_meta"] = screenshot_meta
-                # Drop the bytes reference so they can be GC'd promptly.
-                images_kwarg = None
-                return result
-            except (json.JSONDecodeError, ValueError):
-                logger.warning("AI agent decision not valid JSON on attempt %s: %s", attempt, (last_response or "")[:200])
             except Exception as exc:
-                logger.warning("AI agent decision call failed on attempt %s: %s", attempt, exc)
-        return None
+                logger.warning("generate_with_tools failed on attempt %s: %s", attempt, exc)
+                break
+
+            # Persist the assistant turn (text + tool_calls) before deciding.
+            messages = append_assistant_turn(
+                messages, tool_resp.content, tool_resp.tool_calls,
+            )
+
+            translated = translate_tool_calls(
+                tool_resp.tool_calls, recorded_step=step,
+            )
+
+            # PLAN_ONLY: model only asked for plan changes. Apply them, feed
+            # back a tool_result acknowledging, and iterate to get an action.
+            if translated and translated.get("decision") == "PLAN_ONLY":
+                applied = await self._apply_plan_updates_from_ai(
+                    run, translated.get("plan_updates"),
+                )
+                # Mirror the assistant's update_plan tool_call in tool_result
+                for tc in tool_resp.tool_calls:
+                    if tc.name == "update_plan":
+                        messages = append_tool_result(
+                            messages, tc.id,
+                            {"ok": True, "applied": len(applied)},
+                        )
+                continue
+
+            if not translated:
+                # Empty turn or unmappable tool — give the model one more
+                # chance by appending a nudge tool_result and iterating.
+                if attempt < inner_max:
+                    messages.append({
+                        "role": "user",
+                        "content": "Your last turn did not call a valid tool. Call exactly one terminal tool now.",
+                    })
+                continue
+
+            # PAUSE early-skip: if the model wants to pause but the page is
+            # not actually blocking and we're not in recovery_mode, nudge it
+            # to pick something else. This preserves the legacy guard.
+            if (
+                attempt < inner_max
+                and translated.get("decision") == "PAUSE"
+                and not getattr(ctx, "is_blocking", False)
+                and not recovery_mode
+            ):
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "PAUSE is reserved for blocking conditions (captcha/login/2FA/"
+                        "unexpected modal). The page is not blocked. Pick a different "
+                        "tool — wait, execute_action with adapted selectors, restart, or rollback."
+                    ),
+                })
+                continue
+
+            # Apply any plan_updates that came alongside the terminal tool.
+            applied_updates = await self._apply_plan_updates_from_ai(
+                run, translated.get("plan_updates"),
+            )
+            if applied_updates:
+                translated["plan_updates"] = applied_updates
+
+            result = translated
+            result["thinking_steps"] = []  # tool-use replaces explicit reasoning chain
+            result["prompt_summary"] = prompt[:500]
+            result["latency_ms"] = int((time.monotonic() - _ai_start) * 1000)
+            result["decision_context"] = {
+                "attempt": attempt,
+                "strategy": "tool_use",
+                "stop_reason": tool_resp.stop_reason,
+                "tokens_in": (tool_resp.usage or {}).get("prompt_tokens", 0),
+                "tokens_out": (tool_resp.usage or {}).get("completion_tokens", 0),
+            }
+            if screenshot_meta:
+                result["screenshot_meta"] = screenshot_meta
+            # Bytes reference dropped so GC can reclaim promptly.
+            images_kwarg = None
+            break
+
+        # Persist updated conversation (trimmed) for the next poll.
+        save_conversation(run, messages)
+        with contextlib.suppress(Exception):
+            await self.session.flush()
+        return result
 
     async def _apply_plan_updates_from_ai(
         self, run: ExecutionRun, raw: Any,

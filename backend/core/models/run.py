@@ -32,3 +32,7 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     # current_step_index; both kept for now during the transition.
     goal_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     extracted_data: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    # Workstream C: rolling OpenAI message list for the tool-use agent loop.
+    # Trimmed to the last N=20 messages with image blocks stripped from prior
+    # turns by `services.agent_conversation`. Bounded so it does not balloon.
+    ai_conversation: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)

@@ -50,30 +50,38 @@ async def test_mock_provider_embed_returns_fixed_size():
 
 
 @pytest.mark.asyncio
-async def test_openai_provider_parses_confidence_from_response(monkeypatch):
+async def test_openai_provider_parses_confidence_from_response():
     """OpenAIProvider parses confidence from the JSON response content."""
-    respx = pytest.importorskip("respx")
-    import httpx
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
-    canned = {
-        "choices": [{"message": {"content": '{"selector":"#x","confidence":0.91,"explanation":"ok"}'}}],
-        "model": "gpt-4o-mini",
-        "usage": {"prompt_tokens": 10, "completion_tokens": 20},
-    }
-    with respx.mock(base_url="https://api.openai.com") as r:
-        r.post("/v1/chat/completions").mock(return_value=httpx.Response(200, json=canned))
-        p = OpenAIProvider(api_key="sk-x")
-        out = await p.generate("test")
+    fake_resp = SimpleNamespace(
+        model="gpt-4o-mini",
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(
+                content='{"selector":"#x","confidence":0.91,"explanation":"ok"}',
+                tool_calls=None,
+            ),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20),
+    )
+    p = OpenAIProvider(api_key="sk-x")
+    p._client.chat.completions.create = AsyncMock(return_value=fake_resp)  # type: ignore[assignment]
+    out = await p.generate("test")
     assert out.confidence == pytest.approx(0.91)
 
 
 @pytest.mark.asyncio
 async def test_openai_provider_propagates_http_error():
-    respx = pytest.importorskip("respx")
-    import httpx
+    """API errors from the SDK bubble up to the caller."""
+    from unittest.mock import AsyncMock
 
-    with respx.mock(base_url="https://api.openai.com") as r:
-        r.post("/v1/chat/completions").mock(return_value=httpx.Response(503, text="overloaded"))
-        p = OpenAIProvider(api_key="sk-x")
-        with pytest.raises(httpx.HTTPStatusError):
-            await p.generate("test")
+    from openai import APIError
+
+    p = OpenAIProvider(api_key="sk-x")
+    p._client.chat.completions.create = AsyncMock(  # type: ignore[assignment]
+        side_effect=APIError("overloaded", request=None, body=None),
+    )
+    with pytest.raises(APIError):
+        await p.generate("test")
