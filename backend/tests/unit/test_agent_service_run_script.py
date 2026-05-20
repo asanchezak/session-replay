@@ -19,7 +19,6 @@ from services.agent_models import (
     SAFETY_LIMITS,
     AgentCommand,
     CommandAction,
-    DecisionType,
     ResultRequest,
 )
 from services.agent_service import AgentService, _run_script_count
@@ -55,7 +54,7 @@ def test_run_script_quota_pauses_on_overflow():
     # The next call should be denied with PAUSE
     overflow = svc._check_run_script_quota(run_id, 5, None)
     assert overflow is not None
-    assert overflow.decision == DecisionType.PAUSE
+    assert overflow.decision == "PAUSE"
     assert overflow.pause_reason == "script_budget_exhausted"
     assert overflow.requires_human is False
     assert overflow.next_step_index == 5

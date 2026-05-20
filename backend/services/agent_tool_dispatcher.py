@@ -82,7 +82,7 @@ def translate_tool_calls(
         # so the caller can apply the plan_updates then re-prompt.
         if plan_updates:
             return {
-                "decision": "PLAN_ONLY",  # sentinel, not a real DecisionType
+                "decision": "PLAN_ONLY",  # sentinel for the inner loop; not a wire decision
                 "confidence": 0.7,
                 "reasoning": "Plan updated; awaiting next action.",
                 "plan_updates": plan_updates,

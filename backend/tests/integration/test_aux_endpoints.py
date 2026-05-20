@@ -11,7 +11,7 @@ from core.models.ai_decision_outcome import AIDecisionOutcome
 from core.models.connector import ConnectorConfig
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow
-from services.agent_models import DecisionType, PollResponse, ResultResponse
+from services.agent_models import PollResponse, ResultResponse
 
 HEADERS = {"X-API-Key": "dev-api-key-change-in-production"}
 
@@ -253,7 +253,7 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
 
     async def _fake_poll(_self, _run_id, _req):
         return PollResponse(
-            decision=DecisionType.EXECUTE,
+            decision="EXECUTE",
             confidence=0.9,
             reasoning="ok",
             command={

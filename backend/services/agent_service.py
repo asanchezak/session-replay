@@ -40,7 +40,7 @@ from services.agent_models import (
     SAFETY_LIMITS,
     AgentCommand,
     CommandAction,
-    DecisionType,
+    DecisionValue,
     PlanUpdate,
     PollRequest,
     PollResponse,
@@ -129,7 +129,7 @@ class AgentService:
                 reasoning += f" (AI: {ai_classification.get('reason', '')})"
 
             await self._audit_decision(
-                run_id, DecisionType.PAUSE, 0.99,
+                run_id, "PAUSE", 0.99,
                 reasoning,
                 pause_reason=f"Blocking challenge detected: {ctx.blocking_type.value}",
                 extra_payload=(
@@ -144,7 +144,7 @@ class AgentService:
                     reason=f"Blocking challenge: {ctx.blocking_type.value}",
                 )
             return PollResponse(
-                decision=DecisionType.PAUSE,
+                decision="PAUSE",
                 confidence=0.99,
                 reasoning=reasoning,
                 pause_reason=f"Blocking challenge detected: {ctx.blocking_type.value}",
@@ -158,7 +158,7 @@ class AgentService:
         }:
             self._clear_recovery_state(run_id)
             return PollResponse(
-                decision=DecisionType.COMPLETED,
+                decision="COMPLETED",
                 confidence=0.99,
                 reasoning=f"Run already terminal: {run.status}",
                 next_step_index=run.current_step_index,
@@ -187,7 +187,7 @@ class AgentService:
         if step_index >= total_steps:
             self._clear_recovery_state(run_id)
             return PollResponse(
-                decision=DecisionType.COMPLETED,
+                decision="COMPLETED",
                 confidence=0.99,
                 reasoning="All steps completed",
                 next_step_index=step_index,
@@ -203,12 +203,12 @@ class AgentService:
             with contextlib.suppress(Exception):
                 await self._maybe_persist_plan_mutations(run)
             await self._audit_decision(
-                run_id, DecisionType.COMPLETED, 0.99,
+                run_id, "COMPLETED", 0.99,
                 "Goal predicate satisfied — workflow objective achieved early",
                 page_context=ctx,
             )
             return PollResponse(
-                decision=DecisionType.COMPLETED,
+                decision="COMPLETED",
                 confidence=0.99,
                 reasoning="Goal predicate satisfied — workflow objective achieved early",
                 next_step_index=step_index,
@@ -245,23 +245,23 @@ class AgentService:
                 total_steps = len(steps)
                 if step_index >= total_steps:
                     return PollResponse(
-                        decision=DecisionType.COMPLETED,
+                        decision="COMPLETED",
                         confidence=0.99,
                         reasoning="All steps completed after plan update",
                         next_step_index=step_index,
                     )
                 step = steps[step_index]
                 command = self._build_command(step)
-                decision_type = DecisionType(ai_decision.get("decision", "EXECUTE"))
+                decision_type: DecisionValue = ai_decision.get("decision", "EXECUTE")
 
-                if decision_type == DecisionType.WAIT:
+                if decision_type == "WAIT":
                     return await self._handle_wait_decision(
                         run=run,
                         step_index=step_index,
                         ai_decision=ai_decision,
                         ctx=ctx,
                     )
-                if decision_type == DecisionType.ADAPT:
+                if decision_type == "ADAPT":
                     adapted_command = self._parse_adapted_command(
                         ai_decision.get("command", {}),
                     )
@@ -279,7 +279,7 @@ class AgentService:
                     _run_step_wait_count.pop((run_id, step_index), None)
                     await self._audit_decision(
                         run_id,
-                        DecisionType.ADAPT,
+                        "ADAPT",
                         ai_decision.get("confidence", 0.7),
                         ai_decision.get("reasoning", "AI-adapted step"),
                         command=adapted_command or command,
@@ -294,17 +294,17 @@ class AgentService:
                         with contextlib.suppress(Exception):
                             await self._transition_to_running(run)
                     return PollResponse(
-                        decision=DecisionType.ADAPT,
+                        decision="ADAPT",
                         confidence=ai_decision.get("confidence", 0.7),
                         reasoning=ai_decision.get("reasoning", "AI-adapted step"),
                         command=adapted_command or command,
                         next_step_index=step_index,
                         plan_updates=applied_updates,
                     )
-                if decision_type == DecisionType.SKIP:
+                if decision_type == "SKIP":
                     await self._audit_decision(
                         run_id,
-                        DecisionType.SKIP,
+                        "SKIP",
                         ai_decision.get("confidence", 0.7),
                         ai_decision.get("reasoning", "AI recommends skipping"),
                         extra_payload={"plan_updates": applied_updates} if applied_updates else None,
@@ -318,21 +318,21 @@ class AgentService:
                     self._clear_recovery_state(run_id)
                     _run_step_wait_count.pop((run_id, step_index), None)
                     return PollResponse(
-                        decision=DecisionType.SKIP,
+                        decision="SKIP",
                         confidence=ai_decision.get("confidence", 0.7),
                         reasoning=ai_decision.get("reasoning", "Step skipped by AI"),
                         next_step_index=step_index + 1,
                         plan_updates=applied_updates,
                     )
-                if decision_type == DecisionType.RESTART:
+                if decision_type == "RESTART":
                     return await self._handle_restart_decision(
                         run, step_index, ai_decision, ctx,
                     )
-                if decision_type == DecisionType.ROLLBACK:
+                if decision_type == "ROLLBACK":
                     return await self._handle_rollback_decision(
                         run, step_index, ai_decision, ctx,
                     )
-                if decision_type == DecisionType.PAUSE:
+                if decision_type == "PAUSE":
                     return await self._autonomous_recovery_cycle(
                         run=run,
                         step_index=step_index,
@@ -360,7 +360,7 @@ class AgentService:
         _run_step_wait_count.pop((run_id, step_index), None)
         await self._audit_decision(
             run_id,
-            DecisionType.EXECUTE,
+            "EXECUTE",
             ai_conf,
             f"{reason_prefix}: execute step {step_index} ({step.get('action_type', '')})",
             command=command,
@@ -378,7 +378,7 @@ class AgentService:
                 logger.warning("Could not transition run %s to running: %s", run_id, e)
 
         return PollResponse(
-            decision=DecisionType.EXECUTE,
+            decision="EXECUTE",
             confidence=0.99,
             reasoning=f"Executing step {step_index}: {step.get('action_type', '')}",
             command=command,
@@ -555,7 +555,7 @@ class AgentService:
             reason = f"run_script budget exhausted ({current}/{cap})"
             logger.warning("Run %s exceeded run_script quota: %s", run_id, reason)
             return PollResponse(
-                decision=DecisionType.PAUSE,
+                decision="PAUSE",
                 confidence=0.99,
                 reasoning=reason,
                 pause_reason="script_budget_exhausted",
@@ -666,7 +666,7 @@ class AgentService:
         await self.session.flush()
         self._clear_recovery_state(run_id)
         return PollResponse(
-            decision=DecisionType.PAUSE,
+            decision="PAUSE",
             confidence=1.0,
             reasoning=summary,
             pause_reason=summary,
@@ -715,12 +715,12 @@ class AgentService:
         )
 
         if ai_recovery:
-            decision_type = DecisionType(ai_recovery.get("decision", "WAIT"))
-            if decision_type == DecisionType.ADAPT:
+            decision_type: DecisionValue = ai_recovery.get("decision", "WAIT")
+            if decision_type == "ADAPT":
                 adapted_command = self._parse_adapted_command(ai_recovery.get("command", {}))
                 await self._audit_decision(
                     run_id,
-                    DecisionType.ADAPT,
+                    "ADAPT",
                     ai_recovery.get("confidence", 0.65),
                     ai_recovery.get("reasoning", "Recovery adaptation"),
                     command=adapted_command or self._build_command(step),
@@ -731,21 +731,21 @@ class AgentService:
                     extra_payload={"recovery_cycle": cycle, "recovery_trigger": trigger},
                 )
                 return PollResponse(
-                    decision=DecisionType.ADAPT,
+                    decision="ADAPT",
                     confidence=ai_recovery.get("confidence", 0.65),
                     reasoning=ai_recovery.get("reasoning", "Recovery adaptation"),
                     command=adapted_command or self._build_command(step),
                     next_step_index=step_index,
                 )
-            if decision_type == DecisionType.RESTART:
+            if decision_type == "RESTART":
                 return await self._handle_restart_decision(run, step_index, ai_recovery, ctx)
-            if decision_type == DecisionType.ROLLBACK:
+            if decision_type == "ROLLBACK":
                 return await self._handle_rollback_decision(run, step_index, ai_recovery, ctx)
-            if decision_type == DecisionType.EXECUTE:
+            if decision_type == "EXECUTE":
                 command = self._build_command(step)
                 await self._audit_decision(
                     run_id,
-                    DecisionType.EXECUTE,
+                    "EXECUTE",
                     ai_recovery.get("confidence", 0.6),
                     ai_recovery.get("reasoning", "Recovery execute"),
                     command=command,
@@ -756,7 +756,7 @@ class AgentService:
                     extra_payload={"recovery_cycle": cycle, "recovery_trigger": trigger},
                 )
                 return PollResponse(
-                    decision=DecisionType.EXECUTE,
+                    decision="EXECUTE",
                     confidence=ai_recovery.get("confidence", 0.6),
                     reasoning=ai_recovery.get("reasoning", "Recovery execute"),
                     command=command,
@@ -767,7 +767,7 @@ class AgentService:
         fallback_wait_ms = max(SAFETY_LIMITS["wait_min_ms"], 1200)
         await self._audit_decision(
             run_id,
-            DecisionType.WAIT,
+            "WAIT",
             0.45,
             f"Recovery cycle {cycle} ({strategy}) still in progress",
             step_index=step_index,
@@ -784,7 +784,7 @@ class AgentService:
         if timeout_response:
             return timeout_response
         return PollResponse(
-            decision=DecisionType.WAIT,
+            decision="WAIT",
             confidence=0.45,
             reasoning=f"Recovery cycle {cycle} ({strategy}) still in progress",
             next_step_index=step_index,
@@ -811,7 +811,7 @@ class AgentService:
             reasoning = "AI output unusable; executing deterministic navigate fallback"
             await self._audit_decision(
                 run_id,
-                DecisionType.EXECUTE,
+                "EXECUTE",
                 0.7,
                 reasoning,
                 command=command,
@@ -820,7 +820,7 @@ class AgentService:
                 decision_context={"origin": "ai-fallback", "step_action": step.get("action_type")},
             )
             return PollResponse(
-                decision=DecisionType.EXECUTE,
+                decision="EXECUTE",
                 confidence=0.7,
                 reasoning=reasoning,
                 command=command,
@@ -880,7 +880,7 @@ class AgentService:
         _run_total_waits[run_id] = total_waits + 1
         await self._audit_decision(
             run_id,
-            DecisionType.WAIT,
+            "WAIT",
             ai_decision.get("confidence", 0.45),
             ai_decision.get("reasoning", "Waiting for the page to settle"),
             extra_payload={"wait_ms": wait_ms, "wait_count": _run_step_wait_count[step_key]},
@@ -890,7 +890,7 @@ class AgentService:
             decision_context=ai_decision.get("decision_context"),
         )
         return PollResponse(
-            decision=DecisionType.WAIT,
+            decision="WAIT",
             confidence=ai_decision.get("confidence", 0.45),
             reasoning=ai_decision.get("reasoning", "Waiting for the page to settle"),
             next_step_index=step_index,
@@ -917,7 +917,7 @@ class AgentService:
         command = AgentCommand(action=CommandAction.NAVIGATE, value=restart_url, target=restart_url)
         await self._audit_decision(
             run_id,
-            DecisionType.RESTART,
+            "RESTART",
             ai_decision.get("confidence", 0.7),
             ai_decision.get("reasoning", "Restarting from the target URL"),
             command=command,
@@ -927,7 +927,7 @@ class AgentService:
             decision_context=ai_decision.get("decision_context"),
         )
         return PollResponse(
-            decision=DecisionType.RESTART,
+            decision="RESTART",
             confidence=ai_decision.get("confidence", 0.7),
             reasoning=ai_decision.get("reasoning", "Restarting from the target URL"),
             command=command,
@@ -1008,7 +1008,7 @@ class AgentService:
         )
         await self._audit_decision(
             run_id,
-            DecisionType.ROLLBACK,
+            "ROLLBACK",
             ai_decision.get("confidence", 0.7),
             ai_decision.get("reasoning", f"Rolling back to checkpoint {rollback_to}"),
             command=command,
@@ -1018,7 +1018,7 @@ class AgentService:
             decision_context=ai_decision.get("decision_context"),
         )
         return PollResponse(
-            decision=DecisionType.ROLLBACK,
+            decision="ROLLBACK",
             confidence=ai_decision.get("confidence", 0.7),
             reasoning=ai_decision.get("reasoning", f"Rolling back to checkpoint {rollback_to}"),
             command=command,
@@ -1643,7 +1643,7 @@ class AgentService:
                 run_id=run_id,
             ))
             await self._audit_decision(
-                run_id, DecisionType.EXECUTE, 0.99,
+                run_id, "EXECUTE", 0.99,
                 f"Step {req.step_index} succeeded",
             )
 
@@ -1658,7 +1658,7 @@ class AgentService:
                     await self._maybe_persist_plan_mutations(run)
                 return ResultResponse(
                     accepted=True,
-                    decision=DecisionType.COMPLETED,
+                    decision="COMPLETED",
                     next_step_index=run.current_step_index,
                     should_poll=False,
                 )
@@ -1671,7 +1671,7 @@ class AgentService:
                     await self._maybe_persist_plan_mutations(run)
                 return ResultResponse(
                     accepted=True,
-                    decision=DecisionType.COMPLETED,
+                    decision="COMPLETED",
                     next_step_index=run.current_step_index,
                     should_poll=False,
                 )
@@ -1779,7 +1779,7 @@ class AgentService:
             except Exception:
                 pass
             await self._audit_decision(
-                run_id, DecisionType.SKIP, analysis.get("confidence", 0.6),
+                run_id, "SKIP", analysis.get("confidence", 0.6),
                 f"Last-chance AI recommends SKIP for step {step_index}: "
                 f"{analysis.get('analysis', '')[:160]}",
                 extra_payload={"ai_analysis": analysis, "last_chance": True},
@@ -1788,7 +1788,7 @@ class AgentService:
             await self.session.refresh(run)
             return ResultResponse(
                 accepted=True,
-                decision=DecisionType.SKIP,
+                decision="SKIP",
                 next_step_index=run.current_step_index,
                 ai_analysis=analysis,
             )
@@ -1808,14 +1808,14 @@ class AgentService:
             except Exception:
                 pass
             await self._audit_decision(
-                run_id, DecisionType.ADAPT, analysis.get("confidence", 0.7),
+                run_id, "ADAPT", analysis.get("confidence", 0.7),
                 f"Last-chance AI adaptation for step {step_index}: "
                 f"{analysis.get('analysis', '')[:160]}",
                 extra_payload={"ai_analysis": analysis, "last_chance": True},
             )
             return ResultResponse(
                 accepted=True,
-                decision=DecisionType.ADAPT,
+                decision="ADAPT",
                 next_step_index=step_index,
                 ai_analysis=analysis,
             )
@@ -1922,7 +1922,7 @@ class AgentService:
     async def _audit_decision(
         self,
         run_id: str,
-        decision: DecisionType,
+        decision: DecisionValue,
         confidence: float,
         reasoning: str,
         command: AgentCommand | None = None,
@@ -1935,7 +1935,7 @@ class AgentService:
         screenshot_meta: dict | None = None,
     ) -> None:
         payload: dict[str, Any] = {
-            "decision": decision.value,
+            "decision": decision,
             "confidence": confidence,
             "reasoning": reasoning,
             "command": command.model_dump() if command else None,
@@ -1967,7 +1967,7 @@ class AgentService:
             await self.ai_outcomes.record_decision(
                 run_id=run_id,
                 step_index=effective_step_int,
-                decision=decision.value,
+                decision=decision,
                 confidence=confidence,
                 reasoning=reasoning,
                 model=model_name,
@@ -1989,7 +1989,7 @@ class AgentService:
                 await self.ai_outcomes.record_reasoning_chain(
                     run_id=run_id,
                     step_index=effective_step_int,
-                    decision=decision.value,
+                    decision=decision,
                     thinking_steps=thinking_steps,
                     full_reasoning=reasoning,
                     invocation_type="step_decision",

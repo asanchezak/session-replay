@@ -6,17 +6,21 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class DecisionType(str, Enum):
-    EXECUTE = "EXECUTE"
-    SKIP = "SKIP"
-    RETRY = "RETRY"
-    HEAL = "HEAL"
-    ADAPT = "ADAPT"
-    WAIT = "WAIT"
-    RESTART = "RESTART"
-    ROLLBACK = "ROLLBACK"
-    PAUSE = "PAUSE"
-    COMPLETED = "COMPLETED"
+# Workstream E: the decision verb on the wire. Ten string literals; the
+# extension dispatcher in service-worker.ts switches on these strings
+# literally — they must stay in sync.
+DecisionValue = Literal[
+    "EXECUTE",
+    "SKIP",
+    "RETRY",
+    "HEAL",
+    "ADAPT",
+    "WAIT",
+    "RESTART",
+    "ROLLBACK",
+    "PAUSE",
+    "COMPLETED",
+]
 
 
 class CommandAction(str, Enum):
@@ -93,7 +97,7 @@ class PlanUpdate(BaseModel):
 
 
 class AgentDecision(BaseModel):
-    decision: DecisionType
+    decision: DecisionValue
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str = ""
     command: AgentCommand | None = None
@@ -113,7 +117,7 @@ class PollRequest(BaseModel):
 
 
 class PollResponse(BaseModel):
-    decision: DecisionType
+    decision: DecisionValue
     confidence: float
     reasoning: str
     command: AgentCommand | None = None
@@ -143,7 +147,7 @@ class ResultRequest(BaseModel):
 
 class ResultResponse(BaseModel):
     accepted: bool
-    decision: DecisionType | None = None
+    decision: DecisionValue | None = None
     next_step_index: int | None = None
     ai_analysis: dict[str, Any] | None = None
     should_poll: bool = False
@@ -158,24 +162,6 @@ class DashboardActionResponse(BaseModel):
     accepted: bool
     pending_action: str | None = None
 
-
-CONFIDENCE_THRESHOLDS: dict[DecisionType, float] = {
-    DecisionType.EXECUTE: 0.70,
-    DecisionType.SKIP: 0.80,
-    DecisionType.RETRY: 0.60,
-    DecisionType.HEAL: 0.85,
-    DecisionType.ADAPT: 0.90,
-    DecisionType.WAIT: 0.40,
-    DecisionType.RESTART: 0.70,
-    DecisionType.ROLLBACK: 0.70,
-    DecisionType.PAUSE: 0.50,
-}
-
-CONFIDENCE_DOWNGRADE_CHAIN: list[tuple[DecisionType, DecisionType]] = [
-    (DecisionType.ADAPT, DecisionType.HEAL),
-    (DecisionType.HEAL, DecisionType.RETRY),
-    (DecisionType.RETRY, DecisionType.PAUSE),
-]
 
 SAFETY_LIMITS = {
     "max_retries_per_step": 3,

@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models.workflow import Workflow
 from services.agent_models import (
     SAFETY_LIMITS,
-    DecisionType,
     PageContext,
     PollRequest,
     ResultRequest,
@@ -78,7 +77,7 @@ async def test_poll_returns_execute_for_first_step(db_session: AsyncSession):
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
 
-    assert response.decision == DecisionType.EXECUTE
+    assert response.decision == "EXECUTE"
     assert response.confidence == 0.99
     assert response.command is not None
     assert response.command.action.value == "navigate"
@@ -109,7 +108,7 @@ async def test_poll_returns_completed_after_all_steps(db_session: AsyncSession):
         PollRequest(page_context=_make_context(), current_step_index=1),
     )
 
-    assert response.decision == DecisionType.COMPLETED
+    assert response.decision == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -140,7 +139,7 @@ async def test_poll_pauses_on_blocking_challenge(db_session: AsyncSession):
         ),
     )
 
-    assert response.decision == DecisionType.PAUSE
+    assert response.decision == "PAUSE"
     assert response.requires_human is True
     assert "captcha" in (response.pause_reason or "").lower()
 
@@ -449,7 +448,7 @@ async def test_poll_returns_wait_keeps_run_running(
     )
 
     await db_session.refresh(run)
-    assert response.decision == DecisionType.WAIT
+    assert response.decision == "WAIT"
     assert response.wait_ms == 1800
     assert run.status == "running"
 
@@ -493,7 +492,7 @@ async def test_consecutive_waits_escalate_to_autonomous_recovery(
             PollRequest(page_context=_make_context(), current_step_index=0),
         )
     assert response is not None
-    assert response.decision == DecisionType.WAIT
+    assert response.decision == "WAIT"
     assert response.requires_human is False
 
 
@@ -524,7 +523,7 @@ async def test_ai_unusable_output_stays_autonomous_not_waiting_for_user(
     )
     await db_session.refresh(run)
 
-    assert resp.decision == DecisionType.WAIT
+    assert resp.decision == "WAIT"
     assert resp.requires_human is False
     assert run.status == "running"
 
@@ -561,7 +560,7 @@ async def test_recovery_window_timeout_fails_run_with_no_human_pause(
     )
     await db_session.refresh(run)
 
-    assert resp.decision == DecisionType.PAUSE
+    assert resp.decision == "PAUSE"
     assert resp.requires_human is False
     assert run.status == "failed"
     assert "window expired" in (run.error_summary or "").lower()
@@ -608,7 +607,7 @@ async def test_poll_restart_restores_original_snapshot(
     )
 
     await db_session.refresh(run)
-    assert response.decision == DecisionType.RESTART
+    assert response.decision == "RESTART"
     assert response.next_step_index == 0
     assert run.current_step_index == 0
     assert run.workflow_snapshot["steps"][0]["intent"] == "Step 0"
@@ -651,7 +650,7 @@ async def test_handle_restart_uses_recorded_navigate_not_metadata_target(
     )
 
     await db_session.refresh(run)
-    assert response.decision == DecisionType.RESTART
+    assert response.decision == "RESTART"
     assert response.command is not None
     assert response.command.value == "https://www.speedtest.net/es"
     assert run.current_step_index == 0
@@ -690,7 +689,7 @@ async def test_handle_restart_falls_back_to_ai_command_when_no_navigate_steps(
         _make_context(url="https://broken.example"),
     )
 
-    assert response.decision == DecisionType.RESTART
+    assert response.decision == "RESTART"
     assert response.command is not None
     assert response.command.value == "https://example.org/restart"
 
@@ -747,7 +746,7 @@ async def test_poll_rollback_to_checkpoint(
     )
 
     await db_session.refresh(run)
-    assert response.decision == DecisionType.ROLLBACK
+    assert response.decision == "ROLLBACK"
     assert response.next_step_index == 0
     assert response.command is not None
     assert response.command.value == "https://example.com/checkpoint"
@@ -803,7 +802,7 @@ async def test_poll_with_current_step_index_parameter(db_session: AsyncSession):
         PollRequest(page_context=_make_context(), current_step_index=1),
     )
 
-    assert response.decision == DecisionType.EXECUTE
+    assert response.decision == "EXECUTE"
     assert response.command.action.value == "type"
     assert response.command.value == "hello"
 
@@ -829,7 +828,7 @@ async def test_poll_ignores_stale_client_cursor_for_completion(db_session: Async
         PollRequest(page_context=_make_context(), current_step_index=999),
     )
 
-    assert response.decision == DecisionType.EXECUTE
+    assert response.decision == "EXECUTE"
     assert response.next_step_index == 0
 
 
@@ -953,7 +952,7 @@ async def test_last_chance_recovery_adapts_instead_of_pausing(
     assert agent._analyze_failure.await_count >= 1
     last_call = agent._analyze_failure.await_args_list[-1]
     assert last_call.kwargs.get("last_chance") is True
-    assert final.decision in (DecisionType.ADAPT, DecisionType.SKIP)
+    assert final.decision in ("ADAPT", "SKIP")
 
 
 @pytest.mark.asyncio
@@ -1155,7 +1154,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
     )
     skip = await agent._last_chance_recovery(run, 0, "err", None, 0)
     assert skip is not None
-    assert skip.decision == DecisionType.SKIP
+    assert skip.decision == "SKIP"
 
     monkeypatch.setattr(
         agent,
@@ -1173,7 +1172,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
     )
     adapt = await agent._last_chance_recovery(run, 0, "err", None, 1)
     assert adapt is not None
-    assert adapt.decision == DecisionType.ADAPT
+    assert adapt.decision == "ADAPT"
 
     monkeypatch.setattr(
         agent,
@@ -1202,7 +1201,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
         run_id,
         ResultRequest(step_index=run.current_step_index, success=True),
     )
-    assert result_completed.decision == DecisionType.COMPLETED
+    assert result_completed.decision == "COMPLETED"
 
     run2 = await svc.create_run(workflow_id=str(workflow.id))
     run2.workflow_snapshot = _make_run_snapshot([_make_step(0, "click")])
@@ -1210,7 +1209,7 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
     run2.status = "running"
     await db_session.flush()
     result_terminal = await agent.report_result(str(run2.id), ResultRequest(step_index=0, success=True))
-    assert result_terminal.decision == DecisionType.COMPLETED
+    assert result_terminal.decision == "COMPLETED"
 
     fail_result = await agent.report_result(
         run_id,
@@ -1259,7 +1258,7 @@ async def test_poll_ai_adapt_skip_and_nonblocking_pause_recovery(db_session: Asy
 
     monkeypatch.setattr(agent, "_consult_ai_for_step", _adapt)
     adapt = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
-    assert adapt.decision == DecisionType.ADAPT
+    assert adapt.decision == "ADAPT"
     assert _run_adapt_count[run_id] >= 1
 
     run.status = "running"
@@ -1277,7 +1276,7 @@ async def test_poll_ai_adapt_skip_and_nonblocking_pause_recovery(db_session: Asy
 
     monkeypatch.setattr(agent, "_consult_ai_for_step", _skip)
     skip = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
-    assert skip.decision == DecisionType.SKIP
+    assert skip.decision == "SKIP"
     await db_session.refresh(run)
     assert run.current_step_index == 1
 
@@ -1293,7 +1292,7 @@ async def test_poll_ai_adapt_skip_and_nonblocking_pause_recovery(db_session: Asy
 
     monkeypatch.setattr(agent, "_consult_ai_for_step", _pause)
     pause = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=1))
-    assert pause.decision == DecisionType.WAIT
+    assert pause.decision == "WAIT"
     assert pause.requires_human is False
 
 
@@ -1348,7 +1347,7 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
             current_step_index=0,
         ),
     )
-    assert blocking.decision == DecisionType.PAUSE
+    assert blocking.decision == "PAUSE"
 
     run.status = "queued"
     await db_session.flush()
@@ -1357,7 +1356,7 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
     monkeypatch.setattr(agent, "_transition_to_running", _boom_transition)
     monkeypatch.setattr(settings, "ai_api_key", "", raising=False)
     fast = await agent.poll(run_id, PollRequest(page_context=_make_context(), current_step_index=0))
-    assert fast.decision == DecisionType.EXECUTE
+    assert fast.decision == "EXECUTE"
 
     assert AgentService._selectors_look_fragile([{"type": "css", "value": "[data-testid='x']", "score": 0.8}, "bad"]) is False
     assert AgentService._extract_thinking_steps({"thinking_steps": "bad"}) == []
@@ -1370,7 +1369,7 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
         {},
         types.SimpleNamespace(page_diff={"added": [1]}, visible_elements=[], visible_text=""),
     )
-    assert wait_fallback is not None and wait_fallback.decision == DecisionType.WAIT
+    assert wait_fallback is not None and wait_fallback.decision == "WAIT"
 
     execute_fallback = await agent._fallback_after_ai_failure(
         run,
@@ -1378,20 +1377,20 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
         {"action_type": "navigate", "value": "https://www.speedtest.net/es", "selector_chain": []},
         types.SimpleNamespace(page_diff={}, visible_elements=[{"selector": "x"}], visible_text="ready"),
     )
-    assert execute_fallback is not None and execute_fallback.decision == DecisionType.EXECUTE
+    assert execute_fallback is not None and execute_fallback.decision == "EXECUTE"
     assert execute_fallback.command is not None
     assert execute_fallback.command.value == "https://www.speedtest.net/es"
 
     _run_restart_count[run_id] = 99
     restart = await agent._handle_restart_decision(run, 0, {}, _make_context())
-    assert restart.decision == DecisionType.WAIT
+    assert restart.decision == "WAIT"
 
     rollback = await agent._handle_rollback_decision(run, 1, {"rollback_to": "x"}, _make_context())
-    assert rollback.decision == DecisionType.WAIT
+    assert rollback.decision == "WAIT"
     rollback2 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 5}, _make_context())
-    assert rollback2.decision == DecisionType.WAIT
+    assert rollback2.decision == "WAIT"
     rollback3 = await agent._handle_rollback_decision(run, 1, {"rollback_to": 0}, _make_context())
-    assert rollback3.decision == DecisionType.WAIT
+    assert rollback3.decision == "WAIT"
 
     from services.audit import AppendEvent, AuditService
     await AuditService(db_session).append(AppendEvent(event_type="checkpoint", payload={"step_index": 0, "success": False}, run_id=run_id))
@@ -1432,4 +1431,4 @@ async def test_agent_remaining_branch_coverage(db_session: AsyncSession, monkeyp
     await agent.report_result(run_id, ResultRequest(step_index=0, success=False, error="e"))
 
     monkeypatch.setattr(agent.ai_outcomes, "record_decision", AsyncMock(side_effect=RuntimeError("nope")))
-    await agent._audit_decision(run_id, DecisionType.EXECUTE, 0.9, "x")
+    await agent._audit_decision(run_id, "EXECUTE", 0.9, "x")

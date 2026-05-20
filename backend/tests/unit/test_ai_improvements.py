@@ -20,7 +20,7 @@ from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow, WorkflowStep
 from core.config import settings
-from services.agent_models import DecisionType, PageContext, PollRequest
+from services.agent_models import PageContext, PollRequest
 from services.agent_service import AgentService
 from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
@@ -168,7 +168,7 @@ async def test_goal_url_matches_returns_completed(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
     assert "Goal predicate" in resp.reasoning
 
 
@@ -192,7 +192,7 @@ async def test_goal_url_no_match_continues(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ async def test_goal_text_present_returns_completed(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_goal_text_missing_continues(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -263,7 +263,7 @@ async def test_goal_element_visible_returns_completed(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -286,7 +286,7 @@ async def test_goal_element_not_found_continues(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -307,7 +307,7 @@ async def test_goal_extract_count_satisfied(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -328,7 +328,7 @@ async def test_goal_extract_count_insufficient(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -343,7 +343,7 @@ async def test_no_goal_predicate_key(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -360,7 +360,7 @@ async def test_goal_predicate_missing_type(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -380,7 +380,7 @@ async def test_goal_predicate_unknown_type(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -397,7 +397,7 @@ async def test_no_analysis_in_snapshot(db_session: AsyncSession):
         str(run.id),
         PollRequest(page_context=_make_context(), current_step_index=0),
     )
-    assert resp.decision == DecisionType.EXECUTE
+    assert resp.decision == "EXECUTE"
 
 
 @pytest.mark.asyncio
@@ -420,7 +420,7 @@ async def test_goal_satisfied_at_step_0(db_session: AsyncSession):
             current_step_index=0,
         ),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
     # Verify audit event logged with early-termination reasoning.
     events = (await db_session.execute(
         select(EventLog)
@@ -452,7 +452,7 @@ async def test_goal_satisfied_mid_workflow(db_session: AsyncSession):
             current_step_index=3,
         ),
     )
-    assert resp.decision == DecisionType.COMPLETED
+    assert resp.decision == "COMPLETED"
 
 
 # ---------------------------------------------------------------------------

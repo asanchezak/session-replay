@@ -48,7 +48,7 @@ from core.models.ai_decision_outcome import AIDecisionOutcome
 from core.models.connector import ConnectorConfig
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow
-from services.agent_models import DecisionType, PollResponse, ResultResponse
+from services.agent_models import PollResponse, ResultResponse
 from services.execution_service import ExecutionService
 from services.workflow_service import WorkflowService
 
@@ -309,7 +309,7 @@ async def test_analysis_ai_agent_events_audit_debug_and_artifacts_routes(db_sess
     assert (await extract_data(ExtractRequest(page_content="x", extraction_schema={})))["data"] == "ok"
 
     poll_resp = PollResponse(
-        decision=DecisionType.EXECUTE,
+        decision="EXECUTE",
         confidence=0.8,
         reasoning="ok",
         command={"action": "click", "target": None, "value": None, "selector_chain": [], "intent": None, "methods": [], "timeout_ms": 1000, "success_condition": None},
@@ -319,7 +319,7 @@ async def test_analysis_ai_agent_events_audit_debug_and_artifacts_routes(db_sess
         return poll_resp
     monkeypatch.setattr("services.agent_service.AgentService.poll", _poll)
     poll = await agent_poll(run_id, types.SimpleNamespace(page_context=types.SimpleNamespace(url="u", title="t", dom_snippet="", accessibility_tree="", visible_text="", visible_elements=[], is_blocking=False, blocking_type=None, page_unchanged=False), current_step_index=0), db=db_session)
-    assert poll.decision == DecisionType.EXECUTE
+    assert poll.decision == "EXECUTE"
 
     async def _result(*_args, **_kwargs):
         return ResultResponse(accepted=True, decision=None, next_step_index=1)
