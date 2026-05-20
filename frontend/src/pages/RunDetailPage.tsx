@@ -21,6 +21,31 @@ interface WorkflowStep {
   value?: string;
 }
 
+interface ScreenshotMeta {
+  sha256: string;
+  width: number;
+  height: number;
+  mime: string;
+  byte_size: number;
+  trigger: string;
+  detail: "low" | "high";
+}
+
+interface AIDecisionOutcome {
+  id: string;
+  step_index: number;
+  decision: string;
+  confidence: number | null;
+  actual_outcome: string | null;
+  latency_ms: number | null;
+  model: string | null;
+  prompt_hash: string | null;
+  reasoning: string | null;
+  screenshot_meta: ScreenshotMeta | null;
+  created_at: string | null;
+  resolved_at: string | null;
+}
+
 interface GoalProgressPhase {
   name: string;
   goal?: string;
@@ -182,6 +207,11 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [workflow, setWorkflow] = useState<WorkflowDetail | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  // Workstream F: per-step decision outcomes — used to render the Vision chip
+  // when the AI received a screenshot on a step's decision. Keyed by step_index
+  // so the timeline can do an O(1) lookup. Records keep the latest outcome
+  // per step (later decisions overwrite earlier ones in the same run).
+  const [outcomesByStep, setOutcomesByStep] = useState<Record<number, AIDecisionOutcome>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -214,6 +244,22 @@ export default function RunDetailPage() {
     } catch {}
   }, [runId, request]);
 
+  const fetchOutcomes = useCallback(async () => {
+    if (!runId || runId === "pending") return;
+    try {
+      const data = await request<AIDecisionOutcome[]>(
+        "GET", `/agent/${runId}/outcomes?limit=500`,
+      );
+      // Keep the latest outcome per step. Backend returns ascending by
+      // created_at, so a later assignment naturally wins on conflict.
+      const byStep: Record<number, AIDecisionOutcome> = {};
+      for (const o of data) byStep[o.step_index] = o;
+      setOutcomesByStep(byStep);
+    } catch {
+      /* Best-effort — vision chip is non-critical UI. */
+    }
+  }, [runId, request]);
+
   const fetchWorkflow = useCallback(async (workflowId: string) => {
     try {
       const data = await request<WorkflowDetail>("GET", `/workflows/${workflowId}`);
@@ -231,7 +277,7 @@ export default function RunDetailPage() {
       return;
     }
     setLoading(true);
-    Promise.all([fetchRun(), fetchEvents()]).finally(() => setLoading(false));
+    Promise.all([fetchRun(), fetchEvents(), fetchOutcomes()]).finally(() => setLoading(false));
   }, [runId]);
 
   useEffect(() => {
@@ -255,6 +301,7 @@ export default function RunDetailPage() {
     pollingRef.current = setInterval(() => {
       fetchRun();
       fetchEvents();
+      fetchOutcomes();
     }, intervalMs);
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
@@ -373,7 +420,7 @@ export default function RunDetailPage() {
         </button>
         <Banner type="error" title="Error loading run" action={
           <button
-            onClick={() => { setError(null); setLoading(true); Promise.all([fetchRun(), fetchEvents()]).finally(() => setLoading(false)); }}
+            onClick={() => { setError(null); setLoading(true); Promise.all([fetchRun(), fetchEvents(), fetchOutcomes()]).finally(() => setLoading(false)); }}
             className="text-sm text-accent hover:text-accent-hover"
           >
             Retry
@@ -664,6 +711,22 @@ export default function RunDetailPage() {
                       <span className="text-text-gray text-xs font-mono truncate max-w-[120px]">
                         "{step.value.slice(0, 30)}"
                       </span>
+                    )}
+                    {outcomesByStep[step.step_index]?.screenshot_meta && (
+                      (() => {
+                        const m = outcomesByStep[step.step_index].screenshot_meta!;
+                        return (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded bg-accent/20 text-accent flex items-center gap-1 flex-shrink-0"
+                            title={`Screenshot: ${m.width}×${m.height} (${m.detail}, ${m.byte_size}B, trigger=${m.trigger})`}
+                            aria-label={`Vision: AI received a screenshot for this decision (${m.detail} detail, ${m.byte_size} bytes, trigger ${m.trigger})`}
+                            data-testid={`vision-chip-step-${step.step_index}`}
+                          >
+                            <Eye size={10} aria-hidden />
+                            Vision
+                          </span>
+                        );
+                      })()
                     )}
                     <span className="text-xs flex-shrink-0" style={{ color: cfg.color }}>
                       {status === "completed" ? "Done" : status === "running" ? "Running" : status === "recovering" ? "Healing" : status === "waiting" ? "Paused" : status === "failed" ? "Failed" : ""}

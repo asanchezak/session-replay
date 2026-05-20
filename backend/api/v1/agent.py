@@ -113,6 +113,10 @@ async def agent_outcomes(
             "model": r.model,
             "prompt_hash": r.prompt_hash,
             "reasoning": r.reasoning,
+            # Workstream B: lightweight metadata for vision-triggered decisions.
+            # Bytes are never stored; this dict (sha256, dims, mime, byte_size,
+            # trigger, detail) proves the AI saw an image at this decision.
+            "screenshot_meta": r.screenshot_meta,
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
         }
