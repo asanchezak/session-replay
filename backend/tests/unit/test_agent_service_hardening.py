@@ -369,6 +369,96 @@ def test_extract_click_label_from_intent_when_value_missing():
     assert AgentService._extract_click_label({"action_type": "click", "intent": "Click Iniciar"}) == "Iniciar"
 
 
+def test_extract_click_label_prefers_quoted_intent_text():
+    step = {
+        "action_type": "click",
+        "intent": 'Click on "Write a message…" (labeled "Write a message…")',
+        "value": None,
+        "selector_chain": [],
+    }
+    assert AgentService._extract_click_label(step) == "Write a message…"
+
+
+def test_linkedin_site_command_compiles_messaging_steps(db_session: AsyncSession):
+    agent = AgentService(db_session)
+    ctx = PageContext(url="https://www.linkedin.com/feed/", title="LinkedIn")
+
+    cmd = agent._build_linkedin_site_command(
+        {
+            "action_type": "click",
+            "intent": "Click the button \"Send\"",
+            "value": "Send",
+            "selector_chain": [
+                {
+                    "type": "shadow_css",
+                    "value": '{"host_chain":["div[data-testid=\\"interop-shadowdom\\"]"],"target":"button"}',
+                }
+            ],
+        },
+        ctx,
+    )
+    assert cmd is not None
+    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["operation"] == "send_message"
+    assert cmd.script_args["scope"] == "messaging_dock"
+
+
+def test_linkedin_site_command_compiles_general_nav_click(db_session: AsyncSession):
+    agent = AgentService(db_session)
+    cmd = agent._build_linkedin_site_command(
+        {
+            "action_type": "click",
+            "intent": "Click Messaging",
+            "value": "Messaging",
+            "selector_chain": [],
+        },
+        PageContext(url="https://www.linkedin.com/feed/", title="LinkedIn"),
+    )
+    assert cmd is not None
+    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["operation"] == "open_messaging_dock"
+
+
+def test_linkedin_site_command_uses_intent_when_context_url_is_stale(db_session: AsyncSession):
+    agent = AgentService(db_session)
+    cmd = agent._build_linkedin_site_command(
+        {
+            "action_type": "click",
+            "intent": "Click Home in the LinkedIn top navigation",
+            "value": "Home",
+            "selector_chain": [{"type": "text", "value": "Home"}],
+        },
+        PageContext(url="about:blank", title="Transitioning"),
+    )
+    assert cmd is not None
+    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["operation"] == "click"
+    assert cmd.script_args["scope"] == "global_nav"
+    assert cmd.script_args["label"] == "Home"
+
+
+def test_linkedin_site_type_message_uses_visible_text_condition(db_session: AsyncSession):
+    agent = AgentService(db_session)
+    cmd = agent._build_linkedin_site_command(
+        {
+            "action_type": "type",
+            "intent": 'Type "Hello" into div (labeled "Write a message…")',
+            "value": "Hello",
+            "selector_chain": [
+                {
+                    "type": "shadow_css",
+                    "value": '{"host_chain":["div[data-testid=\\"interop-shadowdom\\"]"],"target":"[role=\\"textbox\\"]"}',
+                }
+            ],
+            "success_condition": {"type": "input_value_contains", "value": "Hello"},
+        },
+        PageContext(url="https://www.linkedin.com/feed/", title="LinkedIn"),
+    )
+    assert cmd is not None
+    assert cmd.script_args["operation"] == "type_message"
+    assert cmd.success_condition == {"type": "visible_text_contains", "value": "Hello"}
+
+
 def test_build_command_resolves_navigate_url_from_intent(db_session: AsyncSession):
     agent = AgentService(db_session)
     cmd = agent._build_command(

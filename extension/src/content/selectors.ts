@@ -37,6 +37,96 @@ function escapeCssValue(val: string): string {
   return CSS.escape(val);
 }
 
+const DYNAMIC_CLASS_TOKENS = new Set([
+  "active",
+  "selected",
+  "disabled",
+  "enabled",
+  "focused",
+  "focus",
+  "hover",
+  "open",
+  "closed",
+  "current",
+]);
+
+function isStableClassToken(token: string): boolean {
+  const value = String(token || "").trim().toLowerCase();
+  if (!value) return false;
+  if (value.length < 3 || value.length > 80) return false;
+  if (!/[a-z]/.test(value)) return false;
+  if (DYNAMIC_CLASS_TOKENS.has(value)) return false;
+  if (/^ember\d+$/.test(value)) return false;
+  if (/(^|[-_])ember\d+$/.test(value)) return false;
+  if (/^react-[a-z0-9]+$/.test(value)) return false;
+  if (/^(css|sc)-[a-z0-9]{5,}$/.test(value)) return false;
+  if (/^jsx-\d+$/.test(value)) return false;
+  // Reject hash-like tokens with long unbroken suffixes.
+  if (/^[a-z]+[0-9]{5,}$/.test(value)) return false;
+  if (/^[a-z0-9]{14,}$/.test(value) && !value.includes("-") && !value.includes("_")) return false;
+  return true;
+}
+
+function scoreClassToken(token: string): number {
+  let score = Math.min(token.length, 24);
+  if (token.includes("__")) score += 25; // BEM block__element
+  if (token.includes("--")) score += 10; // BEM modifier
+  if (token.includes("-")) score += 6;
+  if (/[0-9]/.test(token)) score -= 4;
+  return score;
+}
+
+function getStableClassTokens(el: HTMLElement): string[] {
+  const tokens = Array.from(el.classList).filter(isStableClassToken);
+  tokens.sort((a, b) => scoreClassToken(b) - scoreClassToken(a));
+  return tokens.slice(0, 4);
+}
+
+function querySelectorCount(selector: string): number {
+  try {
+    return document.querySelectorAll(selector).length;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+function withTypeQualifier(el: HTMLElement, selector: string): string | null {
+  if (!(el instanceof HTMLButtonElement) && !(el instanceof HTMLInputElement)) return null;
+  const typeAttr = (el.getAttribute("type") || "").trim().toLowerCase();
+  if (!typeAttr) return null;
+  if (!/^[a-z-]+$/.test(typeAttr)) return null;
+  return `${selector}[type="${escapeCssValue(typeAttr)}"]`;
+}
+
+function buildStableClassSelector(el: HTMLElement, tag: string): string | null {
+  const tokens = getStableClassTokens(el);
+  if (tokens.length === 0) return null;
+
+  const escaped = tokens.map((token) => CSS.escape(token));
+
+  for (const cls of escaped) {
+    const base = `${tag}.${cls}`;
+    const typed = withTypeQualifier(el, base);
+    if (typed && querySelectorCount(typed) === 1) return typed;
+    if (querySelectorCount(base) === 1) return base;
+  }
+
+  for (let i = 0; i < escaped.length; i++) {
+    for (let j = i + 1; j < escaped.length; j++) {
+      const pair = `${tag}.${escaped[i]}.${escaped[j]}`;
+      const typed = withTypeQualifier(el, pair);
+      if (typed && querySelectorCount(typed) === 1) return typed;
+      if (querySelectorCount(pair) === 1) return pair;
+    }
+  }
+
+  const best = `${tag}.${escaped[0]}`;
+  const bestTyped = withTypeQualifier(el, best);
+  if (bestTyped && querySelectorCount(bestTyped) > 0 && querySelectorCount(bestTyped) <= 3) return bestTyped;
+  if (querySelectorCount(best) > 0 && querySelectorCount(best) <= 3) return best;
+  return null;
+}
+
 export function computeSelectorScore(type: string, el: HTMLElement): number {
   switch (type) {
     case "css": {
@@ -53,6 +143,7 @@ export function computeSelectorScore(type: string, el: HTMLElement): number {
       if (el.id && !isGeneratedId(el.id)) return 0.80;
       if (el.getAttribute("name")) return 0.75;
       if (role) return 0.65;
+      if (getStableClassTokens(el).length > 0) return 0.62;
       const sibs = countSameTagSiblings(el);
       if (sibs > 1) return 0.30;
       return 0.50;
@@ -150,7 +241,11 @@ export function buildCssSelector(el: HTMLElement): string {
   // 6. role alone (weaker — many elements share the same role)
   if (role) return `${tag}[role="${escapeCssValue(role)}"]`;
 
-  // 7. Structural path fallback
+  // 7. Stable class-based selector (e.g. LinkedIn msg-form__send-button)
+  const stableClassSelector = buildStableClassSelector(el, tag);
+  if (stableClassSelector) return stableClassSelector;
+
+  // 8. Structural path fallback
   const parts: string[] = [];
   let current: HTMLElement | null = el;
   while (current && current !== document.body && current !== document.documentElement) {

@@ -152,12 +152,42 @@ test("replay LinkedIn flow completes and confirms message delivery", async ({ co
     total_steps?: number;
     error_message?: string | null;
   } | null = null;
+  let lastSignature = "";
+  let stagnantPolls = 0;
 
   for (let attempt = 0; attempt < 150; attempt++) {
     const runResp = await page.request.get(`${BACKEND}/v1/runs/${runId}`, {
       headers: { "X-API-Key": API_KEY },
     });
     finalRun = await runResp.json() as typeof finalRun;
+    const signature = `${finalRun?.status ?? "unknown"}:${finalRun?.current_step_index ?? "?"}`;
+    if (signature === lastSignature) {
+      stagnantPolls += 1;
+    } else {
+      stagnantPolls = 0;
+      lastSignature = signature;
+    }
+
+    // Fail fast: if we see no status/step movement for ~40s, the run is stuck.
+    // This keeps LinkedIn debugging loops tight instead of waiting several minutes.
+    if ((finalRun?.status || "") === "running" && stagnantPolls >= 20) {
+      const eventsResp = await page.request.get(`${BACKEND}/v1/runs/${runId}/events?limit=8`, {
+        headers: { "X-API-Key": API_KEY },
+      });
+      const events = await eventsResp.json().catch(() => []) as Array<{
+        event_type?: string;
+        message?: string;
+        payload?: Record<string, unknown>;
+      }>;
+      const compact = events.map((e) => {
+        const et = e.event_type || "?";
+        const step = (e.payload?.step_index ?? e.payload?.current_step ?? "?") as string | number;
+        const err = String(e.payload?.error || e.message || "").slice(0, 120);
+        return `${et}@${step}${err ? `:${err}` : ""}`;
+      }).join(" | ");
+      throw new Error(`Run stuck at ${signature} for ~${stagnantPolls * 2}s. recent=${compact}`);
+    }
+
     if (finalRun?.status && terminal.has(finalRun.status)) {
       break;
     }

@@ -273,6 +273,33 @@ describe("buildCssSelector — new priority order", () => {
     expect(sel).not.toContain("[");
     expect(sel).toContain("div");
   });
+
+  it("uses a stable class-based selector before structural path", async () => {
+    const { buildCssSelector } = await import("../src/content/selectors");
+    const wrapper = document.createElement("div");
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.className = "msg-form__send-button";
+    wrapper.appendChild(btn);
+    document.body.appendChild(wrapper);
+
+    expect(buildCssSelector(btn as HTMLElement)).toBe("button.msg-form__send-button[type=\"submit\"]");
+  });
+
+  it("ignores generated/hash-like classes and falls back when needed", async () => {
+    const { buildCssSelector } = await import("../src/content/selectors");
+    const wrapper = document.createElement("div");
+    wrapper.className = "container";
+    const btn = document.createElement("button");
+    btn.className = "ember123 css-a1b2c3";
+    wrapper.appendChild(btn);
+    document.body.appendChild(wrapper);
+
+    const sel = buildCssSelector(btn as HTMLElement);
+    expect(sel).not.toContain(".ember123");
+    expect(sel).not.toContain(".css-a1b2c3");
+    expect(sel).toContain("button");
+  });
 });
 
 describe("isGeneratedId", () => {

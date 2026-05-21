@@ -1096,6 +1096,31 @@ class AgentService:
                 next_step_index=step_index,
             )
 
+        linkedin_command = self._build_linkedin_site_command(step, ctx)
+        if linkedin_command:
+            reasoning = "AI output unusable; executing LinkedIn site adapter fallback"
+            await self._audit_decision(
+                run_id,
+                "EXECUTE",
+                0.78,
+                reasoning,
+                command=linkedin_command,
+                step_index=step_index,
+                page_context=ctx,
+                decision_context={
+                    "origin": "ai-fallback",
+                    "fallback": "linkedin-site",
+                    "step_action": step.get("action_type"),
+                },
+            )
+            return PollResponse(
+                decision="EXECUTE",
+                confidence=0.78,
+                reasoning=reasoning,
+                command=linkedin_command,
+                next_step_index=step_index,
+            )
+
         js_click_command = self._build_js_click_fallback_command(step, ctx)
         if js_click_command:
             reasoning = "AI output unusable; executing deterministic JS click fallback"
@@ -1174,17 +1199,38 @@ class AgentService:
     def _extract_click_label(step: dict[str, Any]) -> str | None:
         if not isinstance(step, dict):
             return None
+        selector_chain = step.get("selector_chain")
+        if isinstance(selector_chain, list):
+            for raw_sel in selector_chain:
+                if not isinstance(raw_sel, dict):
+                    continue
+                if str(raw_sel.get("type") or "").lower() != "text":
+                    continue
+                raw_text = raw_sel.get("value")
+                if not isinstance(raw_text, str):
+                    continue
+                text_label = re.sub(r"\s+", " ", raw_text).strip()
+                if text_label:
+                    return text_label[:120]
         raw_value = step.get("value")
         if isinstance(raw_value, str):
-            value = raw_value.strip()
+            value = re.sub(r"\s+", " ", raw_value).strip()
             if value:
                 return value[:120]
         raw_intent = step.get("intent")
         if not isinstance(raw_intent, str):
             return None
-        intent = raw_intent.strip()
+        intent = re.sub(r"\s+", " ", raw_intent).strip()
         if not intent:
             return None
+        quoted = [
+            re.sub(r"\s+", " ", part).strip()
+            for part in re.findall(r'"([^"]+)"', intent)
+        ]
+        quoted = [part for part in quoted if part]
+        if quoted:
+            quoted.sort(key=lambda part: len(part), reverse=True)
+            return quoted[0][:120]
         cleaned = re.sub(
             r"^(click|tap|press|select|choose|open)\s+",
             "",
@@ -1258,6 +1304,120 @@ class AgentService:
         if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*", value):
             return True
         return bool(re.search(r"[#\[\]>\+~:]", value)) or ("." in value and bool(re.search(r"[a-zA-Z]", value)))
+
+    @staticmethod
+    def _selector_chain_has_shadow_host(step: dict[str, Any], host_fragment: str) -> bool:
+        selector_chain = step.get("selector_chain") or []
+        if not isinstance(selector_chain, list):
+            return False
+        host_fragment_l = host_fragment.lower()
+        for sel in selector_chain:
+            if not isinstance(sel, dict):
+                continue
+            value = str(sel.get("value") or "").lower()
+            if sel.get("type") == "shadow_css" and host_fragment_l in value:
+                return True
+        return False
+
+    @staticmethod
+    def _selector_chain_texts(step: dict[str, Any]) -> list[str]:
+        out: list[str] = []
+        selector_chain = step.get("selector_chain") or []
+        if not isinstance(selector_chain, list):
+            return out
+        for sel in selector_chain:
+            if not isinstance(sel, dict) or str(sel.get("type") or "").lower() != "text":
+                continue
+            value = sel.get("value")
+            if isinstance(value, str):
+                text = re.sub(r"\s+", " ", value).strip()
+                if text:
+                    out.append(text)
+        return out
+
+    @classmethod
+    def _build_linkedin_site_command(
+        cls,
+        step: dict[str, Any],
+        ctx: Any,
+    ) -> AgentCommand | None:
+        """Compile LinkedIn-recorded steps into scoped site operations.
+
+        This keeps LinkedIn replay out of global text ranking. The extension
+        adapter knows LinkedIn's stable surfaces (nav, main content, messaging
+        dock shadow root) and can use trusted CDP input after scoped locating.
+        """
+        if not isinstance(step, dict):
+            return None
+        url = str(getattr(ctx, "url", "") or "").lower()
+        intent = re.sub(r"\s+", " ", str(step.get("intent") or "")).strip()
+        intent_l = intent.lower()
+        has_linkedin_shadow = cls._selector_chain_has_shadow_host(step, "interop-shadowdom")
+        if "linkedin.com" not in url and not has_linkedin_shadow and "linkedin" not in intent_l:
+            return None
+
+        action_type = str(step.get("action_type") or "").lower()
+        label = cls._extract_click_label(step) or ""
+        label_l = label.lower()
+        selector_texts = cls._selector_chain_texts(step)
+        value = step.get("value")
+
+        operation: str | None = None
+        args: dict[str, Any] = {}
+        scope = "messaging_dock" if has_linkedin_shadow else "any"
+
+        if action_type in {"click", "select"}:
+            if "messaging" in label_l and ("overlay" in label_l or "conversation" in label_l or label_l == "messaging"):
+                operation = "open_messaging_dock"
+                scope = "global_nav"
+            elif label_l == "send" or "button \"send\"" in intent_l:
+                operation = "send_message"
+                scope = "messaging_dock"
+            elif "write a message" in label_l or "write a message" in intent_l:
+                operation = "focus_message_composer"
+                scope = "messaging_dock"
+            elif has_linkedin_shadow and selector_texts:
+                operation = "open_conversation"
+                scope = "messaging_dock"
+                args["name"] = selector_texts[0]
+            elif label:
+                operation = "click"
+                scope = "global_nav" if label_l in {"home", "my network", "jobs", "messaging", "notifications", "me"} else scope
+                args["label"] = label
+        elif action_type == "type" and isinstance(value, str):
+            if has_linkedin_shadow or "write a message" in intent_l:
+                operation = "type_message"
+                scope = "messaging_dock"
+                args["text"] = value
+
+        if not operation:
+            return None
+
+        script_args = {
+            "__harness": "linkedin_site",
+            "operation": operation,
+            "scope": scope,
+            **args,
+        }
+        success_condition = (
+            {"type": "visible_text_contains", "value": value}
+            if operation == "type_message" and isinstance(value, str)
+            else (
+                step.get("success_condition")
+                if isinstance(step.get("success_condition"), dict)
+                else None
+            )
+        )
+
+        return AgentCommand(
+            action=CommandAction.RUN_SCRIPT,
+            intent=f"LinkedIn site adapter: {operation}",
+            script="linkedin_site",
+            script_args=script_args,
+            script_timeout_ms=12_000,
+            timeout_ms=20_000,
+            success_condition=success_condition,
+        )
 
     def _build_js_click_fallback_command(
         self, step: dict[str, Any], ctx: Any,
