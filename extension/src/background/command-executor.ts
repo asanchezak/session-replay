@@ -1,4 +1,6 @@
 import { createLogger } from "../shared/logger";
+import { getSiteAdapterRuntime } from "./site-adapters/registry";
+import type { SiteAdapterHarnessResult } from "./site-adapters/types";
 import type { AgentCommand, PageContext, PageDiff } from "../shared/types";
 import type {
   CapturePageContextMessage,
@@ -114,369 +116,7 @@ interface HarnessOutput {
   error?: string;
 }
 
-type LinkedInSiteHarnessResult =
-  | {
-      ok: true;
-      operation: string;
-      action: "click" | "type" | "noop" | "navigate";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      tag: string;
-      text: string;
-      reason: string;
-      insertText?: string;
-      targetUrl?: string;
-      settleMs?: number;
-    }
-  | {
-      ok: false;
-      operation: string;
-      error: string;
-      debug?: Record<string, unknown>;
-    };
-
-function LINKEDIN_SITE_HARNESS(args: Record<string, unknown>): LinkedInSiteHarnessResult {
-  const operation = String(args?.operation || "").trim();
-  const scope = String(args?.scope || "any").trim();
-  const label = String(args?.label || "").trim();
-  const name = String(args?.name || "").trim();
-  const text = String(args?.text || "");
-
-  const normalize = (value: unknown): string =>
-    String(value || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-
-  const textFor = (el: Element): string =>
-    (
-      (el.getAttribute("aria-label") || "") + " " +
-      (el.getAttribute("title") || "") + " " +
-      (el.getAttribute("data-testid") || "") + " " +
-      ("value" in el ? String((el as HTMLInputElement).value || "") : "") + " " +
-      (el.textContent || "")
-    ).replace(/\s+/g, " ").trim();
-
-  const isVisible = (el: Element | null): boolean => {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const style = window.getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-  };
-
-  const isDisabled = (el: Element | null): boolean => {
-    if (!el) return false;
-    if (
-      el instanceof HTMLButtonElement ||
-      el instanceof HTMLInputElement ||
-      el instanceof HTMLTextAreaElement ||
-      el instanceof HTMLSelectElement
-    ) {
-      return el.disabled;
-    }
-    return el.getAttribute("aria-disabled") === "true";
-  };
-
-  const deepQuerySelectorAll = (selector: string, root: ParentNode = document): Element[] => {
-    const out: Element[] = [];
-    try { out.push(...Array.from(root.querySelectorAll(selector))); } catch { return out; }
-    for (const node of Array.from(root.querySelectorAll("*"))) {
-      const sr = (node as HTMLElement).shadowRoot;
-      if (sr) out.push(...deepQuerySelectorAll(selector, sr));
-    }
-    return out;
-  };
-
-  const deepQuerySelector = (selector: string, root: ParentNode = document): Element | null => {
-    try {
-      const direct = root.querySelector(selector);
-      if (direct) return direct;
-    } catch { return null; }
-    for (const node of Array.from(root.querySelectorAll("*"))) {
-      const sr = (node as HTMLElement).shadowRoot;
-      if (!sr) continue;
-      const found = deepQuerySelector(selector, sr);
-      if (found) return found;
-    }
-    return null;
-  };
-
-  const messagingHost = deepQuerySelector('div[data-testid="interop-shadowdom"]');
-  const messagingRoot = messagingHost ? ((messagingHost as HTMLElement).shadowRoot || messagingHost) : null;
-  const navRoot = document.querySelector("header, nav, [role='navigation']") || document;
-  const mainRoot = document.querySelector("main, [role='main']") || document;
-  const rootsForScope = (): ParentNode[] => {
-    if (scope === "messaging_dock") return messagingRoot ? [messagingRoot] : [];
-    if (scope === "global_nav") return [navRoot];
-    if (scope === "main_content") return [mainRoot];
-    return [messagingRoot, navRoot, mainRoot, document].filter((root): root is ParentNode => !!root);
-  };
-
-  const measure = (el: Element | null, reason: string, action: "click" | "type", insertText?: string, settleMs?: number): LinkedInSiteHarnessResult => {
-    if (!el || !isVisible(el) || isDisabled(el)) {
-      return { ok: false, operation, error: "LINKEDIN_SITE_NO_TARGET", debug: { reason, scope, hasMessagingRoot: !!messagingRoot } };
-    }
-    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch { /**/ }
-    const rect = el.getBoundingClientRect();
-    return {
-      ok: true,
-      operation,
-      action,
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
-      width: rect.width,
-      height: rect.height,
-      tag: el.tagName,
-      text: textFor(el).slice(0, 180),
-      reason,
-      insertText,
-      settleMs,
-    };
-  };
-
-  const noop = (reason: string, settleMs = 500): LinkedInSiteHarnessResult => ({
-    ok: true,
-    operation,
-    action: "noop",
-    x: 0,
-    y: 0,
-    width: 0,
-    height: 0,
-    tag: "NOOP",
-    text: reason,
-    reason,
-    settleMs,
-  });
-
-  const navigate = (targetUrl: string, reason: string, settleMs = 1800): LinkedInSiteHarnessResult => ({
-    ok: true,
-    operation,
-    action: "navigate",
-    x: 0,
-    y: 0,
-    width: 0,
-    height: 0,
-    tag: "LOCATION",
-    text: targetUrl,
-    reason,
-    targetUrl,
-    settleMs,
-  });
-
-  const bestActionable = (node: Element | null, preferConversation = false): Element | null => {
-    if (!node) return null;
-    if (preferConversation) {
-      let cur: Element | null = node;
-      for (let depth = 0; depth < 12 && cur; depth++) {
-        const cls = (typeof cur.className === "string" ? cur.className : "").toLowerCase();
-        const role = (cur.getAttribute("role") || "").toLowerCase();
-        if (
-          isVisible(cur) &&
-          !isDisabled(cur) &&
-          (cls.includes("conversation") || cls.includes("thread") || cls.includes("list-item") || role === "listitem" || role === "option")
-        ) {
-          return cur;
-        }
-        cur = cur.parentElement;
-      }
-    }
-    let cur: Element | null = node;
-    for (let depth = 0; depth < 8 && cur; depth++) {
-      const role = (cur.getAttribute("role") || "").toLowerCase();
-      if (
-        isVisible(cur) &&
-        !isDisabled(cur) &&
-        (cur.matches("button,a,input,textarea,select,summary,label,[tabindex],[onclick]") || role === "button" || role === "link" || role === "option")
-      ) {
-        return cur;
-      }
-      cur = cur.parentElement;
-    }
-    return isVisible(node) ? node : null;
-  };
-
-  const findByText = (needle: string, roots: ParentNode[], options: { actionableOnly?: boolean; preferConversation?: boolean } = {}): Element | null => {
-    const needleN = normalize(needle);
-    if (!needleN) return null;
-    const query = options.actionableOnly
-      ? "button,a,[role='button'],[role='link'],[role='option'],input,textarea,select,[tabindex],[onclick]"
-      : "button,a,[role='button'],[role='link'],[role='option'],input,textarea,select,[tabindex],[onclick],span,div,p,li,strong,b,h1,h2,h3,h4,h5,h6";
-    let best: Element | null = null;
-    let bestScore = -1;
-    for (const root of roots) {
-      for (const el of deepQuerySelectorAll(query, root)) {
-        if (!isVisible(el) || isDisabled(el)) continue;
-        const txt = textFor(el);
-        const txtN = normalize(txt);
-        if (!txtN || (!txtN.includes(needleN) && !needleN.includes(txtN))) continue;
-        const target = bestActionable(el, !!options.preferConversation);
-        if (!target) continue;
-        let score = 0;
-        if (txtN === needleN) score += 120;
-        if (txtN.includes(needleN)) score += 70;
-        if (target.tagName === "BUTTON") score += 25;
-        if (options.preferConversation) score += target === el ? 5 : 30;
-        if (score > bestScore) {
-          bestScore = score;
-          best = target;
-        }
-      }
-    }
-    return best;
-  };
-
-  const linkedinNavHrefByLabel: Record<string, string[]> = {
-    home: ["/feed"],
-    "my network": ["/mynetwork"],
-    jobs: ["/jobs"],
-    messaging: ["/messaging"],
-    notifications: ["/notifications"],
-    me: ["/in/", "/mynetwork/invite-connect/connections"],
-  };
-  const linkedinNavRouteByLabel: Record<string, string> = {
-    home: "/feed/",
-    "my network": "/mynetwork/",
-    jobs: "/jobs/",
-    messaging: "/messaging/",
-    notifications: "/notifications/",
-  };
-
-  const hrefMatches = (href: string, fragments: string[]): boolean => {
-    const raw = href.toLowerCase();
-    let pathname = raw;
-    try {
-      pathname = new URL(href, window.location.href).pathname.toLowerCase();
-    } catch {
-      // Keep the raw href fallback for relative or malformed hrefs.
-    }
-    return fragments.some((fragment) => pathname.startsWith(fragment) || raw.includes(fragment));
-  };
-
-  const findGlobalNavTarget = (needle: string): Element | null => {
-    const needleN = normalize(needle);
-    const fragments = linkedinNavHrefByLabel[needleN];
-    if (fragments?.length) {
-      let best: Element | null = null;
-      let bestScore = -1;
-      const roots: ParentNode[] = navRoot === document ? [document] : [navRoot, document];
-      for (const root of roots) {
-        for (const link of deepQuerySelectorAll("a[href]", root)) {
-          if (isDisabled(link)) continue;
-          const href = link.getAttribute("href") || (link as HTMLAnchorElement).href || "";
-          if (!hrefMatches(href, fragments)) continue;
-          const visibleTarget = isVisible(link)
-            ? link
-            : deepQuerySelectorAll("span,svg,div,li,strong", link).find((child) => isVisible(child));
-          if (!visibleTarget) continue;
-          const txtN = normalize(textFor(link));
-          let score = 100;
-          if (txtN === needleN) score += 40;
-          if (txtN.includes(needleN)) score += 25;
-          if (root === navRoot) score += 15;
-          if (link.closest("header, nav, [role='navigation']")) score += 20;
-          if (score > bestScore) {
-            bestScore = score;
-            best = bestActionable(visibleTarget) || visibleTarget;
-          }
-        }
-      }
-      if (best) return best;
-    }
-    return findByText(needle, [navRoot], { actionableOnly: true });
-  };
-
-  const findComposer = (): Element | null => {
-    if (!messagingRoot) return null;
-    const selectors = [
-      '[role="textbox"][aria-label*="Write" i]',
-      '[role="textbox"][aria-label*="message" i]',
-      '[contenteditable="true"][aria-label*="message" i]',
-      ".msg-form__contenteditable",
-      '[contenteditable="true"]',
-    ];
-    for (const selector of selectors) {
-      const found = deepQuerySelector(selector, messagingRoot);
-      if (found && isVisible(found) && !isDisabled(found)) return found;
-    }
-    return null;
-  };
-
-  const findSendButton = (): Element | null => {
-    if (!messagingRoot) return null;
-    const selectors = [
-      "button.msg-form__send-button[type='submit']",
-      "button[type='submit'][class*='send']",
-      "button[class*='send']",
-      "button[type='submit']",
-    ];
-    for (const selector of selectors) {
-      const found = deepQuerySelector(selector, messagingRoot);
-      if (found && isVisible(found) && !isDisabled(found)) return found;
-    }
-    return findByText("Send", [messagingRoot], { actionableOnly: true });
-  };
-
-  if (operation === "open_messaging_dock") {
-    const openMarker = messagingRoot
-      ? deepQuerySelector("[class*='conversation'],[class*='msg-overlay-list-bubble-search'],[role='list']", messagingRoot)
-      : null;
-    if (openMarker && isVisible(openMarker)) {
-      return noop("linkedin_messaging_dock_already_open", 500);
-    }
-    const roots = messagingRoot ? [messagingRoot, navRoot] : [navRoot, document];
-    const target =
-      (messagingRoot && (
-        deepQuerySelector("#msg-overlay-list-bubble-header__button", messagingRoot) ||
-        findByText("Messaging", [messagingRoot], { actionableOnly: true })
-      )) ||
-      findByText("Messaging", roots, { actionableOnly: true });
-    return measure(target, "linkedin_open_messaging_dock", "click", undefined, 1800);
-  }
-
-  if (operation === "open_conversation") {
-    if (!messagingRoot) return { ok: false, operation, error: "LINKEDIN_SITE_NO_MESSAGING_ROOT" };
-    const target = findByText(name, [messagingRoot], { preferConversation: true });
-    return measure(target, "linkedin_open_conversation", "click", undefined, 3000);
-  }
-
-  if (operation === "focus_message_composer") {
-    return measure(findComposer(), "linkedin_focus_message_composer", "click", undefined, 500);
-  }
-
-  if (operation === "type_message") {
-    const composer = findComposer();
-    if (composer && normalize(textFor(composer)).includes(normalize(text))) {
-      return noop("linkedin_message_already_present", 500);
-    }
-    return measure(composer, "linkedin_type_message", "type", text, 500);
-  }
-
-  if (operation === "send_message") {
-    return measure(findSendButton(), "linkedin_send_message", "click", undefined, 1800);
-  }
-
-  if (operation === "click") {
-    const target = scope === "global_nav"
-      ? findGlobalNavTarget(label)
-      : findByText(label, rootsForScope(), { actionableOnly: false });
-    const route = scope === "global_nav" ? linkedinNavRouteByLabel[normalize(label)] : "";
-    if (!target && route) {
-      const origin = window.location.origin && window.location.origin !== "null"
-        ? window.location.origin
-        : "https://www.linkedin.com";
-      return navigate(new URL(route, origin).toString(), "linkedin_scoped_route_navigation", 1800);
-    }
-    return measure(target, "linkedin_scoped_click", "click", undefined, 1000);
-  }
-
-  return { ok: false, operation, error: "LINKEDIN_SITE_UNKNOWN_OPERATION", debug: { operation, scope } };
-}
-
-/**
+ /**
  * Injected into the page's MAIN world via chrome.scripting.executeScript.
  * Must be a top-level statically-analyzable function (no closure capture).
  *
@@ -2197,40 +1837,54 @@ export class CommandExecutor {
   }> {
     const args = command.script_args ?? {};
 
-    // Route to pre-compiled fallback harnesses when the backend marks this
-    // as js_click / js_type. These use NO new Function()/eval so they are
-    // safe under Chrome MV3 CSP and strict-CSP pages like LinkedIn.
-    if (args.__harness === "linkedin_site") {
+    // Site adapters are semantic operations for known dynamic sites. They use
+    // page-local harnesses for locating, while this executor owns trusted CDP
+    // input and tab navigation.
+    const siteAdapter = getSiteAdapterRuntime(args.__harness);
+    if (siteAdapter) {
       const start = Date.now();
       const operation = String(args.operation || "");
       try {
-        const locate = async (locateArgs: Record<string, unknown>): Promise<LinkedInSiteHarnessResult | undefined> => {
-          log.log(`[linkedin-site] locating operation="${String(locateArgs.operation || "")}"`);
+        const locate = async (locateArgs: Record<string, unknown>): Promise<SiteAdapterHarnessResult | undefined> => {
+          log.log(`[${siteAdapter.logPrefix}] locating operation="${String(locateArgs.operation || "")}"`);
           const results = await chrome.scripting.executeScript({
             target: { tabId },
             world: "MAIN",
-            func: LINKEDIN_SITE_HARNESS,
+            func: siteAdapter.harness,
             args: [locateArgs],
           });
-          return results?.[0]?.result as LinkedInSiteHarnessResult | undefined;
+          return results?.[0]?.result as SiteAdapterHarnessResult | undefined;
         };
         const performLocatedAction = async (
-          locatedAction: Extract<LinkedInSiteHarnessResult, { ok: true }>,
+          locatedAction: Extract<SiteAdapterHarnessResult, { ok: true }>,
           currentOperation: string,
         ): Promise<string | null> => {
-          log.log(`[linkedin-site] target (${locatedAction.x},${locatedAction.y}) ${locatedAction.tag} via ${locatedAction.reason} text="${locatedAction.text.slice(0, 90)}"`);
+          log.log(`[${siteAdapter.logPrefix}] target (${locatedAction.x},${locatedAction.y}) ${locatedAction.tag} via ${locatedAction.reason} text="${locatedAction.text.slice(0, 90)}"`);
           if (locatedAction.action === "navigate") {
-            if (!locatedAction.targetUrl) return `LINKEDIN_SITE_NAVIGATE_MISSING_URL:${currentOperation}`;
-            await chrome.tabs.update(tabId, { url: locatedAction.targetUrl });
+            if (!locatedAction.targetUrl) return `SITE_ADAPTER_NAVIGATE_MISSING_URL:${siteAdapter.site}:${currentOperation}`;
+            const updated = await chrome.tabs.update(tabId, { url: locatedAction.targetUrl });
+            const targetPath = new URL(locatedAction.targetUrl).pathname;
+            if (!updated.url || !new URL(updated.url).pathname.startsWith(targetPath)) {
+              const deadline = Date.now() + 6000;
+              while (Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 250));
+                try {
+                  const current = await chrome.tabs.get(tabId);
+                  if (current.url && new URL(current.url).pathname.startsWith(targetPath)) break;
+                } catch {
+                  break;
+                }
+              }
+            }
           }
           if (locatedAction.action === "click" || locatedAction.action === "type") {
             const clicked = await DebuggerSession.dispatchMouseClick(tabId, locatedAction.x, locatedAction.y);
-            if (!clicked) return `LINKEDIN_SITE_TRUSTED_CLICK_FAILED:${currentOperation}`;
+            if (!clicked) return `SITE_ADAPTER_TRUSTED_CLICK_FAILED:${siteAdapter.site}:${currentOperation}`;
           }
           if (locatedAction.action === "type") {
             await new Promise((r) => setTimeout(r, 150));
             const inserted = await DebuggerSession.insertText(tabId, locatedAction.insertText || "");
-            if (!inserted) return `LINKEDIN_SITE_TRUSTED_TYPE_FAILED:${currentOperation}`;
+            if (!inserted) return `SITE_ADAPTER_TRUSTED_TYPE_FAILED:${siteAdapter.site}:${currentOperation}`;
           }
           await new Promise((r) => setTimeout(r, locatedAction.settleMs ?? 800));
           return null;
@@ -2238,26 +1892,39 @@ export class CommandExecutor {
 
         let located = await locate(args as Record<string, unknown>);
         if (!located) {
-          return { success: false, error: `LINKEDIN_SITE_NO_RESULT:${operation}`, script_duration_ms: Date.now() - start };
+          return { success: false, error: `SITE_ADAPTER_NO_RESULT:${siteAdapter.site}:${operation}`, script_duration_ms: Date.now() - start };
         }
-        if (!located.ok && located.error === "LINKEDIN_SITE_NO_MESSAGING_ROOT" && operation !== "open_messaging_dock") {
-          log.log(`[linkedin-site] messaging root missing for ${operation}; opening dock first`);
-          const openLocated = await locate({ ...args, operation: "open_messaging_dock", scope: "global_nav" } as Record<string, unknown>);
-          if (openLocated?.ok) {
-            const openError = await performLocatedAction(openLocated, "open_messaging_dock");
-            if (openError) {
+        if (!located.ok && siteAdapter.recoverMissingDependency) {
+          const recoveryArgs = siteAdapter.recoverMissingDependency(operation, located, args as Record<string, unknown>);
+          if (recoveryArgs) {
+            log.log(`[${siteAdapter.logPrefix}] recovering dependency for ${operation} via ${String(recoveryArgs.operation || "")}`);
+            const recoveryLocated = await locate(recoveryArgs);
+            if (recoveryLocated?.ok) {
+              const recoveryError = await performLocatedAction(recoveryLocated, String(recoveryArgs.operation || "dependency"));
+              if (recoveryError) {
+                return {
+                  success: false,
+                  error: recoveryError,
+                  script_result: recoveryLocated,
+                  script_duration_ms: Date.now() - start,
+                };
+              }
+              located = await locate(args as Record<string, unknown>);
+            } else if (recoveryLocated) {
               return {
                 success: false,
-                error: openError,
-                script_result: openLocated,
+                error: `${recoveryLocated.error}:${operation}`,
+                script_result: recoveryLocated,
                 script_duration_ms: Date.now() - start,
               };
             }
-            located = await locate(args as Record<string, unknown>);
           }
         }
+        if (!located) {
+          return { success: false, error: `SITE_ADAPTER_NO_RESULT:${siteAdapter.site}:${operation}`, script_duration_ms: Date.now() - start };
+        }
         if (!located.ok) {
-          log.log(`[linkedin-site] locate FAILED:`, JSON.stringify(located).slice(0, 500));
+          log.log(`[${siteAdapter.logPrefix}] locate FAILED:`, JSON.stringify(located).slice(0, 500));
           return {
             success: false,
             error: `${located.error}:${operation}`,
@@ -2276,17 +1943,20 @@ export class CommandExecutor {
         }
         return {
           success: true,
-          script_result: { ...located, via: "linkedin_site" },
+          script_result: { ...located, via: siteAdapter.harnessId },
           script_logs: [],
           script_duration_ms: Date.now() - start,
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error("LINKEDIN_SITE_HARNESS failed:", msg);
-        return { success: false, error: `LINKEDIN_SITE_FAILED:${operation}:${msg}`, script_duration_ms: Date.now() - start };
+        log.error(`${siteAdapter.harnessId} failed:`, msg);
+        return { success: false, error: `SITE_ADAPTER_FAILED:${siteAdapter.site}:${operation}:${msg}`, script_duration_ms: Date.now() - start };
       }
     }
 
+    // Route to pre-compiled fallback harnesses when the backend marks this
+    // as js_click / js_type. These use NO new Function()/eval so they are
+    // safe under Chrome MV3 CSP and strict-CSP pages like LinkedIn.
     if (args.__harness === "js_click") {
       const start = Date.now();
       const label = String((args.label as string) || "");

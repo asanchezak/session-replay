@@ -339,7 +339,7 @@ describe("CommandExecutor.runScript", () => {
     expect(result.error || "").toContain("JS_CLICK_FALLBACK_NO_TARGET");
   }, 12000);
 
-  it("linkedin_site opens the messaging dock through a scoped LinkedIn operation", async () => {
+  it("site adapter opens the messaging dock through a scoped LinkedIn operation", async () => {
     simulateExecute();
     const { CommandExecutor } = await import("../src/background/command-executor");
     const ce = new CommandExecutor();
@@ -358,9 +358,9 @@ describe("CommandExecutor.runScript", () => {
 
     const result = await ce.executeCommand(1, {
       action: "run_script",
-      script: "linkedin_site",
+      script: "site_adapter:linkedin",
       script_args: {
-        __harness: "linkedin_site",
+        __harness: "site:linkedin",
         operation: "open_messaging_dock",
         scope: "global_nav",
       },
@@ -383,7 +383,7 @@ describe("CommandExecutor.runScript", () => {
     expect((result.script_result as any).operation).toBe("open_messaging_dock");
   });
 
-  it("linkedin_site resolves LinkedIn global nav clicks by href semantics", async () => {
+  it("site adapter resolves LinkedIn global nav clicks by href semantics", async () => {
     simulateExecute();
     const { CommandExecutor } = await import("../src/background/command-executor");
     const ce = new CommandExecutor();
@@ -408,9 +408,9 @@ describe("CommandExecutor.runScript", () => {
 
     const result = await ce.executeCommand(1, {
       action: "run_script",
-      script: "linkedin_site",
+      script: "site_adapter:linkedin",
       script_args: {
-        __harness: "linkedin_site",
+        __harness: "site:linkedin",
         operation: "click",
         scope: "global_nav",
         label: "Home",
@@ -434,16 +434,16 @@ describe("CommandExecutor.runScript", () => {
     expect((result.script_result as any).reason).toBe("linkedin_scoped_click");
   });
 
-  it("linkedin_site falls back to canonical route navigation for known global nav labels", async () => {
+  it("site adapter falls back to canonical route navigation for known global nav labels", async () => {
     simulateExecute();
     const { CommandExecutor } = await import("../src/background/command-executor");
     const ce = new CommandExecutor();
 
     const result = await ce.executeCommand(1, {
       action: "run_script",
-      script: "linkedin_site",
+      script: "site_adapter:linkedin",
       script_args: {
-        __harness: "linkedin_site",
+        __harness: "site:linkedin",
         operation: "click",
         scope: "global_nav",
         label: "Home",
@@ -464,7 +464,36 @@ describe("CommandExecutor.runScript", () => {
     expect((result.script_result as any).action).toBe("navigate");
   });
 
-  it("linkedin_site types into the messaging composer with trusted text", async () => {
+  it("site adapter opens the full LinkedIn messaging page when the dock root is absent", async () => {
+    simulateExecute();
+    tabsUpdate.mockResolvedValueOnce({ id: 1, url: "http://localhost:3000/messaging/" } as chrome.tabs.Tab);
+    const { CommandExecutor } = await import("../src/background/command-executor");
+    const ce = new CommandExecutor();
+
+    const result = await ce.executeCommand(1, {
+      action: "run_script",
+      script: "site_adapter:linkedin",
+      script_args: {
+        __harness: "site:linkedin",
+        operation: "open_messaging_dock",
+        scope: "global_nav",
+      },
+      script_timeout_ms: 5000,
+      target: null,
+      value: null,
+      selector_chain: [],
+      intent: null,
+      methods: [],
+      timeout_ms: 5000,
+      success_condition: null,
+    } as AgentCommand);
+
+    expect(result.success).toBe(true);
+    expect(tabsUpdate).toHaveBeenCalledWith(1, { url: "http://localhost:3000/messaging/" });
+    expect((result.script_result as any).reason).toBe("linkedin_open_messaging_page");
+  });
+
+  it("site adapter types into the messaging composer with trusted text", async () => {
     simulateExecute();
     const { CommandExecutor } = await import("../src/background/command-executor");
     const ce = new CommandExecutor();
@@ -484,9 +513,9 @@ describe("CommandExecutor.runScript", () => {
 
     const result = await ce.executeCommand(1, {
       action: "run_script",
-      script: "linkedin_site",
+      script: "site_adapter:linkedin",
       script_args: {
-        __harness: "linkedin_site",
+        __harness: "site:linkedin",
         operation: "type_message",
         scope: "messaging_dock",
         text: "hello from test",
@@ -506,7 +535,7 @@ describe("CommandExecutor.runScript", () => {
     expect((result.script_result as any).operation).toBe("type_message");
   });
 
-  it("linkedin_site opens the messaging dock before retrying a dock-scoped operation", async () => {
+  it("site adapter opens the messaging dock before retrying a dock-scoped operation", async () => {
     executeScript
       .mockResolvedValueOnce([{ result: { ok: false, operation: "open_conversation", error: "LINKEDIN_SITE_NO_MESSAGING_ROOT" }, frameId: 0 } as chrome.scripting.InjectionResult])
       .mockResolvedValueOnce([{ result: {
@@ -540,9 +569,9 @@ describe("CommandExecutor.runScript", () => {
     const ce = new CommandExecutor();
     const result = await ce.executeCommand(1, {
       action: "run_script",
-      script: "linkedin_site",
+      script: "site_adapter:linkedin",
       script_args: {
-        __harness: "linkedin_site",
+        __harness: "site:linkedin",
         operation: "open_conversation",
         scope: "messaging_dock",
         name: "Franz Sivaja Sánchez",

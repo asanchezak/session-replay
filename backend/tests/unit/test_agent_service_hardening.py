@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.models.event import EventLog
 from core.models.workflow import Workflow
-from services.agent_models import PageContext, PollRequest, ResultRequest, SAFETY_LIMITS
+from services.agent_models import SAFETY_LIMITS, PageContext, PollRequest, ResultRequest
 from services.agent_service import AgentService
 from services.execution_service import ExecutionService
+from services.site_adapters.registry import compile_site_command
 
 
 def _step(index: int, action_type: str = "click", value: str | None = None) -> dict:
@@ -398,7 +399,7 @@ def test_linkedin_site_command_compiles_messaging_steps(db_session: AsyncSession
         ctx,
     )
     assert cmd is not None
-    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["__harness"] == "site:linkedin"
     assert cmd.script_args["operation"] == "send_message"
     assert cmd.script_args["scope"] == "messaging_dock"
 
@@ -415,8 +416,29 @@ def test_linkedin_site_command_compiles_general_nav_click(db_session: AsyncSessi
         PageContext(url="https://www.linkedin.com/feed/", title="LinkedIn"),
     )
     assert cmd is not None
-    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["__harness"] == "site:linkedin"
     assert cmd.script_args["operation"] == "open_messaging_dock"
+
+
+def test_site_adapter_registry_compiles_linkedin_nav_click():
+    cmd = compile_site_command(
+        {
+            "action_type": "click",
+            "intent": "Click Jobs in the LinkedIn top navigation",
+            "value": "Jobs",
+            "selector_chain": [{"type": "text", "value": "Jobs"}],
+        },
+        PageContext(url="https://www.linkedin.com/feed/", title="LinkedIn"),
+    )
+    assert cmd is not None
+    assert cmd.script == "site_adapter:linkedin"
+    assert cmd.script_args == {
+        "__harness": "site:linkedin",
+        "site": "linkedin",
+        "operation": "click",
+        "scope": "global_nav",
+        "label": "Jobs",
+    }
 
 
 def test_linkedin_site_command_uses_intent_when_context_url_is_stale(db_session: AsyncSession):
@@ -431,7 +453,7 @@ def test_linkedin_site_command_uses_intent_when_context_url_is_stale(db_session:
         PageContext(url="about:blank", title="Transitioning"),
     )
     assert cmd is not None
-    assert cmd.script_args["__harness"] == "linkedin_site"
+    assert cmd.script_args["__harness"] == "site:linkedin"
     assert cmd.script_args["operation"] == "click"
     assert cmd.script_args["scope"] == "global_nav"
     assert cmd.script_args["label"] == "Home"
