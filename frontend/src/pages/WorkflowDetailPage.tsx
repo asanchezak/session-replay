@@ -8,7 +8,7 @@ import { OutputSchemaPreview } from "../components/OutputSchemaPreview";
 import { RunParameterModal } from "../components/RunParameterModal";
 import Banner from "../components/Banner";
 import { useApi, useApiData } from "../hooks/useApi";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink } from "lucide-react";
 
 interface Step {
   step_index: number;
@@ -100,6 +100,15 @@ interface BindingPreview {
   error?: string;
 }
 
+interface WebhookTrigger {
+  id: string;
+  connector_id: string;
+  workflow_id: string;
+  event_kind: string;
+  enabled: boolean;
+  created_at: string | null;
+}
+
 function normalizeText(value: string | null | undefined): string {
   return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -165,6 +174,18 @@ export default function WorkflowDetailPage() {
   const [bindingSaving, setBindingSaving] = useState<Record<string, boolean>>({});
   const [bindingErrors, setBindingErrors] = useState<Record<string, string | null>>({});
 
+  // Webhook triggers state
+  const [webhookTriggers, setWebhookTriggers] = useState<WebhookTrigger[]>([]);
+  const [showAddTrigger, setShowAddTrigger] = useState(false);
+  const [newTriggerConnectorId, setNewTriggerConnectorId] = useState("");
+  const [triggerSaving, setTriggerSaving] = useState(false);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [triggerNowUrl, setTriggerNowUrl] = useState("");
+  const [triggerNowConnectorId, setTriggerNowConnectorId] = useState("");
+  const [triggerNowRunning, setTriggerNowRunning] = useState(false);
+  const [triggerNowResult, setTriggerNowResult] = useState<{ run_id: string } | null>(null);
+  const [triggerNowError, setTriggerNowError] = useState<string | null>(null);
+
   useEffect(() => {
     if (workflowId) fetchData("GET", `/workflows/${workflowId}`);
   }, [workflowId]);
@@ -182,6 +203,78 @@ export default function WorkflowDetailPage() {
     }
     setBindingDrafts(drafts);
   }, [data?.connector_bindings]);
+
+  useEffect(() => {
+    if (!workflowId) return;
+    request<{ triggers: WebhookTrigger[] }>("GET", `/workflows/${workflowId}/webhook-triggers`)
+      .then((res) => setWebhookTriggers(res.triggers))
+      .catch(() => {});
+  }, [workflowId]);
+
+  useEffect(() => {
+    if (webhookTriggers.length > 0 && !triggerNowConnectorId) {
+      setTriggerNowConnectorId(webhookTriggers[0].connector_id);
+    }
+  }, [webhookTriggers]);
+
+  const fetchWebhookTriggers = async () => {
+    if (!workflowId) return;
+    try {
+      const res = await request<{ triggers: WebhookTrigger[] }>("GET", `/workflows/${workflowId}/webhook-triggers`);
+      setWebhookTriggers(res.triggers);
+    } catch { /* ignore */ }
+  };
+
+  const createWebhookTrigger = async () => {
+    if (!workflowId || !newTriggerConnectorId) return;
+    setTriggerSaving(true);
+    setTriggerError(null);
+    try {
+      await request("POST", `/workflows/${workflowId}/webhook-triggers`, {
+        connector_id: newTriggerConnectorId,
+        event_kind: "new_job_position",
+      });
+      setShowAddTrigger(false);
+      setNewTriggerConnectorId("");
+      await fetchWebhookTriggers();
+    } catch (e) {
+      setTriggerError(e instanceof Error ? e.message : "Failed to create trigger");
+    } finally {
+      setTriggerSaving(false);
+    }
+  };
+
+  const deleteWebhookTrigger = async (triggerId: string) => {
+    if (!workflowId) return;
+    try {
+      await request("DELETE", `/workflows/${workflowId}/webhook-triggers/${triggerId}`);
+      await fetchWebhookTriggers();
+    } catch { /* ignore */ }
+  };
+
+  const handleTriggerNow = async () => {
+    if (!workflowId) return;
+    const connId = triggerNowConnectorId || (connectors?.[0]?.id ?? "");
+    if (!connId) {
+      setTriggerNowError("Select a connector first.");
+      return;
+    }
+    setTriggerNowRunning(true);
+    setTriggerNowResult(null);
+    setTriggerNowError(null);
+    try {
+      const res = await request<{ run_id: string; resolved_params: Record<string, string> }>(
+        "POST",
+        `/workflows/${workflowId}/trigger-now`,
+        { connector_id: connId, job_url: triggerNowUrl || null },
+      );
+      setTriggerNowResult(res);
+    } catch (e) {
+      setTriggerNowError(e instanceof Error ? e.message : "Trigger failed");
+    } finally {
+      setTriggerNowRunning(false);
+    }
+  };
 
   const waitForRunStarted = (): Promise<
     | { type: "started"; runId: string }
@@ -762,6 +855,128 @@ export default function WorkflowDetailPage() {
               <p className="text-text-secondary text-sm">{analysis.workflow_summary}</p>
             </Card>
           )}
+
+          {/* Automation Triggers */}
+          <Card className="col-span-2">
+            <h2 className="text-sm font-medium text-text-primary mb-4 flex items-center gap-2">
+              <Zap size={14} /> Automation Triggers
+            </h2>
+
+            {/* Existing triggers list */}
+            {webhookTriggers.length > 0 && (
+              <div className="mb-4 space-y-2">
+                {webhookTriggers.map((t) => {
+                  const connName = connectors?.find((c) => c.id === t.connector_id)?.name ?? t.connector_id.slice(0, 8);
+                  return (
+                    <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-md bg-bg-elevated border border-border text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
+                        <span className="text-text-primary">{connName}</span>
+                        <span className="text-text-secondary">—</span>
+                        <span className="text-info text-xs">{t.event_kind}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteWebhookTrigger(t.id)}
+                        className="text-text-gray hover:text-error transition-colors"
+                        title="Remove trigger"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Add trigger */}
+            {showAddTrigger ? (
+              <div className="mb-4 p-3 rounded-md border border-border bg-bg-elevated space-y-3">
+                <div>
+                  <label className="text-xs text-text-secondary block mb-1">Connector</label>
+                  <select
+                    value={newTriggerConnectorId}
+                    onChange={(e) => setNewTriggerConnectorId(e.target.value)}
+                    className="w-full px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
+                  >
+                    <option value="">Select connector…</option>
+                    {(connectors || []).map((c) => (
+                      <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-text-secondary block mb-1">Event</label>
+                  <div className="px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-secondary text-sm">new_job_position</div>
+                </div>
+                {triggerError && <p className="text-xs text-error">{triggerError}</p>}
+                <div className="flex gap-2">
+                  <button type="button" onClick={createWebhookTrigger} disabled={triggerSaving || !newTriggerConnectorId}
+                    className="px-3 py-1.5 rounded-md bg-accent text-white text-xs hover:bg-accent-hover disabled:opacity-50">
+                    {triggerSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button type="button" onClick={() => { setShowAddTrigger(false); setTriggerError(null); }}
+                    className="px-3 py-1.5 rounded-md border border-border text-text-secondary text-xs hover:text-text-primary">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" onClick={() => setShowAddTrigger(true)}
+                className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary mb-4 transition-colors">
+                <Plus size={13} /> Connect webhook
+              </button>
+            )}
+
+            {/* Manual test */}
+            <div className="border-t border-border pt-4">
+              <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-3">Manual Test</h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-text-secondary block mb-1">Odoo Position URL (optional override)</label>
+                  <input
+                    type="url"
+                    value={triggerNowUrl}
+                    onChange={(e) => setTriggerNowUrl(e.target.value)}
+                    placeholder="https://odoo.example.com/web#action=recruitment&id=42"
+                    className="w-full px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-primary text-sm focus:outline-none focus:border-accent placeholder:text-text-gray"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-text-secondary block mb-1">Connector</label>
+                  <select
+                    value={triggerNowConnectorId}
+                    onChange={(e) => setTriggerNowConnectorId(e.target.value)}
+                    className="w-full px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
+                  >
+                    <option value="">Select connector…</option>
+                    {(connectors || []).map((c) => (
+                      <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
+                    ))}
+                  </select>
+                </div>
+                {triggerNowError && <p className="text-xs text-error">{triggerNowError}</p>}
+                {triggerNowResult && (
+                  <div className="flex items-center gap-2 text-xs text-success">
+                    <span>Run created:</span>
+                    <a href={`/runs/${triggerNowResult.run_id}`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 underline hover:text-success/80">
+                      #{triggerNowResult.run_id.slice(0, 8)} <ExternalLink size={11} />
+                    </a>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleTriggerNow}
+                  disabled={triggerNowRunning || !(triggerNowConnectorId || (connectors || []).length > 0)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-accent text-white text-xs hover:bg-accent-hover disabled:opacity-50 transition-colors"
+                >
+                  <Zap size={12} />
+                  {triggerNowRunning ? "Triggering…" : "Trigger Now"}
+                </button>
+              </div>
+            </div>
+          </Card>
 
           {/* Steps anyway in semantic view */}
           <Card className="col-span-2">

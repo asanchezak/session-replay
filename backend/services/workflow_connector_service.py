@@ -14,7 +14,7 @@ from services.connector_forum_service import ConnectorForumService
 class WorkflowConnectorService:
     SOURCE_KIND_ODOO_LATEST_JOB = "odoo_latest_job"
     SUPPORTED_SOURCE_KINDS = {SOURCE_KIND_ODOO_LATEST_JOB}
-    TEMPLATE_FIELDS = {"job_id", "job_title", "job_description"}
+    TEMPLATE_FIELDS = {"job_id", "job_title", "job_description", "job_url"}
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -201,10 +201,17 @@ class WorkflowConnectorService:
             return digits, raw_id
 
         latest_job = sorted(jobs, key=_sort_key, reverse=True)[0]
+        odoo_base = (connector.config.get("url") or "").rstrip("/")
+        job_url = (
+            f"{odoo_base}/web#action=recruitment&id={latest_job['job_id']}"
+            if odoo_base
+            else ""
+        )
         return {
             "job_id": latest_job["job_id"],
             "job_title": latest_job["job_title"],
             "job_description": latest_job["job_description"],
+            "job_url": job_url,
         }
 
     def _validate_template(self, template: str) -> None:

@@ -4,7 +4,15 @@ import EmptyState from "../components/EmptyState";
 import Banner from "../components/Banner";
 import { useApiData } from "../hooks/useApi";
 import { useApi } from "../hooks/useApi";
-import { Cable, Plus, CheckCircle, XCircle, RefreshCw } from "lucide-react";
+import { Cable, Plus, CheckCircle, XCircle, RefreshCw, Zap } from "lucide-react";
+
+interface WebhookTrigger {
+  id: string;
+  connector_id: string;
+  workflow_id: string;
+  event_kind: string;
+  enabled: boolean;
+}
 
 interface Connector {
   id: string;
@@ -41,6 +49,7 @@ export default function ConnectorsPage() {
   const [configDraft, setConfigDraft] = useState<OdooConfigDraft | null>(null);
   const [configSaving, setConfigSaving] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [connectorTriggers, setConnectorTriggers] = useState<Record<string, WebhookTrigger[]>>({});
 
   useEffect(() => {
     fetchData("GET", "/connectors");
@@ -77,6 +86,10 @@ export default function ConnectorsPage() {
       });
       setConfiguringId(connectorId);
       setConfigError(null);
+      // Fetch webhook triggers for this connector
+      request<{ triggers: WebhookTrigger[] }>("GET", `/connectors/${connectorId}/webhook-triggers`)
+        .then((res) => setConnectorTriggers((prev) => ({ ...prev, [connectorId]: res.triggers })))
+        .catch(() => {});
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : "Failed to load connector config");
     }
@@ -277,6 +290,26 @@ export default function ConnectorsPage() {
                       >
                         Cancel
                       </button>
+                    </div>
+
+                    {/* Webhook Triggers for this connector */}
+                    <div className="pt-3 border-t border-border">
+                      <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <Zap size={11} /> Workflow Triggers
+                      </h4>
+                      {(connectorTriggers[conn.id] || []).length === 0 ? (
+                        <p className="text-xs text-text-gray italic">No workflows triggered by this connector. Link one from a workflow's Automation Triggers section.</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {(connectorTriggers[conn.id] || []).map((t) => (
+                            <div key={t.id} className="flex items-center gap-2 text-xs">
+                              <span className={`w-1.5 h-1.5 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
+                              <span className="text-text-secondary font-mono">{t.workflow_id.slice(0, 8)}…</span>
+                              <span className="text-info">{t.event_kind}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

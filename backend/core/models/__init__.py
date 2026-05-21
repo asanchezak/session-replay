@@ -19,6 +19,7 @@ from core.models.recovery_attempt_trace import RecoveryAttemptTrace
 from core.models.run import ExecutionRun
 from core.models.run_summary import RunSummary
 from core.models.settings import AppSetting
+from core.models.webhook import WebhookTrigger
 from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "AuditOutbox", "Base", "ConnectorConfig", "EventLog", "ExecutionRun",
     "OutputSpecification", "PageStateSnapshot", "RecoveryAttemptTrace",
     "RunSummary", "SemanticAction", "SemanticPhase",
+    "WebhookTrigger",
     "Workflow", "WorkflowAnalysis", "WorkflowConnectorBinding", "WorkflowParameter",
     "WorkflowStep", "WorkflowStatus", "WorkflowTemplate",
 ]
