@@ -11,6 +11,10 @@ docker/volumes/
 .ruff_cache/
 *.db
 .e2e-profile/
+extension/.linkedin-profile/
+extension/.linkedin-state.json
+extension/linkedin-debug-*.png
+extension/dock-state-probe.png
 test-results/
 playwright-report/
 .local-e2e-sites/

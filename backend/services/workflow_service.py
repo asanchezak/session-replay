@@ -189,6 +189,7 @@ class WorkflowService:
                 selector_chain=sd.get("selector_chain"),
                 value=sd.get("value"),
                 methods=sd.get("methods"),
+                success_condition=sd.get("success_condition"),
                 checkpoint=bool(sd.get("checkpoint", False)),
             )
             self.session.add(step)

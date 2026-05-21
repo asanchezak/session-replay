@@ -121,6 +121,60 @@ describe("Selector chain fallthrough", () => {
     expect(r.success).toBe(false);
   });
 
+  it("shadow_css selector pierces shadow root to find inner button", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const host = document.createElement("div");
+    host.setAttribute("data-testid", "interop-shadowdom");
+    document.body.appendChild(host);
+    const sr = host.attachShadow({ mode: "open" });
+    const btn = document.createElement("button");
+    btn.setAttribute("aria-label", "Send");
+    btn.style.width = "100px";
+    btn.style.height = "30px";
+    sr.appendChild(btn);
+
+    let clickedOn: Element | null = null;
+    btn.addEventListener("click", (e) => { clickedOn = e.target as Element; });
+
+    const r = await executeStep({
+      action_type: "click",
+      selector_chain: [{
+        type: "shadow_css",
+        value: JSON.stringify({
+          host_chain: [`div[data-testid="interop-shadowdom"]`],
+          target: `button[aria-label="Send"]`,
+        }),
+      }],
+    });
+    expect(r.success).toBe(true);
+    expect(clickedOn).toBe(btn);
+  });
+
+  it("plain css selector also pierces shadow DOM as a fallback", async () => {
+    const { executeStep } = await import("../src/content/replay");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const sr = host.attachShadow({ mode: "open" });
+    const btn = document.createElement("button");
+    btn.setAttribute("aria-label", "Compose");
+    btn.style.width = "100px";
+    btn.style.height = "30px";
+    sr.appendChild(btn);
+
+    let clickedOn: Element | null = null;
+    btn.addEventListener("click", (e) => { clickedOn = e.target as Element; });
+
+    const r = await executeStep({
+      action_type: "click",
+      selector_chain: [
+        // Light-DOM query will miss this — replay should recurse into shadow roots
+        { type: "css", value: `button[aria-label="Compose"]` },
+      ],
+    });
+    expect(r.success).toBe(true);
+    expect(clickedOn).toBe(btn);
+  });
+
   it("E-C-05: chain respects a11y-before-css order (PRD §7.2)", async () => {
     const { executeStep } = await import("../src/content/replay");
     const wrong = document.createElement("button");

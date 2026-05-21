@@ -1,0 +1,319 @@
+================================================================================
+                    SESSION REPLAY — ARCHITECTURE OVERVIEW
+================================================================================
+
+
+                              ┌───────────────────────┐
+                              │     USER (Operator)    │
+                              │  Dashboard + Extension │
+                              └──────────┬────────────┘
+                                         │
+                         ┌───────────────┼───────────────┐
+                         │               │               │
+                    ┌────┴────┐    ┌─────┴──────┐   ┌───┴────┐
+                    │  Popup  │    │  Frontend  │   │  Side  │
+                    │(compact)│    │(dashboard) │   │ Panel  │
+                    └────┬────┘    └─────┬──────┘   └───┬────┘
+                         │               │               │
+                         │    HTTPS / JSON + X-API-Key   │
+                         └───────┬───────┴───────┬───────┘
+                                 │               │
+                    ┌────────────┴───────────────┴────────────┐
+                    │            BACKEND (FastAPI)            │
+                    │                                         │
+                    │  ┌──────────────────────────────────┐   │
+                    │  │         API ROUTES (v1)           │   │
+                    │  │  agent · runs · workflows         │   │
+                    │  │  events · audit · connectors      │   │
+                    │  │  artifacts · debug · settings     │   │
+                    │  └──────────────┬───────────────────┘   │
+                    │                 │                        │
+                    │  ┌──────────────┴───────────────────┐   │
+                    │  │          SERVICES (24)            │   │
+                    │  │                                   │   │
+                    │  │  ┌─────────────────────────────┐  │   │
+                    │  │  │    AgentService (3275 lines) │  │   │
+                    │  │  │  · poll() — main agent loop  │  │   │
+                    │  │  │  · report_result()           │  │   │
+                    │  │  │  · _consult_ai_for_step()    │  │   │
+                    │  │  │  · _autonomous_recovery()    │  │   │
+                    │  │  └─────────────────────────────┘  │   │
+                    │  │                                   │   │
+                    │  │  ┌─────────────────────────────┐  │   │
+                    │  │  │   ExecutionService           │  │   │
+                    │  │  │  · create_run / transition   │  │   │
+                    │  │  │  · advance_step              │  │   │
+                    │  │  │  · goal_progress             │  │   │
+                    │  │  └─────────────────────────────┘  │   │
+                    │  │                                   │   │
+                    │  │  ┌─────────────────────────────┐  │   │
+                    │  │  │   HealingService             │  │   │
+                    │  │  │  · suggest_heal()            │  │   │
+                    │  │  │  · apply_plan_update()       │  │   │
+                    │  │  │  · recover()                 │  │   │
+                    │  │  └─────────────────────────────┘  │   │
+                    │  │                                   │   │
+                    │  │  ┌─────────────────────────────┐  │   │
+                    │  │  │   RecoverySupervisor          │  │   │
+                    │  │  │  · 30s poll on stuck runs    │  │   │
+                    │  │  │  · 5 attempt cap             │  │   │
+                    │  │  └─────────────────────────────┘  │   │
+                    │  │                                   │   │
+                    │  │  ┌─────────────────────────────┐  │   │
+                    │  │  │   LearningService            │  │   │
+                    │  │  │  · EMA selector stability    │  │   │
+                    │  │  └─────────────────────────────┘  │   │
+                    │  │                                   │   │
+                    │  │  · AIOutcomeService               │   │
+                    │  │  · AuditService (SHA-256 chain)   │   │
+                    │  │  · WorkflowService                │   │
+                    │  │  · StorageService (fsspec)        │   │
+                    │  └──────────────┬───────────────────┘   │
+                    │                 │                        │
+                    │  ┌──────────────┴───────────────────┐   │
+                    │  │            AI LAYER               │   │
+                    │  │                                   │   │
+                    │  │  AI Client (OpenAI / Mock)        │   │
+                    │  │  Prompt Builders (heal, classify, │   │
+                    │  │    extract, agent decision)       │   │
+                    │  │  Agent Tools (execute, wait, skip,│   │
+                    │  │    restart, rollback, update_plan)│   │
+                    │  │  Tool-use AI loop (inner loop)    │   │
+                    │  └──────────────┬───────────────────┘   │
+                    │                 │                        │
+                    │  ┌──────────────┴───────────────────┐   │
+                    │  │         ORM MODELS (17)           │   │
+                    │  │                                   │   │
+                    │  │  ExecutionRun  — central runtime   │   │
+                    │  │  Workflow     — recorded blueprint │   │
+                    │  │  WorkflowStep — individual action  │   │
+                    │  │  EventLog     — SHA-256 hash chain │   │
+                    │  │  AIDecisionOutcome — telemetry     │   │
+                    │  │  Artifact     — screenshots/DOM    │   │
+                    │  │  ConnectorConfig — Odoo adapter    │   │
+                    │  │  HumanIntervention — paused runs   │   │
+                    │  │  RunSummary   — aggregate metrics  │   │
+                    │  │  ... 7 more models                 │   │
+                    │  └──────────────┬───────────────────┘   │
+                    │                 │                        │
+                    │      ┌──────────┴──────────┐            │
+                    │      v                     v            │
+                    │  ┌────────┐        ┌────────────┐      │
+                    │  │PostgreSQL│       │  fsspec    │      │
+                    │  │(SQLite   │       │  Storage   │      │
+                    │  │ in tests)│       │(S3/MinIO)  │      │
+                    │  └─────────┘       └────────────┘      │
+                    │                                         │
+                    │  ┌──────────────────────────────────┐   │
+                    │  │     ADAPTERS (Odoo + Registry)    │   │
+                    │  │  · list / get / create / update   │   │
+                    │  │  · upsert via registry pattern    │   │
+                    │  └──────────────────────────────────┘   │
+                    └─────────────────────────────────────────┘
+
+
+================================================================================
+                          CHROME EXTENSION (MV3)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                           SERVICE WORKER                                │
+  │                                                                         │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │
+  │  │  Orchestrator │  │   Executor   │  │Command-Exec  │  │   Healer   │  │
+  │  │  · buffering  │  │  · dispatch  │  │· navigate    │  │· DOM fallbk│  │
+  │  │  · recording  │  │  · agent cmd │  │· click/type  │  │· selector  │  │
+  │  │  · workflow   │  │    routing   │  │· scroll/extr │  │  healing   │  │
+  │  └──────────────┘  └──────────────┘  └──────────────┘  └────────────┘  │
+  │                                                                         │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐  │
+  │  │   Detector   │  │  API Client  │  │  Retry (backoff)             │  │
+  │  │  CAPTCHA,    │  │  poll()      │  │                              │  │
+  │  │  login, 2FA  │  │  result()    │  │                              │  │
+  │  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
+  └─────────────────────────────────────────────────────────────────────────┘
+                    │                           ▲
+                    │ messages                   │ messages
+                    v                           │
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                        CONTENT SCRIPT                                  │
+  │                                                                         │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │
+  │  │   Capture    │  │   Replay     │  │     DOM      │  │ Extraction │  │
+  │  │  · click     │  │  · visibili  │  │  · traversal │  │ · tables   │  │
+  │  │  · type      │  │  · stability │  │  · query     │  │ · lists    │  │
+  │  │  · scroll    │  │  · enabled   │  │  · mutation  │  │ · fields   │  │
+  │  │  · navigate  │  │  · heuristics│  │              │  │            │  │
+  │  └──────────────┘  └──────────────┘  └──────────────┘  └────────────┘  │
+  │                                                                         │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  Selectors: CSS → text → accessibility → xpath → anchor → shadow  │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────────────────────────┘
+                    │
+                    v
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                      POPUP / PANEL (React 19)                          │
+  │                                                                         │
+  │  IdleView · RecordingView · RunningView · WaitingView · ErrorView      │
+  │  GoalInputView                                                         │
+  │                                                                         │
+  │  chrome.storage.session (TRUSTED_AND_UNTRUSTED_CONTEXTS) ← read/write  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                           FRONTEND DASHBOARD
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                         AppShell                                        │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  Top Bar: search · status indicator · logs link · user menu     │   │
+  │  ├──────────────────────────────────────────────────────────────────┤   │
+  │  │  Sidebar: Dashboard · Workflows · Runs · Audit · Connectors ·   │   │
+  │  │           Settings (with count badges)                          │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    v               v               v
+  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐
+  │  Dashboard  │ │  Workflows  │ │   Runs      │ │   Audit     │ │Connector│
+  │  · KPIs     │ │  · list     │ │  · history  │ │  · event log│ │· Odoo   │
+  │  · alerts   │ │  · detail   │ │  · progress │ │  · hash ver.│ │· health │
+  │  · recent   │ │  · steps    │ │  · AI trace │ │  · export   │ │· config │
+  │  · templates│ │  · analyze  │ │  · timeline │ │             │ │         │
+  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    v                               v
+  ┌───────────────────────────────┐ ┌───────────────────────────────┐
+  │         Components            │ │          Hooks                │
+  │  StatusBadge · Card · DataTbl │ │  useApi · useApiData          │
+  │  Banner · EmptyState · Bread  │ │  useWorkflows · useRuns       │
+  │  InterventionModal · Timeline │ │  (auth header + Seq logging)  │
+  │  ConfidenceIndicator · Param  │ │                               │
+  └───────────────────────────────┘ └───────────────────────────────┘
+
+
+================================================================================
+                           STATE MACHINE
+================================================================================
+
+    ┌──────────┐
+    │   idle   │
+    └────┬─────┘
+         │ record
+         v
+    ┌──────────┐
+    │recording │
+    └────┬─────┘
+         │ validate
+         v
+    ┌──────────┐
+    │validated │
+    └────┬─────┘
+         │ queue
+         v
+    ┌──────────┐
+    │  queued  │
+    └────┬─────┘
+         │ start
+         v
+    ┌──────────┐
+    │ running  │─────────────────────────────┐
+    └────┬─────┘                             │
+         │                              ┌────┴─────┐
+    ┌────┴─────┐                   ┌───│completed │
+    │waiting   │                   │   └──────────┘
+    │for_user  │────┐              │
+    └────┬─────┘    │              │   ┌──────────┐
+         │     ┌────┴─────┐  ┌────┴───│ failed   │
+    ┌────┴─────┘          │  │        └──────────┘
+    │recovering│───────────┘  │
+    └──────────┘             │   ┌──────────┐
+                             └───│ canceled │
+                                 └──────────┘
+
+
+================================================================================
+                       AUTONOMY STACK (PHASES 0-6)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  L6  Tool-use AI  │ OpenAI tool calling with inner loop               │
+  │                    │ (plan → execute → feedback)                       │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L5  Telemetry +  │ AIDecisionOutcome · EMA selector stability        │
+  │      Learning     │ Cross-run workflow expertise                       │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L4  Recovery     │ RecoverySupervisor (30s poll, 5 cap)              │
+  │      Supervisor   │ Last-chance recovery before pause                  │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L3  PlanUpdate   │ INSERT/REMOVE/MODIFY/REORDER steps mid-run        │
+  │      Ops          │ Recovery cycles: ADAPT/RESTART/ROLLBACK/EXECUTE    │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L2  Goal-first   │ goal_progress (phases + intents)                  │
+  │      Cursor       │ PageDiff between polls                            │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L1  AI-first     │ AI consulted on EVERY poll when API key is set    │
+  │      Poll         │ (inverted: AI is the cursor, not the safety net)   │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  L0  Deterministic│ Fast-path EXECUTE when no AI key configured       │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                          KEY DATA FLOWS
+================================================================================
+
+  RECORDING:
+    User action → Content Script (capture.ts)
+                → RECORD_EVENT message → Service Worker (orchestrator.ts)
+                → POST /v1/workflows/record → Backend → PostgreSQL
+
+  EXECUTION (agent loop):
+    Service Worker → CAPTURE_PAGE_CONTEXT → Content Script → page state
+    Service Worker → POST /v1/agent/{id}/poll → AgentService.poll()
+                    → (AI consult if enabled) → returns AgentDecision
+    Service Worker → EXECUTE_AGENT_COMMAND → Content Script (replay.ts)
+    Service Worker → POST /v1/agent/{id}/result → AgentService.report_result()
+
+  DASHBOARD:
+    Frontend hooks → GET /v1/runs, /v1/workflows, etc. → Backend API → DB
+    5s poll for waiting_for_user runs → InterventionModal on match
+
+  OBSERVABILITY:
+    All layers → Seq (http://localhost:8082) via structured logging
+    Extension → POST /v1/debug/log → Debug endpoint
+
+
+================================================================================
+                       TESTING STRUCTURE
+================================================================================
+
+  Backend (67 files):         Extension (28 unit + 41 e2e):
+  ┌──────────────────────┐   ┌──────────────────────────────┐
+  │  Unit tests (45)     │   │  Vitest unit:                │
+  │  Integration (22)    │   │  · capture, replay, selectors│
+  │                      │   │  · healer, orchestrator, API │
+  │  SQLite :memory:     │   │                              │
+  │  pytest + asyncio    │   │  Playwright e2e:             │
+  │                      │   │  · popup, recording, runs    │
+  │  Key test areas:     │   │  · LinkedIn flows            │
+  │  · state machine     │   │  · autonomy adaptation       │
+  │  · agent service     │   │  · service worker lifecycle  │
+  │  · healing/plan      │   │  · healing (subdirectory)    │
+  │  · audit / hash      │   │  · auth flows                │
+  │  · AI client         │   └──────────────────────────────┘
+  │  · API routes        │
+  │  · auth/CORS/ratelimit│  Frontend:
+  │  · Odoo adapter      │  ┌──────────────────────────────┐
+  │  · migrations        │  │  3 unit tests (hooks)        │
+  └──────────────────────┘  │  Component tests              │
+                            │  16 Playwright e2e            │
+                            └──────────────────────────────┘
+
+
+================================================================================

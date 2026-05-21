@@ -535,7 +535,7 @@ class AgentService:
         normalized = error.strip().lower()
         if "script_parse_error" in normalized or "content security policy" in normalized:
             return "fatal"
-        if "js_click_fallback_no_target" in normalized:
+        if "js_click_fallback_no_target" in normalized or "js_type_fallback_no_target" in normalized:
             return "no-target"
         if "script_timeout" in normalized or "timed out" in normalized:
             return "timeout"
@@ -1122,6 +1122,32 @@ class AgentService:
                 next_step_index=step_index,
             )
 
+        js_type_command = self._build_js_type_fallback_command(step)
+        if js_type_command:
+            reasoning = "AI output unusable; executing deterministic JS type fallback"
+            await self._audit_decision(
+                run_id,
+                "EXECUTE",
+                0.65,
+                reasoning,
+                command=js_type_command,
+                step_index=step_index,
+                page_context=ctx,
+                decision_context={
+                    "origin": "ai-fallback",
+                    "fallback": "js-type",
+                    "page_content_analyzed": True,
+                    "step_action": step.get("action_type"),
+                },
+            )
+            return PollResponse(
+                decision="EXECUTE",
+                confidence=0.65,
+                reasoning=reasoning,
+                command=js_type_command,
+                next_step_index=step_index,
+            )
+
         if self._is_transitional_page(ctx):
             return await self._handle_wait_decision(
                 run=run,
@@ -1246,13 +1272,33 @@ class AgentService:
             return None
         selector_chain = step.get("selector_chain") or []
         raw_candidates: list[str] = []
+        shadow_selectors: list[dict] = []
         if isinstance(selector_chain, list):
             for sel in selector_chain:
                 if not isinstance(sel, dict):
                     continue
                 value = sel.get("value")
-                if isinstance(value, str) and value.strip():
-                    raw_candidates.append(value.strip()[:220])
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                # shadow_css selectors are JSON {host_chain, target}; they are
+                # piercing-aware and must NOT be dropped into the raw CSS bucket.
+                if sel.get("type") == "shadow_css":
+                    try:
+                        import json as _json
+                        parsed = _json.loads(value)
+                        if (
+                            isinstance(parsed, dict)
+                            and isinstance(parsed.get("host_chain"), list)
+                            and isinstance(parsed.get("target"), str)
+                        ):
+                            shadow_selectors.append({
+                                "hostChain": [str(h) for h in parsed["host_chain"] if isinstance(h, str)],
+                                "target": parsed["target"],
+                            })
+                    except Exception:
+                        pass
+                    continue
+                raw_candidates.append(value.strip()[:220])
         page_candidates = self._analyze_click_candidates_from_page_content(ctx, label)
         for candidate in page_candidates["selectors"]:
             if candidate not in raw_candidates:
@@ -1292,9 +1338,57 @@ class AgentService:
 const label = String((args && args.label) || "").trim();
 const labelLower = label.toLowerCase();
 const selectors = Array.isArray(args?.selectorCandidates) ? args.selectorCandidates : [];
+const shadowSelectors = Array.isArray(args?.shadowSelectors) ? args.shadowSelectors : [];
 const textCandidates = Array.isArray(args?.textCandidates) ? args.textCandidates.map((t) => String(t).trim()).filter(Boolean) : [];
 if (label) textCandidates.unshift(label);
 const normalizeToken = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+// Shadow-DOM-piercing query: queries the given root, then recurses into
+// every shadow root in the subtree. Needed for LinkedIn-style overlays.
+const deepQuerySelector = (selector, root) => {
+  root = root || document;
+  try {
+    const direct = root.querySelector(selector);
+    if (direct) return direct;
+  } catch (e) { return null; }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = node.shadowRoot;
+    if (sr) {
+      const found = deepQuerySelector(selector, sr);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+const deepQuerySelectorAll = (selector, root) => {
+  root = root || document;
+  const out = [];
+  try { out.push(...root.querySelectorAll(selector)); } catch (e) { return out; }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = node.shadowRoot;
+    if (sr) out.push(...deepQuerySelectorAll(selector, sr));
+  }
+  return out;
+};
+// Resolve a shadow_css entry by walking host_chain through shadowRoot.querySelector.
+const resolveShadowSelector = (entry) => {
+  if (!entry || !entry.target) return null;
+  const hostChain = Array.isArray(entry.hostChain) ? entry.hostChain : [];
+  let root = document;
+  for (const hostSel of hostChain) {
+    let host = null;
+    try { host = root.querySelector(hostSel); } catch (e) { /* invalid */ }
+    if (!host) host = deepQuerySelector(hostSel, root);
+    if (!host) return null;
+    const sr = host.shadowRoot;
+    root = sr || host;
+  }
+  let found = null;
+  try { found = root.querySelector(entry.target); } catch (e) { /* invalid */ }
+  if (!found) found = deepQuerySelector(entry.target, root);
+  return found;
+};
 const isVisible = (el) => {
   if (!el || !(el instanceof Element)) return false;
   const s = window.getComputedStyle(el);
@@ -1395,6 +1489,15 @@ const clickNode = (el, reason) => {
     originTag: el instanceof Element ? el.tagName : null,
   };
 };
+// 1) Shadow-piercing selectors recorded as shadow_css. Walk host_chain.
+for (const entry of shadowSelectors) {
+  try {
+    const node = resolveShadowSelector(entry);
+    const clicked = clickNode(node, "selector_shadow_css");
+    if (clicked) return clicked;
+  } catch {}
+}
+// 2) Plain selectors. Light DOM first, then pierce shadow roots if needed.
 for (const candidate of selectors) {
   if (typeof candidate !== "string" || !candidate) continue;
   try {
@@ -1404,12 +1507,13 @@ for (const candidate of selectors) {
       if (clicked) return clicked;
       continue;
     }
-    const node = document.querySelector(candidate);
+    let node = document.querySelector(candidate);
+    if (!node) node = deepQuerySelector(candidate);
     const clicked = clickNode(node, "selector_css");
     if (clicked) return clicked;
   } catch {}
 }
-const nodes = Array.from(document.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit'],input[type='radio'],input[type='checkbox'],summary,label,[aria-label],[data-testid],[onclick],[tabindex],span,div,p,li,strong,b"));
+const nodes = deepQuerySelectorAll("button,a,[role='button'],input,textarea,select,summary,label,[aria-label],[data-testid],[onclick],[tabindex],span,div,p,li,strong,b");
 let best = null;
 let bestScore = -1;
 for (const el of nodes) {
@@ -1430,11 +1534,237 @@ throw new Error(`JS_CLICK_FALLBACK_NO_TARGET:${label}`);
                 "__harness": "js_click",
                 "label": label,
                 "selectorCandidates": selector_candidates,
+                "shadowSelectors": shadow_selectors,
                 "textCandidates": text_candidates,
                 "anchorPoints": anchor_points,
             },
             script_timeout_ms=5000,
             timeout_ms=15000,
+            success_condition=(
+                step.get("success_condition")
+                if isinstance(step.get("success_condition"), dict)
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _build_js_type_fallback_command(
+        step: dict[str, Any],
+    ) -> "AgentCommand | None":
+        """Deterministic TYPE fallback — mirrors js_click for input fields.
+
+        Runs a browser-side script that inspects the live DOM to find the
+        right input element (by placeholder, aria-label, role, or proximity
+        to the previously-clicked element) and types the recorded value into
+        it.  Works on both native inputs/textareas and contenteditable divs.
+        """
+        if not isinstance(step, dict):
+            return None
+        if str(step.get("action_type") or "").lower() != "type":
+            return None
+        value = step.get("value")
+        if not isinstance(value, str):
+            return None
+
+        # Pull semantic hints out of the recorded intent so the script can
+        # search the live DOM for the right element without needing selectors.
+        intent = str(step.get("intent") or "")
+        import re as _re
+        ph_match = _re.search(r'placeholder\s*["\']([^"\']+)["\']', intent, _re.IGNORECASE)
+        if not ph_match:
+            ph_match = _re.search(r'\(placeholder\s+([^)]+)\)', intent, _re.IGNORECASE)
+        placeholder_hint = ph_match.group(1).strip() if ph_match else ""
+
+        aria_match = _re.search(r'(?:labeled?|aria[-\s]label)\s*["\']([^"\']+)["\']', intent, _re.IGNORECASE)
+        aria_hint = aria_match.group(1).strip() if aria_match else ""
+
+        field_match = _re.search(r'into\s+(\S+)\s+field', intent, _re.IGNORECASE)
+        field_hint = field_match.group(1).strip() if field_match else ""
+
+        # Pull CSS candidates from the selector_chain for a direct-selector attempt.
+        css_candidates: list[str] = []
+        type_shadow_selectors: list[dict] = []
+        for sel in (step.get("selector_chain") or []):
+            if not isinstance(sel, dict):
+                continue
+            v = str(sel.get("value") or "").strip()
+            if not v:
+                continue
+            if sel.get("type") == "css":
+                css_candidates.append(v[:220])
+            elif sel.get("type") == "shadow_css":
+                try:
+                    import json as _json
+                    parsed = _json.loads(v)
+                    if (
+                        isinstance(parsed, dict)
+                        and isinstance(parsed.get("host_chain"), list)
+                        and isinstance(parsed.get("target"), str)
+                    ):
+                        type_shadow_selectors.append({
+                            "hostChain": [str(h) for h in parsed["host_chain"] if isinstance(h, str)],
+                            "target": parsed["target"],
+                        })
+                except Exception:
+                    pass
+
+        script = r"""
+const value        = String((args && args.value)           || "");
+const phHint       = String((args && args.placeholderHint) || "").toLowerCase().trim();
+const ariaHint     = String((args && args.ariaHint)        || "").toLowerCase().trim();
+const fieldHint    = String((args && args.fieldHint)       || "").toLowerCase().trim();
+const cssCandidates = Array.isArray(args && args.cssCandidates) ? args.cssCandidates : [];
+const shadowSelectors = Array.isArray(args && args.shadowSelectors) ? args.shadowSelectors : [];
+
+// Shadow-DOM-piercing query helpers.
+const deepQuerySelector = (selector, root) => {
+  root = root || document;
+  try { const d = root.querySelector(selector); if (d) return d; } catch { return null; }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = node.shadowRoot;
+    if (sr) { const f = deepQuerySelector(selector, sr); if (f) return f; }
+  }
+  return null;
+};
+const deepQuerySelectorAll = (selector, root) => {
+  root = root || document;
+  const out = [];
+  try { out.push(...root.querySelectorAll(selector)); } catch { return out; }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = node.shadowRoot;
+    if (sr) out.push(...deepQuerySelectorAll(selector, sr));
+  }
+  return out;
+};
+const resolveShadowSelector = (entry) => {
+  if (!entry || !entry.target) return null;
+  const hostChain = Array.isArray(entry.hostChain) ? entry.hostChain : [];
+  let root = document;
+  for (const hostSel of hostChain) {
+    let host = null;
+    try { host = root.querySelector(hostSel); } catch {}
+    if (!host) host = deepQuerySelector(hostSel, root);
+    if (!host) return null;
+    root = host.shadowRoot || host;
+  }
+  let f = null;
+  try { f = root.querySelector(entry.target); } catch {}
+  return f || deepQuerySelector(entry.target, root);
+};
+
+const isVisible = (el) => {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  const s = window.getComputedStyle(el);
+  return r.width > 0 && r.height > 0 &&
+         s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
+};
+const isTypable = (el) =>
+  el instanceof HTMLInputElement   ||
+  el instanceof HTMLTextAreaElement ||
+  (el instanceof HTMLElement && el.isContentEditable);
+
+// 0. Shadow_css selectors — pierce shadow DOM with the recorded host chain.
+for (const entry of shadowSelectors) {
+  try {
+    const el = resolveShadowSelector(entry);
+    if (el && isVisible(el) && isTypable(el)) { doType(el); return { success: true, via: "shadow_css" }; }
+  } catch {}
+}
+
+// 1. Try stored CSS selectors first (light DOM, then pierce shadow if needed).
+for (const css of cssCandidates) {
+  try {
+    let el = document.querySelector(css);
+    if (!el) el = deepQuerySelector(css);
+    if (el && isVisible(el) && isTypable(el)) { doType(el); return { success: true, via: "css", selector: css }; }
+  } catch {}
+}
+
+// 2. Gather all visible, typable elements (deep query so shadow internals count).
+const candidates = deepQuerySelectorAll(
+  "input[type='text'], input[type='search'], input[type='email'], input[type='url'], " +
+  "input:not([type]), textarea, [role='textbox'], [role='searchbox'], [contenteditable='true']"
+).filter(el => isVisible(el) && isTypable(el));
+
+const normalize = (s) => String(s || "").toLowerCase().trim();
+const score = (el) => {
+  let s = 0;
+  const ph = normalize(el.getAttribute("placeholder"));
+  const al = normalize(el.getAttribute("aria-label"));
+  const nm = normalize(el.getAttribute("name"));
+  if (phHint   && (ph.includes(phHint)   || phHint.includes(ph)))   s += 100;
+  if (ariaHint && (al.includes(ariaHint) || ariaHint.includes(al))) s += 90;
+  if (fieldHint && (nm.includes(fieldHint) || ph.includes(fieldHint) || al.includes(fieldHint))) s += 60;
+  // Prefer focused element — it was just clicked by the previous step.
+  if (el === document.activeElement) s += 40;
+  return s;
+};
+
+let best = null, bestScore = -1;
+for (const el of candidates) {
+  const s = score(el);
+  if (s > bestScore) { bestScore = s; best = el; }
+}
+
+// 3. Last resort: the focused element or the first visible typable element.
+if (!best || bestScore <= 0) {
+  if (document.activeElement && isTypable(document.activeElement) && isVisible(document.activeElement)) {
+    best = document.activeElement;
+  } else if (candidates.length > 0) {
+    best = candidates[0];
+  }
+}
+
+if (!best) throw new Error("JS_TYPE_FALLBACK_NO_TARGET");
+
+doType(best);
+return { success: true, via: "js_type", score: bestScore, tag: best.tagName,
+         placeholder: best.getAttribute("placeholder"), ariaLabel: best.getAttribute("aria-label") };
+
+function doType(el) {
+  el.focus();
+  if (el.isContentEditable) {
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel && sel.removeAllRanges();
+    sel && sel.addRange(range);
+    const ok = document.execCommand("insertText", false, value);
+    if (!ok) el.textContent = value;
+  } else {
+    const proto = el instanceof HTMLInputElement
+      ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    setter ? setter.call(el, value) : (el.value = value);
+  }
+  el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+""".strip()
+
+        return AgentCommand(
+            action=CommandAction.RUN_SCRIPT,
+            intent=f"type '{value}' via JS fallback (placeholder='{placeholder_hint}')",
+            script=script,
+            script_args={
+                "__harness": "js_type",
+                "value": value,
+                "placeholderHint": placeholder_hint,
+                "ariaHint": aria_hint,
+                "fieldHint": field_hint,
+                "cssCandidates": css_candidates,
+                "shadowSelectors": type_shadow_selectors,
+            },
+            script_timeout_ms=5000,
+            timeout_ms=15000,
+            success_condition=(
+                step.get("success_condition")
+                if isinstance(step.get("success_condition"), dict)
+                else None
+            ),
         )
 
     async def _handle_wait_decision(
@@ -2589,6 +2919,10 @@ throw new Error(`JS_CLICK_FALLBACK_NO_TARGET:${label}`);
         value = step.get("value")
         if action == CommandAction.NAVIGATE:
             value = self._resolve_step_navigate_url(step) or value
+        # Give SPA pages 2 s to finish rendering before the extension tries to
+        # locate a TYPE target.  This prevents premature ELEMENT_NOT_FOUND
+        # failures on React/Vue apps where inputs mount asynchronously.
+        delay_before_ms = 2000 if action_type == "type" else 0
         return AgentCommand(
             action=action,
             target=value,
@@ -2597,7 +2931,9 @@ throw new Error(`JS_CLICK_FALLBACK_NO_TARGET:${label}`);
             intent=step.get("intent"),
             methods=step.get("methods") or [],
             timeout_ms=15000,
+            success_condition=step.get("success_condition"),
             pre_condition=None,
+            delay_before_ms=delay_before_ms,
         )
 
     @staticmethod

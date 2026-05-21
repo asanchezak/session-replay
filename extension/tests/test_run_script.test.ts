@@ -170,4 +170,39 @@ describe("CommandExecutor.runScript", () => {
     // service-worker-only path.
     expect(tabsSendMessage).not.toHaveBeenCalled();
   });
+
+  it("enforces success_condition after run_script (pass)", async () => {
+    simulateExecute();
+    document.body.innerText = "Message sent successfully";
+    const { CommandExecutor } = await import("../src/background/command-executor");
+    const ce = new CommandExecutor();
+    const result = await ce.executeCommand(1, {
+      action: "run_script",
+      script: "return 'ok';",
+      script_args: {},
+      script_timeout_ms: 5000,
+      target: null, value: null, selector_chain: [], intent: null,
+      methods: [], timeout_ms: 5000,
+      success_condition: { type: "visible_text_contains", value: "sent successfully" },
+    } as AgentCommand);
+    expect(result.success).toBe(true);
+  });
+
+  it("enforces success_condition after run_script (fail)", async () => {
+    simulateExecute();
+    document.body.innerText = "No delivery marker here";
+    const { CommandExecutor } = await import("../src/background/command-executor");
+    const ce = new CommandExecutor();
+    const result = await ce.executeCommand(1, {
+      action: "run_script",
+      script: "return 'ok';",
+      script_args: {},
+      script_timeout_ms: 5000,
+      target: null, value: null, selector_chain: [], intent: null,
+      methods: [], timeout_ms: 5000,
+      success_condition: { type: "visible_text_contains", value: "sent successfully" },
+    } as AgentCommand);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("SUCCESS_CONDITION_FAILED");
+  });
 });

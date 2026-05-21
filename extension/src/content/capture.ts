@@ -1,6 +1,170 @@
-import type { ActionEvent, ActionType } from "../shared/types";
-import { buildSelectors, buildCssSelector } from "./selectors";
+import type { ActionEvent, ActionType, SelectorSet } from "../shared/types";
+import { buildSelectors, buildCssSelector, buildLandmarkPath, isGeneratedId } from "./selectors";
 import { sanitizeNode, redactPII, isFrameworkAttr } from "./dom";
+
+// Builds an anchor selector using the actual CLICK coordinates rather than the
+// element's bounding-rect top-left.  Critical for shadow DOM hosts where all
+// clicks inside the same host would otherwise share identical anchor offsets.
+function buildClickPositionAnchor(
+  el: HTMLElement,
+  clickX: number,
+  clickY: number,
+): SelectorSet | null {
+  // Walk up to find a stable light-DOM ancestor to anchor against.
+  let anchorEl: HTMLElement | null = el.parentElement;
+  let depth = 0;
+  while (anchorEl && anchorEl !== document.documentElement && depth < 8) {
+    const id = anchorEl.id;
+    if ((id && !isGeneratedId(id)) || anchorEl.getAttribute("data-testid")) break;
+    anchorEl = anchorEl.parentElement;
+    depth++;
+  }
+  if (!anchorEl || anchorEl === document.documentElement) return null;
+
+  const anchorCss = buildCssSelector(anchorEl);
+  if (!anchorCss) return null;
+
+  const anchorRect = anchorEl.getBoundingClientRect();
+  return {
+    type: "anchor",
+    value: JSON.stringify({
+      anchor_selector: anchorCss,
+      relation: "inside",
+      offset_x: Math.round(clickX - anchorRect.left),
+      offset_y: Math.round(clickY - anchorRect.top),
+    }),
+    score: 0.65,  // Higher than default 0.55 — points to exact click position
+  };
+}
+
+// Walks event.composedPath() (available synchronously during dispatch) to find
+// the innermost element inside shadow DOM that has meaningful accessible attributes.
+// Returns null when the click was not inside shadow DOM or no meaningful element found.
+function extractShadowDomInfo(event: MouseEvent): {
+  ariaLabel?: string;
+  text?: string;
+  role?: string;
+} | null {
+  const isElementLike = (node: unknown): node is {
+    textContent?: string | null;
+    getAttribute?: (name: string) => string | null;
+  } => (
+    !!node
+    && typeof node === "object"
+    && (
+      node instanceof Element
+      || (typeof (node as { getAttribute?: unknown }).getAttribute === "function")
+    )
+  );
+
+  const normalizeText = (value: string): string =>
+    value.trim().replace(/\s+/g, " ");
+
+  try {
+    const path = event.composedPath ? event.composedPath() : [];
+    // Some apps (LinkedIn interop overlay) expose composedPath nodes that are
+    // not plain HTMLElement instances; use element-like duck typing.
+    for (const node of path.slice(0, 12)) {
+      if (!isElementLike(node)) continue;
+
+      const ariaLabelRaw = node.getAttribute?.("aria-label") || "";
+      const roleRaw = node.getAttribute?.("role") || "";
+      const ariaLabel = normalizeText(ariaLabelRaw);
+      const role = normalizeText(roleRaw).toLowerCase();
+      const rawText = normalizeText(String(node.textContent || "")).slice(0, 120);
+      const text = rawText.length > 0 ? rawText : undefined;
+
+      // Return on first element with any meaningful attribute/text.
+      if (ariaLabel) return { ariaLabel, role: role || undefined, text };
+      if (
+        role
+        && ["button", "link", "menuitem", "option", "tab", "combobox",
+          "searchbox", "checkbox", "radio", "switch", "treeitem"].includes(role)
+      ) {
+        return { role, text };
+      }
+      if (text) return { text, role };
+    }
+  } catch { /**/ }
+  return null;
+}
+
+// Returns true for HTML elements that are meaningfully interactive.
+// Used by resolveClickTarget to find the real click target inside delegation roots.
+export function isInteractiveTarget(el: HTMLElement): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (["button", "a", "input", "select", "textarea", "summary"].includes(tag)) return true;
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  if (["button", "link", "checkbox", "radio", "menuitem", "menuitemcheckbox", "menuitemradio",
+       "option", "tab", "switch", "treeitem", "combobox", "searchbox"].includes(role)) return true;
+  if (el.hasAttribute("data-testid") || el.hasAttribute("onclick")) return true;
+  const ti = el.getAttribute("tabindex");
+  if (ti !== null && parseInt(ti, 10) >= 0) return true;
+  return false;
+}
+
+// Walks composedPath looking for an HTMLElement that lives inside a shadow
+// root. Returns the innermost interactive shadow-internal element, falling
+// back to the innermost shadow-internal HTMLElement of any kind. Returns
+// null when no element in the path is inside a shadow root.
+function findInsideShadowFromComposedPath(event: MouseEvent): HTMLElement | null {
+  const path = event.composedPath ? event.composedPath() : [];
+  // First pass: prefer interactive elements inside shadow DOM.
+  for (const node of path) {
+    if (node instanceof HTMLElement
+        && node.getRootNode() instanceof ShadowRoot
+        && isInteractiveTarget(node)) {
+      return node;
+    }
+  }
+  // Second pass: any element inside shadow DOM (innermost first).
+  for (const node of path) {
+    if (node instanceof HTMLElement && node.getRootNode() instanceof ShadowRoot) {
+      return node;
+    }
+  }
+  return null;
+}
+
+// Resolves the actual element the user clicked using elementFromPoint,
+// rather than trusting event.target which in React SPAs is the delegation root.
+export function resolveClickTarget(event: MouseEvent): HTMLElement {
+  const eventTarget = event.target instanceof HTMLElement ? event.target : null;
+
+  // Programmatic clicks (keyboard, .click()) set clientX=clientY=0.
+  // elementFromPoint(0,0) would return the wrong top-left element.
+  if (event.clientX === 0 && event.clientY === 0) {
+    return eventTarget ?? document.body as HTMLElement;
+  }
+
+  // Guard: jsdom (test environment) does not implement elementFromPoint.
+  if (typeof document.elementFromPoint !== "function") {
+    return eventTarget ?? document.body as HTMLElement;
+  }
+
+  // First, check composedPath for a shadow-DOM-internal element. document
+  // .elementFromPoint() never returns elements INSIDE shadow roots — it
+  // returns the shadow host instead — so composedPath is the only way to
+  // see what was actually clicked inside an overlay like LinkedIn's
+  // interop-shadowdom messaging UI.
+  const insideShadow = findInsideShadowFromComposedPath(event);
+  if (insideShadow) return insideShadow;
+
+  const inner = document.elementFromPoint(event.clientX, event.clientY);
+  if (!inner || inner === document.body || inner === document.documentElement) {
+    return eventTarget ?? document.body as HTMLElement;
+  }
+
+  // Walk UP from innermost to the first interactive ancestor,
+  // but stop at event.target to avoid escaping the delegation boundary.
+  let current: Element | null = inner;
+  while (current instanceof HTMLElement) {
+    if (isInteractiveTarget(current)) return current;
+    if (current === eventTarget) return current;
+    current = current.parentElement;
+  }
+  return eventTarget ?? (inner as HTMLElement);
+}
 
 export interface CaptureResult {
   event_type: ActionType;
@@ -10,8 +174,113 @@ export interface CaptureResult {
   timestamp: string;
 }
 
-function getElementMetadata(target: EventTarget | null): Record<string, unknown> {
-  if (!(target instanceof Element)) return {};
+type ElementLike = {
+  tagName?: string;
+  nodeName?: string;
+  id?: string;
+  className?: string;
+  classList?: { [Symbol.iterator]?: () => IterableIterator<string> };
+  textContent?: string | null;
+  href?: string;
+  type?: string;
+  placeholder?: string;
+  name?: string;
+  autocomplete?: string;
+  isContentEditable?: boolean;
+  getAttribute?: (name: string) => string | null;
+  getBoundingClientRect?: () => DOMRect;
+  getRootNode?: () => unknown;
+};
+
+function isElementLike(target: unknown): target is ElementLike {
+  if (!target || typeof target !== "object") return false;
+  const maybe = target as ElementLike;
+  return (
+    typeof maybe.tagName === "string"
+    || typeof maybe.nodeName === "string"
+    || typeof maybe.getAttribute === "function"
+  );
+}
+
+function readAttr(target: ElementLike, name: string): string {
+  return String(target.getAttribute?.(name) || "").trim();
+}
+
+function readStringProp(target: ElementLike, key: keyof ElementLike): string {
+  const value = target[key];
+  return typeof value === "string" ? value : "";
+}
+
+function readTagName(target: ElementLike): string {
+  const tag = readStringProp(target, "tagName") || readStringProp(target, "nodeName");
+  return tag.toLowerCase();
+}
+
+function readRect(target: ElementLike): { x: number; y: number; width: number; height: number } | undefined {
+  try {
+    if (typeof target.getBoundingClientRect !== "function") return undefined;
+    const rect = target.getBoundingClientRect();
+    return {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isShadowRootLike(root: unknown): boolean {
+  if (!root || typeof root !== "object") return false;
+  if (typeof ShadowRoot !== "undefined" && root instanceof ShadowRoot) return true;
+  if (Object.prototype.toString.call(root) === "[object ShadowRoot]") return true;
+  const maybe = root as { nodeType?: unknown; host?: unknown };
+  return maybe.nodeType === 11 && !!maybe.host;
+}
+
+function getElementMetadata(target: unknown): Record<string, unknown> {
+  if (!(target instanceof Element) && !isElementLike(target)) return {};
+
+  if (!(target instanceof Element) && isElementLike(target)) {
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const activeRect = active ? active.getBoundingClientRect() : null;
+    const activeChain = active ? buildSelectors(active) : [];
+    const activeCss = active ? buildCssSelector(active) : undefined;
+    const tag = readTagName(target) || (active?.tagName.toLowerCase() || "div");
+    const rect = readRect(target) || (activeRect
+      ? {
+          x: Math.round(activeRect.x),
+          y: Math.round(activeRect.y),
+          width: Math.round(activeRect.width),
+          height: Math.round(activeRect.height),
+        }
+      : undefined);
+    const rawText = String(target.textContent || "").trim();
+    const text = (rawText || active?.textContent || "").trim().slice(0, 200) || undefined;
+    const root = typeof target.getRootNode === "function" ? target.getRootNode() : null;
+
+    return {
+      tag,
+      id: readStringProp(target, "id") || active?.id || undefined,
+      classes: active ? Array.from(active.classList) : [],
+      text,
+      href: readStringProp(target, "href") || undefined,
+      rect,
+      aria_role: readAttr(target, "role") || active?.getAttribute("role") || undefined,
+      aria_label: readAttr(target, "aria-label") || active?.getAttribute("aria-label") || undefined,
+      data_attrs: active ? getDataAttributes(active) : undefined,
+      selector: activeCss,
+      selector_chain: activeChain,
+      landmark_path: active ? buildLandmarkPath(active) || undefined : undefined,
+      z_index: active ? parseInt(window.getComputedStyle(active).zIndex) || undefined : undefined,
+      type: readStringProp(target, "type") || readAttr(target, "type") || undefined,
+      placeholder: readStringProp(target, "placeholder") || readAttr(target, "placeholder") || undefined,
+      name: readStringProp(target, "name") || readAttr(target, "name") || undefined,
+      in_shadow_dom: isShadowRootLike(root),
+      in_iframe: window !== window.parent,
+    };
+  }
 
   const el = target as HTMLElement;
   const rect = el.getBoundingClientRect();
@@ -37,6 +306,7 @@ function getElementMetadata(target: EventTarget | null): Record<string, unknown>
     data_attrs: getDataAttributes(el),
     selector: buildCssSelector(el),
     selector_chain: chain,
+    landmark_path: buildLandmarkPath(el) || undefined,
     z_index: parseInt(computedStyle.zIndex) || undefined,
     type: (el as HTMLInputElement).type || undefined,
     placeholder: (el as HTMLInputElement).placeholder || undefined,
@@ -141,9 +411,62 @@ function getPageContext(): { url: string; title: string } {
 }
 
 export function captureClick(event: MouseEvent): CaptureResult {
-  const meta = getElementMetadata(event.target);
+  const actualTarget = resolveClickTarget(event);
+  const meta = getElementMetadata(actualTarget);
   const page = getPageContext();
+
+  // Detect shadow DOM clicks by inspecting composedPath.
+  // composedPath()[0] is the innermost element; if it's inside a ShadowRoot
+  // we need (a) click-position anchor and (b) intent from the shadow element.
+  const path = event.composedPath ? event.composedPath() : [];
+  const isShadowRootLike = (root: unknown): boolean => {
+    if (!root || typeof root !== "object") return false;
+    if (typeof ShadowRoot !== "undefined" && root instanceof ShadowRoot) return true;
+    if (Object.prototype.toString.call(root) === "[object ShadowRoot]") return true;
+    const maybe = root as { nodeType?: unknown; host?: unknown };
+    return maybe.nodeType === 11 && !!maybe.host;
+  };
+
+  let clickWasInShadowDom = false;
+  try {
+    clickWasInShadowDom = path.slice(0, 8).some((node) => {
+      if (!node || typeof node !== "object") return false;
+      const getRootNode = (node as { getRootNode?: () => unknown }).getRootNode;
+      if (typeof getRootNode !== "function") return false;
+      return isShadowRootLike(getRootNode.call(node));
+    });
+  } catch { /**/ }
+
+  if (clickWasInShadowDom) {
+    // 1. Replace anchor selector with click-position-based coords.
+    //    Without this, all clicks inside the same shadow host share identical
+    //    anchor offsets (the host's top-left), making them indistinguishable.
+    const clickAnchor = buildClickPositionAnchor(actualTarget, event.clientX, event.clientY);
+    if (clickAnchor) {
+      const chain = meta.selector_chain as SelectorSet[];
+      const idx = chain.findIndex((s) => s.type === "anchor");
+      if (idx >= 0) chain[idx] = clickAnchor;
+      else chain.push(clickAnchor);
+      chain.sort((a, b) => (b.score || 0) - (a.score || 0));
+    }
+  }
+
+  // 2. Pull accessible name/text from composedPath when available. LinkedIn's
+  // interop overlay often retargets clicks to a shadow host div, so this keeps
+  // intents meaningful instead of "Click on div element".
+  const shadowInfo = extractShadowDomInfo(event);
+  if (shadowInfo) {
+    if (shadowInfo.ariaLabel) meta.aria_label = shadowInfo.ariaLabel;
+    if (shadowInfo.text && !meta.text) meta.text = shadowInfo.text;
+    if (shadowInfo.role && !meta.aria_role) meta.aria_role = shadowInfo.role;
+  }
+
   const intent = buildIntent("click", meta);
+
+  // Synchronous count of open dialogs at click time.
+  const dialogs_open = document.querySelectorAll(
+    '[role="dialog"],[role="alertdialog"],[aria-modal="true"]',
+  ).length;
 
   return {
     event_type: "click",
@@ -155,6 +478,7 @@ export function captureClick(event: MouseEvent): CaptureResult {
       client_y: event.clientY,
       button: event.button,
       modifiers: getModifiers(event),
+      dialogs_open,
     },
     page_url: page.url,
     page_title: page.title,
@@ -162,24 +486,43 @@ export function captureClick(event: MouseEvent): CaptureResult {
   };
 }
 
-export function captureInput(event: Event): CaptureResult {
-  const target = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+// `overrideValue` lets the caller pass a value captured at input-event time,
+// bypassing the live read from target.value/textContent. Critical when the
+// input gets cleared between the user typing and us actually emitting the
+// event (e.g. LinkedIn's Send button clears the compose box before our 450ms
+// debounce timer fires).
+export function captureInput(event: Event, overrideValue?: string): CaptureResult {
+  // Pierce shadow DOM retargeting: at document level, event.target is the shadow
+  // HOST (outer div), not the actual input.  composedPath()[0] is the real element.
+  const composedTarget = (event as { composedPath?: () => EventTarget[] }).composedPath?.()[0];
+  const target = ((composedTarget ?? event.target) || {}) as ElementLike;
   const meta = getElementMetadata(target);
   const page = getPageContext();
 
-  if (target instanceof HTMLSelectElement) {
-    const intent = buildIntent("select", meta, target.value, target.name);
+  const tag = readTagName(target);
+  const name = readStringProp(target, "name") || readAttr(target, "name");
+  const placeholder = readStringProp(target, "placeholder") || readAttr(target, "placeholder");
+  const inputType = (
+    readStringProp(target, "type")
+    || readAttr(target, "type")
+  ).toLowerCase();
+
+  if (tag === "select") {
+    const selectValue = String((target as { value?: unknown }).value || "");
+    const selectedOptions = (target as { selectedOptions?: ArrayLike<{ value?: string }> }).selectedOptions;
+    const multiValues = selectedOptions
+      ? Array.from(selectedOptions).map((o) => String(o.value || ""))
+      : undefined;
+    const intent = buildIntent("select", meta, selectValue, name);
     return {
       event_type: "select",
       payload: {
         target: meta,
         intent,
         selector_chain: meta.selector_chain,
-        value: target.value,
-        multiple_values: target.multiple
-          ? Array.from(target.selectedOptions).map((o) => o.value)
-          : undefined,
-        field_name: target.name || undefined,
+        value: selectValue,
+        multiple_values: multiValues,
+        field_name: name || undefined,
       },
       page_url: page.url,
       page_title: page.title,
@@ -187,22 +530,25 @@ export function captureInput(event: Event): CaptureResult {
     };
   }
 
-  const name = (target as HTMLInputElement).name || "";
-  const placeholder = (target as HTMLInputElement).placeholder || "";
-  const inputType = (target as HTMLInputElement).type || "";
-
   // File inputs expose only "C:\fakepath\..." in .value for security.
   // Read actual filenames from .files instead.
   let rawValue: string;
-  if (inputType === "file") {
-    const files = (target as HTMLInputElement).files;
+  if (typeof overrideValue === "string") {
+    rawValue = overrideValue;
+  } else if (inputType === "file") {
+    const files = (target as { files?: ArrayLike<{ name?: string }> }).files;
     rawValue = files && files.length > 0
       ? Array.from(files).map((f) => f.name).join(", ")
       : "";
+  } else if ("value" in (target as object)) {
+    rawValue = String((target as { value?: unknown }).value || "");
   } else {
-    rawValue = target.value || target.textContent || "";
+    rawValue = String(target.textContent || "");
   }
-  const autoComplete = (target as HTMLInputElement).autocomplete || "";
+  const autoComplete = (
+    readStringProp(target, "autocomplete")
+    || readAttr(target, "autocomplete")
+  ).toLowerCase();
   const sensitiveAutocomplete = ["current-password", "new-password", "cc-number", "cc-csc"];
   const isSensitive = inputType === "password" || sensitiveAutocomplete.includes(autoComplete);
 
@@ -239,12 +585,19 @@ export function captureInput(event: Event): CaptureResult {
 
 export function captureScroll(event?: Event): CaptureResult {
   const page = getPageContext();
+  const scrollY = Math.round(window.scrollY);
+  const scrollX = Math.round(window.scrollX);
+
   const payload: Record<string, unknown> = {
-    scroll_x: Math.round(window.scrollX),
-    scroll_y: Math.round(window.scrollY),
+    scroll_x: scrollX,
+    scroll_y: scrollY,
     viewport_height: window.innerHeight,
     viewport_width: window.innerWidth,
     document_height: document.documentElement.scrollHeight,
+    // intent and value are consumed by the backend's _do_record_workflow
+    // to produce a replayable scroll step without AI assistance.
+    intent: `Scroll page to Y:${scrollY}`,
+    value: String(scrollY),
   };
 
   const target = event?.target as HTMLElement | null;

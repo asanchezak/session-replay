@@ -91,6 +91,72 @@ async def test_substitute_uses_default_when_param_missing(db_session: AsyncSessi
 
 
 @pytest.mark.asyncio
+async def test_substitute_parameters_rewrites_success_conditions(db_session: AsyncSession):
+    svc = TemplateService(db_session)
+    wf_id = "00000000-0000-0000-0000-000000000001"
+    template = {
+        "workflow_id": wf_id,
+        "parameters": [
+            {"key": "recipient", "type": "string", "default": "Default message", "required": True},
+        ],
+        "steps": [
+            {
+                "step_index": 0,
+                "action_type": "type",
+                "value": "{{recipient}}",
+                "success_condition": {"type": "input_value_contains", "value": "{{recipient}}"},
+            },
+            {
+                "step_index": 1,
+                "action_type": "click",
+                "value": "Send",
+                "success_condition": {"type": "visible_text_contains", "value": "{{recipient}}"},
+            },
+        ],
+    }
+
+    runtime_params = {"recipient": "Runtime message"}
+    substituted = await svc.substitute_parameters(template, runtime_params)
+
+    assert substituted[0]["value"] == "Runtime message"
+    assert substituted[0]["success_condition"]["value"] == "Runtime message"
+    assert substituted[1]["success_condition"]["value"] == "Runtime message"
+
+
+@pytest.mark.asyncio
+async def test_substitute_parameters_rewrites_literal_success_conditions(db_session: AsyncSession):
+    svc = TemplateService(db_session)
+    wf_id = "00000000-0000-0000-0000-000000000002"
+    template = {
+        "workflow_id": wf_id,
+        "parameters": [
+            {"key": "recipient", "type": "string", "default": "Default message", "required": True},
+        ],
+        "steps": [
+            {
+                "step_index": 0,
+                "action_type": "type",
+                "value": "{{recipient}}",
+                "success_condition": {"type": "input_value_contains", "value": "Default message"},
+            },
+            {
+                "step_index": 1,
+                "action_type": "click",
+                "value": "Send",
+                "success_condition": {"type": "visible_text_contains", "value": "Default message"},
+            },
+        ],
+    }
+
+    runtime_params = {"recipient": "Runtime message"}
+    substituted = await svc.substitute_parameters(template, runtime_params)
+
+    assert substituted[0]["value"] == "Runtime message"
+    assert substituted[0]["success_condition"]["value"] == "Runtime message"
+    assert substituted[1]["success_condition"]["value"] == "Runtime message"
+
+
+@pytest.mark.asyncio
 async def test_validate_parameters(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr("core.config.settings.ai_api_key", "")
     monkeypatch.setattr("core.config.settings.ai_provider", "openai")

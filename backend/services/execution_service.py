@@ -58,6 +58,7 @@ class ExecutionService:
                     "selector_chain": s.selector_chain,
                     "value": s.value,
                     "methods": s.methods,
+                    "success_condition": s.success_condition,
                     # Phase 5: selector stability from EMA learning (None = no history yet)
                     "selector_stability_score": s.selector_stability_score,
                 }
@@ -116,6 +117,7 @@ class ExecutionService:
                     "selector_chain": step.get("selector_chain"),
                     "value": step.get("value"),
                     "methods": step.get("methods"),
+                    "success_condition": step.get("success_condition"),
                 }
                 for i, step in enumerate(planned_steps)
             ]

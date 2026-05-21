@@ -19,6 +19,7 @@ export interface BackgroundToContentMessage {
     selector_chain: Array<{ type: string; value: string }>;
     value?: string;
     intent?: string;
+    success_condition?: Record<string, unknown> | null;
     methods?: Array<{
       action_type: string;
       selector_chain: Array<{ type: string; value: string }>;

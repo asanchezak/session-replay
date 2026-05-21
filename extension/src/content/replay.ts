@@ -154,6 +154,8 @@ export interface StepToExecute {
   intent?: string;
   force?: boolean;
   methods?: StepMethod[];
+  delay_before_ms?: number;
+  success_condition?: Record<string, unknown> | null;
 }
 
 export interface StepResult {
@@ -161,6 +163,105 @@ export interface StepResult {
   error?: string;
   actual_url?: string;
   via_method_index?: number;
+}
+
+function _normalizeForCheck(value: string): string {
+  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+// Shadow-DOM-aware query: tries root.querySelector first, then recurses into
+// every shadow root in the subtree. LinkedIn-style overlays mount their
+// chat UI inside a closed-mode-equivalent open shadow root, so plain
+// document.querySelector cannot find their buttons.
+function _deepQuerySelector(selector: string, root: ParentNode = document): Element | null {
+  try {
+    const direct = root.querySelector(selector);
+    if (direct) return direct;
+  } catch { /* invalid selector */ }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = (node as HTMLElement).shadowRoot;
+    if (sr) {
+      const found = _deepQuerySelector(selector, sr);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function _deepQuerySelectorAll(selector: string, root: ParentNode = document): Element[] {
+  const out: Element[] = [];
+  try {
+    out.push(...Array.from(root.querySelectorAll(selector)));
+  } catch { /* invalid selector */ }
+  const all = root.querySelectorAll("*");
+  for (const node of all) {
+    const sr = (node as HTMLElement).shadowRoot;
+    if (sr) out.push(..._deepQuerySelectorAll(selector, sr));
+  }
+  return out;
+}
+
+function _verifySuccessCondition(
+  step: StepToExecute,
+  element: Element | null,
+): { ok: boolean; reason?: string } {
+  const condition = step.success_condition;
+  if (!condition || typeof condition !== "object") return { ok: true };
+  const ctype = String(condition.type || "").toLowerCase().trim();
+  if (!ctype) return { ok: true };
+
+  if (ctype === "visible_text_contains") {
+    const expected = _normalizeForCheck(String(condition.value || ""));
+    if (!expected) return { ok: true };
+    const pageText = _normalizeForCheck(document.body?.innerText || "");
+    if (pageText.includes(expected)) return { ok: true };
+    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:visible_text_contains" };
+  }
+
+  if (ctype === "url_contains") {
+    const expected = String(condition.value || "");
+    if (!expected) return { ok: true };
+    if ((window.location.href || "").includes(expected)) return { ok: true };
+    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:url_contains" };
+  }
+
+  if (ctype === "input_value_contains") {
+    const expected = _normalizeForCheck(String(condition.value || ""));
+    if (!expected) return { ok: true };
+    const candidate = element || findElementBySelectors(step.selector_chain || []);
+    if (!candidate) return { ok: false, reason: "SUCCESS_CONDITION_FAILED:input_value_contains_no_target" };
+    let observed = "";
+    if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+      observed = candidate.value || "";
+    } else if (candidate instanceof HTMLElement && candidate.isContentEditable) {
+      observed = candidate.textContent || "";
+    } else {
+      observed = (candidate as HTMLElement).textContent || "";
+    }
+    if (_normalizeForCheck(observed).includes(expected)) return { ok: true };
+    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:input_value_contains_mismatch" };
+  }
+
+  if (ctype === "selector_exists") {
+    const selector = String(condition.selector || "");
+    if (selector) {
+      try {
+        const found = selector.startsWith("/") || selector.startsWith("(")
+          ? document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+          : document.querySelector(selector);
+        if (found) return { ok: true };
+      } catch {
+        return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_invalid_selector" };
+      }
+      return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_not_found" };
+    }
+    const found = findElementBySelectors(step.selector_chain || []);
+    if (found) return { ok: true };
+    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_not_found" };
+  }
+
+  return { ok: true };
 }
 
 function normalizeText(value: string): string {
@@ -174,11 +275,10 @@ function normalizeText(value: string): string {
 }
 
 function interactiveCandidates(): HTMLElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLElement>(
-      "button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], [aria-label]",
-    ),
-  );
+  const selector = "button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], [aria-label]";
+  // Deep search so shadow-DOM-internal candidates (LinkedIn chat overlay) are
+  // included alongside light-DOM ones.
+  return _deepQuerySelectorAll(selector) as HTMLElement[];
 }
 
 function findElementBySelectors(chain: SelectorSet[]): Element | null {
@@ -188,8 +288,12 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
       let element: Element | null = null;
 
       switch (sel.type) {
+        case "shadow_css":
+          element = findElementByShadowCss(sel.value);
+          break;
         case "css":
-          element = document.querySelector(sel.value);
+          // Try light DOM first; fall back to deep search (shadow piercing).
+          element = document.querySelector(sel.value) || _deepQuerySelector(sel.value);
           break;
         case "text":
           element = findElementByText(sel.value);
@@ -213,6 +317,44 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
   return null;
 }
 
+// Walks shadow_css path: host_chain identifies nested shadow hosts; target
+// is queried inside the innermost shadow root.
+function findElementByShadowCss(raw: string): Element | null {
+  let parsed: { host_chain?: string[]; target?: string };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const hostChain = Array.isArray(parsed.host_chain) ? parsed.host_chain : [];
+  const target = String(parsed.target || "");
+  if (!target) return null;
+
+  let root: ParentNode | null = document;
+  for (const hostSel of hostChain) {
+    if (!root) return null;
+    // Search the current root (may be shadowRoot) for the host, and also
+    // pierce nested shadow roots in case the chain skips levels.
+    let host: Element | null = null;
+    try { host = root.querySelector(hostSel); } catch { /* invalid */ }
+    if (!host) host = _deepQuerySelector(hostSel, root);
+    if (!host) return null;
+    const shadowRoot: ShadowRoot | null = (host as HTMLElement).shadowRoot;
+    if (!shadowRoot) {
+      // Host's shadow root is closed or replaced — try regular descendants.
+      root = host;
+    } else {
+      root = shadowRoot;
+    }
+  }
+  if (!root) return null;
+  try {
+    const direct = root.querySelector(target);
+    if (direct) return direct;
+  } catch { /* invalid selector */ }
+  return _deepQuerySelector(target, root);
+}
+
 function findElementByText(text: string): Element | null {
   const needle = normalizeText(text);
 
@@ -230,9 +372,9 @@ function findElementByText(text: string): Element | null {
     normalizeText(el.textContent || "").includes(needle);
 
   const interactive = interactiveCandidates();
-  const all = Array.from(document.querySelectorAll<HTMLElement>(
+  const all = _deepQuerySelectorAll(
     "a, button, span, label, div, h1, h2, h3, h4, h5, h6, p, li, td, th",
-  ));
+  ) as HTMLElement[];
 
   // Priority: interactive in-viewport → all in-viewport → interactive off-screen → all off-screen
   // Within each tier: exact match before includes match.
@@ -304,7 +446,7 @@ function findElementByAccessibility(data: string): Element | null {
 
   if (role) {
     const normalizedRole = role.trim().toLowerCase();
-    const roleMatches = Array.from(document.querySelectorAll<HTMLElement>(`[role="${CSS.escape(normalizedRole)}"]`));
+    const roleMatches = _deepQuerySelectorAll(`[role="${CSS.escape(normalizedRole)}"]`) as HTMLElement[];
     if (roleMatches.length > 0) {
       if (normalizedLabel) {
         const roleLabelExact = roleMatches.find((el) => normalizeText(el.textContent || "") === normalizedLabel);
@@ -413,13 +555,32 @@ function simulateClick(element: Element): boolean {
 }
 
 function simulateType(element: Element, value?: string): boolean {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+  const isEditable = element instanceof HTMLElement && element.isContentEditable;
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || isEditable)) {
     return false;
   }
 
-  element.focus();
-
+  (element as HTMLElement).focus();
   const val = value || "";
+
+  if (isEditable) {
+    // contenteditable: select-all then insertText so framework listeners fire correctly
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    // execCommand is deprecated but remains the most reliable way to trigger
+    // React/Vue synthetic input events on contenteditable in Chrome.
+    const inserted = document.execCommand("insertText", false, val);
+    if (!inserted) {
+      // Fallback for browsers where execCommand is fully removed
+      (element as HTMLElement).textContent = val;
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, data: val }));
+    }
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
 
   if (element instanceof HTMLInputElement) {
     const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -444,7 +605,6 @@ function simulateType(element: Element, value?: string): boolean {
   element.dispatchEvent(new InputEvent("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
   // Intentionally no blur() — it closes Odoo many2one dropdowns before options render.
-  // The change event already signals value commitment to framework listeners.
 
   return true;
 }
@@ -563,11 +723,27 @@ export async function executeStep(step: StepToExecute): Promise<StepResult> {
 
 
 async function _executeStepInner(step: StepToExecute): Promise<StepResult> {
+  // Honour the backend-requested pre-step delay (e.g. 2 s on complex SPAs).
+  if (step.delay_before_ms && step.delay_before_ms > 0) {
+    await new Promise(r => setTimeout(r, step.delay_before_ms));
+  }
+
   let element: Element | null = null;
   const hasSelectorChain = Array.isArray(step.selector_chain) && step.selector_chain.length > 0;
 
   if (step.action_type !== "navigate" && step.action_type !== "scroll") {
     element = findElementBySelectors(step.selector_chain);
+
+    // For TYPE steps the target input may not yet be in the DOM (SPA lazy render).
+    // Retry up to 2 times with short waits before giving up.
+    if (!element && step.action_type === "type") {
+      for (const waitMs of [700, 1300]) {
+        await new Promise(r => setTimeout(r, waitMs));
+        element = findElementBySelectors(step.selector_chain);
+        if (element) break;
+      }
+    }
+
     if (!element) {
       return {
         success: false,
@@ -590,6 +766,7 @@ async function _executeStepInner(step: StepToExecute): Promise<StepResult> {
   }
 
   try {
+    let actualUrl: string | undefined;
     switch (step.action_type) {
       case "click": {
         if (!element) return { success: false, error: "ELEMENT_NOT_FOUND" };
@@ -643,13 +820,18 @@ async function _executeStepInner(step: StepToExecute): Promise<StepResult> {
       case "navigate": {
         const navResult = simulateNavigate(step.value);
         if (!navResult.success) return { success: false, error: "Navigate failed" };
-        return { success: true, actual_url: navResult.actual_url };
+        actualUrl = navResult.actual_url;
+        break;
       }
       default:
         return { success: false, error: `Unknown action type: ${step.action_type}` };
     }
 
-    return { success: true };
+    const condition = _verifySuccessCondition(step, element);
+    if (!condition.ok) {
+      return { success: false, error: condition.reason || "SUCCESS_CONDITION_FAILED" };
+    }
+    return actualUrl ? { success: true, actual_url: actualUrl } : { success: true };
   } catch (err) {
     return {
       success: false,

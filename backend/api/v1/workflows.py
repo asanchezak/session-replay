@@ -49,6 +49,7 @@ class AddStepRequest(BaseModel):
     selector_chain: list[dict] | None = None
     value: str | None = None
     methods: list[MethodDef] | None = None
+    success_condition: dict | None = None
 
 
 class UpdateStatusRequest(BaseModel):
@@ -139,6 +140,7 @@ async def _do_record_workflow(
         prompt=req.prompt,
     )
     step_objs = []
+    last_typed_value: str | None = None
     for i, ev in enumerate(req.events):
         payload = ev.payload
 
@@ -156,6 +158,10 @@ async def _do_record_workflow(
         # store navigation destination under `url` instead of `value`.
         if not value and ev.event_type == "navigate":
             value = payload.get("url") or payload.get("target_url")
+        if not value and ev.event_type == "scroll":
+            scroll_y = payload.get("scroll_y")
+            if scroll_y is not None:
+                value = str(int(scroll_y))
         if not value and isinstance(target, dict):
             value = target.get("text")
 
@@ -170,6 +176,30 @@ async def _do_record_workflow(
                 for m in methods if isinstance(m, dict)
             ]
 
+        success_condition = payload.get("success_condition")
+        if not isinstance(success_condition, dict):
+            success_condition = None
+
+        if (
+            ev.event_type == "type"
+            and isinstance(value, str)
+            and value
+            and not value.startswith("[REDACTED")
+        ):
+            success_condition = {"type": "input_value_contains", "value": value}
+            last_typed_value = value
+        elif (
+            ev.event_type == "click"
+            and isinstance(last_typed_value, str)
+            and last_typed_value
+        ):
+            intent_l = str(payload.get("intent") or "").lower()
+            if "send" in intent_l:
+                success_condition = {
+                    "type": "visible_text_contains",
+                    "value": last_typed_value,
+                }
+
         step = await svc.add_step(
             workflow_id=str(workflow.id),
             step_index=i,
@@ -178,6 +208,7 @@ async def _do_record_workflow(
             selector_chain=selector_chain,
             value=value,
             methods=methods,
+            success_condition=success_condition,
         )
         step_objs.append(step)
 
@@ -403,6 +434,7 @@ async def get_workflow(
                 "selector_chain": s.selector_chain,
                 "value": s.value,
                 "methods": s.methods,
+                "success_condition": s.success_condition,
             }
             for s in steps
         ],
@@ -433,6 +465,7 @@ async def replace_steps(
                 "intent": s.intent,
                 "value": s.value,
                 "checkpoint": s.checkpoint,
+                "success_condition": s.success_condition,
             }
             for s in new_steps
         ],
@@ -462,6 +495,7 @@ async def add_step(
         selector_chain=req.selector_chain,
         value=req.value,
         methods=methods_data,
+        success_condition=req.success_condition,
     )
     return {
         "id": str(step.id),
@@ -469,6 +503,7 @@ async def add_step(
         "action_type": step.action_type,
         "value": step.value,
         "methods": step.methods,
+        "success_condition": step.success_condition,
     }
 
 

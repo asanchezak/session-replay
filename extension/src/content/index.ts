@@ -135,6 +135,25 @@ window.addEventListener("message", (event: MessageEvent) => {
 
 sendDebugLog("log", "Content script loaded");
 
+// Test helper: when the dashboard URL carries ?sr_autorun=<workflowId>, post
+// the DASHBOARD_RUN_WORKFLOW message automatically once the page settles.
+// Lets the trusted-click verifier kick off a run without external CDP
+// (Playwright/Puppeteer) — which would conflict with chrome.debugger.attach
+// inside the extension. Scoped strictly to the dashboard origin so it can't
+// be abused from another site.
+(() => {
+  try {
+    if (window.location.origin !== "http://localhost:5173") return;
+    const url = new URL(window.location.href);
+    const autorun = url.searchParams.get("sr_autorun");
+    if (!autorun) return;
+    setTimeout(() => {
+      sendDebugLog("log", `Auto-triggering DASHBOARD_RUN_WORKFLOW for ${autorun}`);
+      window.postMessage({ type: "DASHBOARD_RUN_WORKFLOW", workflowId: autorun }, "*");
+    }, 1500);
+  } catch { /* malformed URL — ignore */ }
+})();
+
 chrome.storage.session.get(STORAGE_KEY).then((data) => {
   const state = data[STORAGE_KEY] as { isRecording: boolean; events: unknown[] } | undefined;
   if (state?.isRecording) {
@@ -319,6 +338,7 @@ chrome.runtime.onMessage.addListener(
           intent?: string;
           timeout_ms?: number;
           methods?: Array<{ action_type: string; selector_chain: Array<{ type: string; value: string }>; value?: string }>;
+          success_condition?: Record<string, unknown> | null;
         };
         if (cmd.action === "navigate") {
           const targetUrl = cmd.value || cmd.target;
@@ -335,6 +355,7 @@ chrome.runtime.onMessage.addListener(
             value: cmd.value || undefined,
             intent: cmd.intent || undefined,
             methods: cmd.methods || undefined,
+            success_condition: cmd.success_condition || undefined,
           };
           executeStep(step as StepToExecute).then((result) => {
             sendResponse({ type: "AGENT_COMMAND_RESULT", ...result });
@@ -349,9 +370,40 @@ chrome.runtime.onMessage.addListener(
 
 // ── Event capture ──────────────────────────────────────────────────
 
+function summarizeEventForDebug(event: CaptureResult): string {
+  try {
+    const payload = (event.payload || {}) as Record<string, unknown>;
+    const target = (payload.target || {}) as Record<string, unknown>;
+    const selectorChain = Array.isArray(payload.selector_chain)
+      ? payload.selector_chain as Array<{ type?: string; value?: string }>
+      : [];
+    const topSelector = selectorChain[0];
+    const intent = String(payload.intent || "").slice(0, 100);
+    const value = String(payload.value || "");
+    const valueHint = value
+      ? ` value_len=${value.length}`
+      : "";
+    const coords = (
+      typeof payload.client_x === "number" && typeof payload.client_y === "number"
+    )
+      ? ` @(${payload.client_x},${payload.client_y})`
+      : "";
+    const targetText = String(target.text || "").slice(0, 60);
+    const selectorHint = topSelector
+      ? ` sel=${topSelector.type || "?"}:${String(topSelector.value || "").slice(0, 80)}`
+      : "";
+    return `${event.event_type}${coords}${valueHint} intent="${intent}" target="${targetText}"${selectorHint}`;
+  } catch {
+    return `${event.event_type}`;
+  }
+}
+
 function _dispatchToBackground(event: CaptureResult): void {
   eventCount++;
-  sendDebugLog("log", `Sending event #${eventCount}: ${event.event_type} on ${event.page_url}`);
+  sendDebugLog(
+    "log",
+    `Sending event #${eventCount}: ${summarizeEventForDebug(event)} on ${event.page_url}`,
+  );
   chrome.runtime.sendMessage(
     {
       type: "RECORD_EVENT",
@@ -381,15 +433,61 @@ function sendToBackground(event: CaptureResult): void {
 // Snapshot of text-input values captured on mousedown, used to detect
 // when a custom dropdown click sets an input value without firing "change".
 let preClickInputSnapshot: Map<HTMLInputElement, string> | null = null;
-// Per-input: last value we emitted as a type step, for deduplication.
-const recentTypeEmits = new WeakMap<HTMLInputElement, { value: string; ts: number }>();
+// Per-editable-element: last value emitted as a type step, for deduplication.
+const recentTypeEmits = new WeakMap<HTMLElement, { value: string; ts: number }>();
+// Pending debounced input events. Uses Map (not WeakMap) so we can iterate
+// to flush on mousedown — the next click might clear the input (e.g.
+// LinkedIn's Send button) before the 450ms debounce fires.  We snapshot the
+// value AT input-event time so the flush still emits the typed text.
+const pendingInputDebounce = new Map<HTMLElement, { timer: ReturnType<typeof setTimeout>; value: string }>();
 
 const EXCLUDED_INPUT_TYPES = new Set([
   "file", "checkbox", "radio", "submit", "button", "image", "reset", "password",
 ]);
 
+// Read the live value the user just typed, regardless of whether the target
+// is a contenteditable element or a native input/textarea.
+function _readEditableValue(el: HTMLElement): string {
+  if (el.isContentEditable) return el.textContent || "";
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value || "";
+  return el.textContent || "";
+}
+
+// Emit a captured type event with the snapshotted value, bypassing whatever
+// the input currently holds (it may have been cleared by a Send handler).
+function _emitTypeForTarget(target: HTMLElement, value: string): void {
+  if (!recordingEnabled) return;
+  if (!value.trim()) return;
+  const recent = recentTypeEmits.get(target);
+  if (recent && recent.value === value && Date.now() - recent.ts < 500) return;
+  recentTypeEmits.set(target, { value, ts: Date.now() });
+  sendToBackground(captureInput({ target } as unknown as Event, value));
+}
+
+// Cancel all pending debounce timers and emit their snapshotted values
+// synchronously. Called from mousedown so the type step lands BEFORE the
+// click that consumes it (e.g. clicking Send after typing).
+function _flushPendingInputDebounces(): void {
+  if (pendingInputDebounce.size === 0) return;
+  // Copy entries so the map can be mutated during iteration.
+  const entries = Array.from(pendingInputDebounce.entries());
+  pendingInputDebounce.clear();
+  for (const [target, entry] of entries) {
+    clearTimeout(entry.timer);
+    _emitTypeForTarget(target, entry.value);
+  }
+}
+
 document.addEventListener("mousedown", () => {
   if (_initResolved && !recordingEnabled) return;
+  // Critical: flush any pending input debounce BEFORE this click executes.
+  // LinkedIn's Send button (and similar "submit-and-clear" UI) clears the
+  // compose box synchronously inside the click handler — if we let the 450ms
+  // debounce fire afterwards, target.textContent is already "" and the type
+  // step is lost. Flushing here also guarantees type events ordering before
+  // the click that triggered them.
+  _flushPendingInputDebounces();
+
   preClickInputSnapshot = new Map();
   // Snapshot ALL text-like inputs — broad selector so custom dropdowns backed by
   // any input type (text, hidden, email, search, …) are included.
@@ -429,18 +527,62 @@ document.addEventListener("click", (e: MouseEvent) => {
 // Capture phase for change too — catches events that child handlers stop.
 document.addEventListener("change", (e: Event) => {
   if (!recordingEnabled) return;
-  const target = e.target as HTMLElement;
-  if (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLSelectElement ||
-    target instanceof HTMLTextAreaElement
-  ) {
-    if (target instanceof HTMLInputElement && !EXCLUDED_INPUT_TYPES.has(target.type.toLowerCase())) {
-      recentTypeEmits.set(target, { value: target.value, ts: Date.now() });
+  // Pierce shadow DOM retargeting: e.target is the shadow host; composedPath()[0]
+  // is the actual input/select/textarea element that fired the event.
+  const innerTarget = (e as { composedPath?: () => EventTarget[] }).composedPath?.()[0] ?? e.target;
+  const tag = innerTarget instanceof Element ? innerTarget.tagName.toLowerCase() : "";
+  const isInput = innerTarget instanceof HTMLInputElement || tag === "input";
+  const isSelect = innerTarget instanceof HTMLSelectElement || tag === "select";
+  const isTextarea = innerTarget instanceof HTMLTextAreaElement || tag === "textarea";
+
+  if (isInput || isSelect || isTextarea) {
+    if (isInput && innerTarget instanceof HTMLInputElement &&
+        !EXCLUDED_INPUT_TYPES.has(innerTarget.type.toLowerCase())) {
+      recentTypeEmits.set(innerTarget, { value: innerTarget.value, ts: Date.now() });
     }
-    sendToBackground(captureInput(e));
+    sendToBackground(captureInput(e));  // captureInput resolves composedPath() itself
   }
 }, true);  // ← capture phase
+
+// Debounce text input across BOTH contenteditable elements (LinkedIn compose
+// box) AND regular inputs/textareas (LinkedIn search box). The previous
+// implementation only handled contenteditable, so typing into the search
+// input never produced a type step — it relied on the 'change' listener,
+// which fires only on blur, often after the user has already clicked away.
+//
+// Two race-fixes baked in:
+//   1. Value is snapshotted at THIS event time, not when the timer fires —
+//      so a clear-on-submit (Send button) doesn't erase our captured value.
+//   2. mousedown calls _flushPendingInputDebounces() so type lands BEFORE the
+//      click step it precedes (and before any handler can wipe the input).
+document.addEventListener("input", (e: Event) => {
+  if (!recordingEnabled) return;
+  const innerTarget = (e as { composedPath?: () => EventTarget[] }).composedPath?.()[0] ?? e.target;
+  const target = (innerTarget instanceof HTMLElement ? innerTarget : e.target) as HTMLElement | null;
+  if (!(target instanceof HTMLElement)) return;
+
+  const isContentEditable = target.isContentEditable;
+  const isInput = target instanceof HTMLInputElement
+    && !EXCLUDED_INPUT_TYPES.has(target.type.toLowerCase());
+  const isTextarea = target instanceof HTMLTextAreaElement;
+  if (!isContentEditable && !isInput && !isTextarea) return;
+
+  const value = _readEditableValue(target);
+
+  const prev = pendingInputDebounce.get(target);
+  if (prev) clearTimeout(prev.timer);
+
+  const timer = setTimeout(() => {
+    const entry = pendingInputDebounce.get(target);
+    if (!entry) return;
+    pendingInputDebounce.delete(target);
+    // .isConnected works for shadow-DOM elements; document.contains() does not.
+    if (!target.isConnected) return;
+    _emitTypeForTarget(target, entry.value);
+  }, 450);
+
+  pendingInputDebounce.set(target, { timer, value });
+}, true);
 
 // ── Scroll listener with AbortController (E-C-11) ──────────────────
 

@@ -7,7 +7,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const fetchMock = vi.fn();
 (globalThis as any).fetch = fetchMock;
 
-globalThis.chrome = { runtime: { id: "ext", sendMessage: vi.fn() } } as any;
+// chrome.storage.session.get is called async inside getApiKeyHeader(); include it
+// in the mock so the logger can resolve the API key before calling fetch.
+globalThis.chrome = {
+  runtime: { id: "ext", sendMessage: vi.fn() },
+  storage: { session: { get: vi.fn().mockResolvedValue({}) } },
+} as any;
 
 describe("logger", () => {
   beforeEach(() => {
@@ -21,7 +26,8 @@ describe("logger", () => {
     const log = createLogger("test");
     log.log("hello", { foo: 1 });
     expect(consoleSpy).toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalled();
+    // fetch is called asynchronously (after getApiKeyHeader resolves); wait for it.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
     consoleSpy.mockRestore();
   });
 

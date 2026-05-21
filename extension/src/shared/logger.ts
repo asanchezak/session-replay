@@ -1,15 +1,34 @@
 import { API_BASE_URL } from "./constants";
 
 const BACKEND_URL = `${API_BASE_URL}/debug/log`;
+const API_KEY_STORAGE_KEY = "apiKey";
+const DEV_FALLBACK_API_KEY = "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
 const LEVELS = { debug: 0, log: 1, warn: 2, error: 3 } as const;
 const MIN_LEVEL: number = typeof chrome !== "undefined" && chrome.runtime?.id ? 0 : 1;
 
 let _enabled = true;
 let _localBuffer: string[] = [];
 let _sendTimer: ReturnType<typeof setTimeout> | null = null;
+let _cachedApiKey: string | null = null;
 
 export function setEnabled(v: boolean) {
   _enabled = v;
+}
+
+async function getApiKeyHeader(): Promise<Record<string, string>> {
+  if (_cachedApiKey) {
+    return { "X-API-Key": _cachedApiKey };
+  }
+
+  try {
+    const fromStorage = await chrome.storage.session.get([API_KEY_STORAGE_KEY]);
+    const key = (fromStorage[API_KEY_STORAGE_KEY] as string | undefined) || DEV_FALLBACK_API_KEY;
+    _cachedApiKey = key;
+    return { "X-API-Key": key };
+  } catch {
+    _cachedApiKey = DEV_FALLBACK_API_KEY;
+    return { "X-API-Key": DEV_FALLBACK_API_KEY };
+  }
 }
 
 async function sendToBackend(level: string, args: unknown[], source: string) {
@@ -18,9 +37,10 @@ async function sendToBackend(level: string, args: unknown[], source: string) {
   _localBuffer.push(text);
 
   try {
+    const auth = await getApiKeyHeader();
     await fetch(BACKEND_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({ source, level, message: text, timestamp: Date.now() }),
     });
   } catch {
@@ -44,9 +64,10 @@ function scheduleFlush() {
     if (_localBuffer.length === 0) return;
     const batch = _localBuffer.splice(0);
     try {
+      const auth = await getApiKeyHeader();
       await fetch(BACKEND_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...auth },
         body: JSON.stringify({ source: "local_buffer", level: "info", messages: batch, timestamp: Date.now() }),
       });
     } catch {

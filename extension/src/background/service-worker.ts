@@ -413,6 +413,7 @@ async function executeWorkflowRun(
       selector_chain: step.selector_chain || [],
       value: step.value,
       intent: step.intent,
+      success_condition: (step as unknown as Record<string, unknown>).success_condition as Record<string, unknown> | null | undefined,
       methods: (step as unknown as Record<string, unknown>).methods as BackgroundToContentMessage["step"]["methods"],
     };
 

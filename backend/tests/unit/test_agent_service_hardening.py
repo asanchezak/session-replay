@@ -285,6 +285,86 @@ def test_selector_classifier_treats_numeric_value_as_text_candidate(db_session: 
     assert "324.57" in cmd.script_args["textCandidates"]
 
 
+def test_js_click_fallback_extracts_shadow_css_into_shadow_selectors(db_session: AsyncSession):
+    """shadow_css selectors (JSON with host_chain) must NOT leak into the
+    selectorCandidates bucket — passing the JSON string to document.querySelector
+    throws and silently kills the click fallback. They go to shadowSelectors
+    where the harness walks host_chain through shadowRoot.querySelector."""
+    agent = AgentService(db_session)
+    cmd = agent._build_js_click_fallback_command(
+        step={
+            "action_type": "click",
+            "value": "Send",
+            "selector_chain": [
+                {
+                    "type": "shadow_css",
+                    "value": (
+                        '{"host_chain":["div[data-testid=\\"interop-shadowdom\\"]"],'
+                        '"target":"button[aria-label=\\"Send\\"]"}'
+                    ),
+                    "score": 0.97,
+                },
+                {"type": "css", "value": "button[aria-label='Send']"},
+            ],
+        },
+        ctx=PageContext(url="https://www.linkedin.com/feed/", title="Feed"),
+    )
+    assert cmd is not None
+    # The CSS selector should remain in selectorCandidates
+    assert "button[aria-label='Send']" in cmd.script_args["selectorCandidates"]
+    # The shadow_css JSON must NOT pollute selectorCandidates
+    assert not any(
+        "host_chain" in str(c) for c in cmd.script_args["selectorCandidates"]
+    )
+    # And the shadowSelectors arg must contain the parsed entry
+    shadow_selectors = cmd.script_args["shadowSelectors"]
+    assert len(shadow_selectors) == 1
+    assert shadow_selectors[0]["hostChain"] == ['div[data-testid="interop-shadowdom"]']
+    assert shadow_selectors[0]["target"] == 'button[aria-label="Send"]'
+
+
+def test_js_type_fallback_extracts_shadow_css_into_shadow_selectors(db_session: AsyncSession):
+    """Same guarantee for the JS type fallback: shadow_css selectors get
+    parsed into shadowSelectors arg, not passed as raw CSS."""
+    cmd = AgentService._build_js_type_fallback_command(
+        step={
+            "action_type": "type",
+            "value": "Hello",
+            "intent": "Type into compose box",
+            "selector_chain": [
+                {
+                    "type": "shadow_css",
+                    "value": (
+                        '{"host_chain":["div[data-testid=\\"interop-shadowdom\\"]"],'
+                        '"target":"div[contenteditable=\\"true\\"]"}'
+                    ),
+                },
+                {"type": "css", "value": "div.msg-form__contenteditable"},
+            ],
+        },
+    )
+    assert cmd is not None
+    assert "div.msg-form__contenteditable" in cmd.script_args["cssCandidates"]
+    shadow = cmd.script_args["shadowSelectors"]
+    assert len(shadow) == 1
+    assert shadow[0]["hostChain"] == ['div[data-testid="interop-shadowdom"]']
+    assert shadow[0]["target"] == 'div[contenteditable="true"]'
+
+
+def test_js_click_fallback_harness_script_references_shadow_helpers(db_session: AsyncSession):
+    """Sanity check: the harness script must include the deep-query / shadow
+    helpers; otherwise we'd silently strip shadow_css support."""
+    agent = AgentService(db_session)
+    cmd = agent._build_js_click_fallback_command(
+        step={"action_type": "click", "value": "Send", "selector_chain": []},
+        ctx=PageContext(url="https://example.com", title="X"),
+    )
+    assert cmd is not None
+    assert "deepQuerySelector" in cmd.script
+    assert "resolveShadowSelector" in cmd.script
+    assert "shadowSelectors" in cmd.script
+
+
 def test_extract_click_label_from_intent_when_value_missing():
     assert AgentService._extract_click_label({"action_type": "click", "intent": "Click Iniciar"}) == "Iniciar"
 

@@ -63,6 +63,7 @@ class TemplateService:
                     "intent": s.intent,
                     "value": s.value,
                     "methods": s.methods,
+                    "success_condition": s.success_condition,
                     "checkpoint": s.checkpoint,
                 }
                 for s in steps
@@ -83,9 +84,35 @@ class TemplateService:
                 # Replace the literal value with a parameter reference
                 matching_params = [p for p in parameters if p.inferred_from_step == step["step_index"]]
                 if matching_params and matching_params[0].parameter_key:
-                    step["value"] = f"{{{{{matching_params[0].parameter_key}}}}}"
+                    original_value = step.get("value")
+                    placeholder = f"{{{{{matching_params[0].parameter_key}}}}}"
+                    step["value"] = placeholder
+                    success_condition = step.get("success_condition")
+                    if (
+                        isinstance(success_condition, dict)
+                        and isinstance(success_condition.get("value"), str)
+                        and isinstance(original_value, str)
+                        and success_condition.get("value") == original_value
+                    ):
+                        success_condition["value"] = placeholder
             else:
                 template["fixed_steps"].append(step["step_index"])
+
+        # Conditions on downstream steps (for example "Send" click checks) may
+        # reference literal values that were parameterized on earlier steps.
+        # Promote matching literals to the same {{param}} placeholder.
+        defaults_to_param = {
+            p.default_value: p.parameter_key
+            for p in parameters
+            if p.default_value and p.parameter_key
+        }
+        for step in template["steps"]:
+            success_condition = step.get("success_condition")
+            if not isinstance(success_condition, dict):
+                continue
+            sc_value = success_condition.get("value")
+            if isinstance(sc_value, str) and sc_value in defaults_to_param:
+                success_condition["value"] = f"{{{{{defaults_to_param[sc_value]}}}}}"
 
         # Save template version
         existing = await self.session.execute(
@@ -114,15 +141,42 @@ class TemplateService:
     async def substitute_parameters(self, template: dict, runtime_params: dict) -> list[dict]:
         steps = deepcopy(template.get("steps", []))
         params_config = {p["key"]: p for p in template.get("parameters", [])}
+        default_to_param = {
+            str(p.get("default")): key
+            for key, p in params_config.items()
+            if p.get("default") is not None
+        }
+
+        def _resolve_param_key(raw_value: str) -> str | None:
+            if raw_value.startswith("{{") and raw_value.endswith("}}"):
+                return raw_value[2:-2].strip()
+            return default_to_param.get(raw_value)
+
+        def _resolve_param_value(param_key: str) -> str | None:
+            if param_key in runtime_params:
+                return str(runtime_params[param_key])
+            if param_key in params_config and params_config[param_key].get("default") is not None:
+                return str(params_config[param_key]["default"])
+            return None
 
         for step in steps:
             value = step.get("value")
-            if isinstance(value, str) and value.startswith("{{") and value.endswith("}}"):
-                param_key = value[2:-2].strip()
-                if param_key in runtime_params:
-                    step["value"] = str(runtime_params[param_key])
-                elif param_key in params_config and params_config[param_key].get("default"):
-                    step["value"] = str(params_config[param_key]["default"])
+            if isinstance(value, str):
+                param_key = _resolve_param_key(value)
+                if param_key:
+                    resolved = _resolve_param_value(param_key)
+                    if resolved is not None:
+                        step["value"] = resolved
+
+            success_condition = step.get("success_condition")
+            if isinstance(success_condition, dict):
+                sc_value = success_condition.get("value")
+                if isinstance(sc_value, str):
+                    param_key = _resolve_param_key(sc_value)
+                    if param_key:
+                        resolved = _resolve_param_value(param_key)
+                        if resolved is not None:
+                            success_condition["value"] = resolved
 
         # Mark which steps were substituted
         for step in steps:

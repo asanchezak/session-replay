@@ -31,6 +31,7 @@ export interface RecordedStep {
   intent?: string;
   selector_chain: SelectorSet[];
   value?: string;
+  success_condition?: Record<string, unknown> | null;
   methods?: MethodDef[];
   accessibility_metadata?: Record<string, unknown>;
   text_anchors?: string[];
@@ -39,7 +40,7 @@ export interface RecordedStep {
 }
 
 export interface SelectorSet {
-  type: "accessibility" | "css" | "text" | "xpath" | "anchor";
+  type: "accessibility" | "css" | "text" | "xpath" | "anchor" | "shadow_css";
   value: string;
   score?: number;
 }
