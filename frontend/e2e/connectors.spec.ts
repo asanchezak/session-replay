@@ -88,6 +88,9 @@ test.describe("Connectors page", () => {
     await page.goto("/connectors");
     await page.getByText("Add Connector").first().click();
     await page.locator('input[placeholder="Connector name"]').fill("My Connector");
+    await page.locator('input[placeholder="https://odoo.example.com"]').fill("https://odoo.example.com");
+    await page.locator('input[placeholder="Database"]').fill("qaodoo");
+    await page.locator('input[placeholder="Username"]').fill("admin");
     await page.getByText("Save").click();
     await page.waitForTimeout(1000);
     await expect(page.getByText("Production Odoo")).toBeVisible();

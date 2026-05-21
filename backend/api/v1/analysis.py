@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
+from services.workflow_connector_service import WorkflowConnectorService
 from services.semantic_analysis_service import SemanticAnalysisService
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,25 @@ class UpdateParameterRequest(BaseModel):
     parameter_type: str | None = Field(default=None, pattern=r"^(string|number|boolean|list)$")
     is_required: bool | None = None
     validation_rules: dict | None = None
+
+
+class ConnectorBindingRequest(BaseModel):
+    connector_id: str
+    source_kind: str = Field(default="odoo_latest_job", pattern=r"^odoo_latest_job$")
+    template: str
+    job_filters: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
+def _serialize_binding(binding) -> dict:
+    return {
+        "parameter_key": binding.parameter_key,
+        "connector_id": binding.connector_id,
+        "source_kind": binding.source_kind,
+        "template": binding.template,
+        "job_filters": binding.job_filters or {},
+        "enabled": binding.enabled,
+    }
 
 
 def _not_found(msg: str):
@@ -102,6 +122,7 @@ async def analyze_workflow(
 @router.get("/workflows/{workflow_id}/analysis")
 async def get_analysis(workflow_id: str, db: AsyncSession = Depends(get_db)):
     svc = SemanticAnalysisService(db)
+    connector_svc = WorkflowConnectorService(db)
     analysis = await svc.get_analysis(workflow_id)
     if not analysis:
         return _not_found("Analysis not found for this workflow. Run POST /analyze first.")
@@ -109,6 +130,7 @@ async def get_analysis(workflow_id: str, db: AsyncSession = Depends(get_db)):
     phases = await svc.get_phases(workflow_id)
     parameters = await svc.get_parameters(workflow_id)
     output_spec = await svc.get_output_spec(workflow_id)
+    bindings = await connector_svc.list_bindings(workflow_id)
 
     return {
         "workflow_id": workflow_id,
@@ -145,6 +167,7 @@ async def get_analysis(workflow_id: str, db: AsyncSession = Depends(get_db)):
             "schema": output_spec.output_schema if output_spec else None,
             "confidence": output_spec.schema_confidence if output_spec else 0.0,
         },
+        "connector_bindings": [_serialize_binding(binding) for binding in bindings],
     }
 
 
@@ -180,6 +203,71 @@ async def get_template(workflow_id: str, db: AsyncSession = Depends(get_db)):
         "is_active": template.is_active,
         "template_data": template.template_data,
     }
+
+
+@router.get("/workflows/{workflow_id}/connector-bindings")
+async def list_connector_bindings(workflow_id: str, db: AsyncSession = Depends(get_db)):
+    svc = WorkflowConnectorService(db)
+    bindings = await svc.list_bindings(workflow_id)
+    return {"workflow_id": workflow_id, "bindings": [_serialize_binding(binding) for binding in bindings]}
+
+
+@router.put("/workflows/{workflow_id}/connector-bindings/{parameter_key}")
+async def upsert_connector_binding(
+    workflow_id: str,
+    parameter_key: str,
+    req: ConnectorBindingRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = WorkflowConnectorService(db)
+    try:
+        binding = await svc.save_binding(
+            workflow_id,
+            parameter_key,
+            connector_id=req.connector_id,
+            source_kind=req.source_kind,
+            template=req.template,
+            job_filters=req.job_filters,
+            enabled=req.enabled,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": {"code": "INVALID_REQUEST", "message": str(e)}})
+    return {"workflow_id": workflow_id, "binding": _serialize_binding(binding)}
+
+
+@router.delete("/workflows/{workflow_id}/connector-bindings/{parameter_key}", status_code=204)
+async def delete_connector_binding(
+    workflow_id: str,
+    parameter_key: str,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = WorkflowConnectorService(db)
+    await svc.delete_binding(workflow_id, parameter_key)
+
+
+@router.post("/workflows/{workflow_id}/connector-bindings/{parameter_key}/preview")
+async def preview_connector_binding(
+    workflow_id: str,
+    parameter_key: str,
+    req: ConnectorBindingRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = WorkflowConnectorService(db)
+    try:
+        preview = await svc.preview_binding(
+            workflow_id,
+            parameter_key,
+            connector_id=req.connector_id if req else None,
+            source_kind=req.source_kind if req else None,
+            template=req.template if req else None,
+            job_filters=req.job_filters if req else None,
+            enabled=req.enabled if req else None,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": {"code": "INVALID_REQUEST", "message": str(e)}})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": {"code": "CONNECTOR_PREVIEW_FAILED", "message": str(e)}})
+    return {"workflow_id": workflow_id, "preview": preview}
 
 
 @router.get("/ai/status")

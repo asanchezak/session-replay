@@ -5,6 +5,9 @@ debugging, or restarting a stuck run.
 
 Pairs with the architecture doc at `docs/autonomy-architecture-v2.md`.
 
+For practical testing workflow, live-proof standards, restart/build rules, and
+common false failures, also read `docs/testing-operator-guide.md`.
+
 ## TL;DR
 
 - **The AI is the cursor, not the safety net.** Every poll consults the LLM

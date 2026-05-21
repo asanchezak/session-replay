@@ -6,7 +6,7 @@
  * test exercises the fetch → outcomesByStep → conditional render path.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 
 import RunDetailPage from "../../pages/RunDetailPage";
@@ -17,7 +17,7 @@ interface FetchMatchers {
   withScreenshot: boolean;
 }
 
-const buildRun = (runId: string, workflowId: string) => ({
+const buildRun = (runId: string, workflowId: string, extras: Record<string, unknown> = {}) => ({
   id: runId,
   workflow_id: workflowId,
   workflow_snapshot: {
@@ -29,6 +29,7 @@ const buildRun = (runId: string, workflowId: string) => ({
   total_steps: 1,
   started_at: "2026-05-20T00:00:00Z",
   ended_at: "2026-05-20T00:00:05Z",
+  ...extras,
 });
 
 const buildWorkflow = (id: string) => ({
@@ -94,6 +95,88 @@ describe("RunDetailPage Vision chip", () => {
     expect(chip.getAttribute("title")).toMatch(/1280×720/);
     expect(chip.getAttribute("title")).toMatch(/first_poll/);
     expect(chip.getAttribute("aria-label")).toMatch(/Vision: AI received a screenshot/);
+  });
+
+  it("opens the new run in a new tab when Re-run is clicked on a terminal run", async () => {
+    const sourceRunId = "run-source-1";
+    const newRunId = "run-clone-1";
+    const workflowId = "wf-rerun-1";
+
+    (global as any).fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const isPost = (init?.method || "GET").toUpperCase() === "POST";
+      const json = async () => {
+        if (isPost && url.includes(`/runs/${sourceRunId}/rerun`)) {
+          return {
+            id: newRunId,
+            workflow_id: workflowId,
+            status: "running",
+            current_step_index: 0,
+            total_steps: 1,
+            rerun_of: sourceRunId,
+          };
+        }
+        if (url.includes(`/runs/${sourceRunId}/events`)) return [];
+        if (url.includes(`/runs/${sourceRunId}`)) return buildRun(sourceRunId, workflowId);
+        if (url.includes(`/workflows/${workflowId}`)) return buildWorkflow(workflowId);
+        if (url.includes(`/agent/${sourceRunId}/outcomes`)) return buildOutcomes(false);
+        return [];
+      };
+      return { ok: true, status: 200, json, text: async () => JSON.stringify(await json()) };
+    });
+
+    // Synchronously stub window.open so the click handler captures the tab
+    // before the async API call resolves (pop-up blocker friendly path).
+    const fakeTab = { location: { href: "" }, closed: false } as any;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(fakeTab);
+
+    renderPage(sourceRunId);
+
+    const button = await screen.findByRole("button", { name: /Re-run/i }, { timeout: 5000 });
+    fireEvent.click(button);
+
+    // The blank tab must be opened synchronously inside the click handler.
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+
+    // Once the rerun POST resolves, the tab's location is redirected to /runs/<newId>.
+    await waitFor(
+      () => expect(fakeTab.location.href).toContain(`/runs/${newRunId}`),
+      { timeout: 5000 },
+    );
+
+    openSpy.mockRestore();
+  });
+
+  it("renders connector resolution details when the run used a connector-backed parameter", async () => {
+    const runId = "run-connector-1";
+    const workflowId = "wf-connector-1";
+    (global as any).fetch = vi.fn(async (url: string) => {
+      const json = async () => {
+        if (url.includes(`/runs/${runId}/events`)) return [];
+        if (url.includes(`/runs/${runId}`)) {
+          return buildRun(runId, workflowId, {
+            resolved_parameters: { recipient: "Hi Senior Python Engineer" },
+            connector_resolution: [
+              {
+                parameter_key: "recipient",
+                resolved_value: "Hi Senior Python Engineer",
+                connector: { name: "Odoo HR", type: "odoo" },
+                source_record: { job_id: "11", job_title: "Senior Python Engineer" },
+              },
+            ],
+          });
+        }
+        if (url.includes(`/workflows/${workflowId}`)) return buildWorkflow(workflowId);
+        if (url.includes(`/agent/${runId}/outcomes`)) return buildOutcomes(false);
+        return [];
+      };
+      return { ok: true, status: 200, json, text: async () => JSON.stringify(await json()) };
+    });
+
+    renderPage(runId);
+
+    expect(await screen.findByText("Connector Resolution")).toBeInTheDocument();
+    expect(screen.getByText("Latest job: Senior Python Engineer (#11)")).toBeInTheDocument();
+    expect(screen.getByText("Hi Senior Python Engineer")).toBeInTheDocument();
   });
 
   it("does not render the Vision chip when screenshot_meta is null", async () => {

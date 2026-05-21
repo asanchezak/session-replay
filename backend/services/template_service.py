@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models.analysis import WorkflowTemplate
 from core.models.workflow import WorkflowStep
 from services.audit import AppendEvent, AuditService
+from services.workflow_connector_service import WorkflowConnectorService
 from services.semantic_analysis_service import SemanticAnalysisService
 
 logger = logging.getLogger(__name__)
@@ -226,9 +227,10 @@ class TemplateService:
 
     async def build_execution_plan(self, workflow_id: str, runtime_params: dict | None = None) -> dict:
         analysis_svc = SemanticAnalysisService(self.session)
+        connector_svc = WorkflowConnectorService(self.session)
         analysis = await analysis_svc.get_analysis(workflow_id)
         template = await analysis_svc.get_template(workflow_id)
-        params = runtime_params or {}
+        params, connector_resolution = await connector_svc.resolve_runtime_params(workflow_id, runtime_params or {})
         execution_goal = str(params.pop("__execution_goal__", "") or "").strip()
 
         if not analysis:
@@ -270,6 +272,8 @@ class TemplateService:
                     "strategy": "parameterized",
                     "mode": "substituted",
                     "parameters": params,
+                    "resolved_parameters": params,
+                    "connector_resolution": connector_resolution,
                     "steps": substituted_steps,
                     "original_template_version": template.template_version,
                 }
@@ -294,6 +298,8 @@ class TemplateService:
                 "mode": "goal_driven",
                 "execution_goal": execution_goal or analysis.workflow_goal,
                 "parameters": params,
+                "resolved_parameters": params,
+                "connector_resolution": connector_resolution,
                 "steps": compacted_steps,
                 "omitted_steps": omitted_steps,
                 "original_template_version": template.template_version if template else None,
@@ -302,6 +308,8 @@ class TemplateService:
         return {
             "strategy": strategy,
             "mode": "literal" if strategy == "literal" else "default",
+            "resolved_parameters": params,
+            "connector_resolution": connector_resolution,
             "reason": "Using exact trace replay",
         }
 

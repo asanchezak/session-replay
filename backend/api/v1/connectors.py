@@ -20,6 +20,11 @@ class RegisterConnectorRequest(BaseModel):
     config: dict
 
 
+class UpdateConnectorRequest(BaseModel):
+    name: str | None = None
+    config: dict | None = None
+
+
 def _resolve(connector_id: str, db: AsyncSession):
     try:
         uid = uuid.UUID(connector_id)
@@ -86,6 +91,28 @@ async def register_connector(
     return {"id": str(connector.id), "name": connector.name, "type": connector.connector_type}
 
 
+@router.put("/{connector_id}")
+async def update_connector(
+    connector_id: str,
+    req: UpdateConnectorRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        uid = uuid.UUID(connector_id)
+    except ValueError:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Connector not found"}})
+    result = await db.execute(select(ConnectorConfig).where(ConnectorConfig.id == uid))
+    connector = result.scalar_one_or_none()
+    if not connector:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Connector not found"}})
+    if req.name is not None:
+        connector.name = req.name
+    if req.config is not None:
+        connector.config = {**connector.config, **req.config}
+    await db.flush()
+    return {"id": str(connector.id), "name": connector.name, "type": connector.connector_type}
+
+
 @router.post("/{connector_id}/test")
 async def test_connector(
     connector_id: str,
@@ -118,8 +145,7 @@ async def test_connector(
         adapter = adapter_cls()
         await adapter.initialize(connector.config)
         health = await adapter.health_check()
-        connector.config["healthy"] = health.status == "healthy"
-        connector.config["last_error"] = health.last_error
+        connector.config = {**connector.config, "healthy": health.status == "healthy", "last_error": health.last_error}
         await db.flush()
         await adapter.dispose()
         return {
@@ -129,8 +155,7 @@ async def test_connector(
             "error": health.last_error,
         }
     except Exception as e:
-        connector.config["healthy"] = False
-        connector.config["last_error"] = str(e)
+        connector.config = {**connector.config, "healthy": False, "last_error": str(e)}
         await db.flush()
         return {"status": "error", "message": str(e)}
 

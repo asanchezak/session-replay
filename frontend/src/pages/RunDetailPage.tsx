@@ -72,6 +72,14 @@ interface RunDetail {
   ended_at?: string;
   created_at: string;
   goal_progress?: GoalProgress | null;
+  resolved_parameters?: Record<string, string>;
+  connector_resolution?: Array<{
+    parameter_key: string;
+    resolved_value: string;
+    template?: string;
+    connector?: { name?: string; type?: string };
+    source_record?: { job_title?: string; job_id?: string; job_description?: string };
+  }>;
 }
 
 interface WorkflowDetail {
@@ -138,6 +146,7 @@ const eventColors: Record<string, string> = {
   recovery_cycle: "var(--color-warning)",
   run_auto_resumed: "var(--color-info)",
   run_auto_completed: "var(--color-success)",
+  run_tab_closed: "var(--color-warning)",
 };
 
 const CANCELABLE_STATUSES = ["queued", "running", "waiting_for_user", "recovering"];
@@ -249,6 +258,7 @@ function describeEventType(eventType: string): string {
     recovery_cycle: "Recovery cycle",
     run_auto_resumed: "Auto resumed",
     run_auto_completed: "Auto completed",
+    run_tab_closed: "Tab closed",
     extraction: "Data extraction",
     script_executed: "Script executed",
     intervention: "Human intervention",
@@ -366,7 +376,11 @@ export default function RunDetailPage() {
   }, [run?.status, runId]);
 
   useEffect(() => {
-    if (run?.status === "waiting_for_user" && hasShownIntervention.current !== run.id) {
+    if (
+      run?.status === "waiting_for_user" &&
+      run.pause_reason !== "tab_closed" &&
+      hasShownIntervention.current !== run.id
+    ) {
       hasShownIntervention.current = run.id;
       setShowIntervention(true);
     }
@@ -374,7 +388,7 @@ export default function RunDetailPage() {
       setShowIntervention(false);
       hasShownIntervention.current = null;
     }
-  }, [run?.status, run?.id]);
+  }, [run?.status, run?.id, run?.pause_reason]);
 
   const handleAction = async (action: string, endpoint: string) => {
     setActionLoading(action);
@@ -389,6 +403,34 @@ export default function RunDetailPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : `Failed to ${action}`;
       logger.error("RunDetailPage", action, { run_id: runId, endpoint }, err instanceof Error ? err : undefined);
+      setError(msg);
+    }
+    setActionLoading(null);
+  };
+
+  const handleRerun = async () => {
+    if (!runId) return;
+    // Open a blank tab synchronously inside the user-gesture so pop-up
+    // blockers don't suppress it. We'll point the new tab at the new run URL
+    // once the API responds.
+    // Note: cannot use "noopener" here — when set, window.open returns null and
+    // we'd lose the ability to redirect the tab once the API responds.
+    const newTab = window.open("about:blank", "_blank");
+    setActionLoading("rerun");
+    setError(null);
+    try {
+      const data = await request<{ id: string }>("POST", `/runs/${runId}/rerun`);
+      const newUrl = `${window.location.origin}/runs/${data.id}`;
+      if (newTab && !newTab.closed) {
+        newTab.location.href = newUrl;
+      } else {
+        // Pop-up was blocked or closed — fall back to same-tab navigation.
+        navigate(`/runs/${data.id}`);
+      }
+    } catch (err) {
+      if (newTab && !newTab.closed) newTab.close();
+      const msg = err instanceof Error ? err.message : "Failed to re-run";
+      logger.error("RunDetailPage", "rerun", { run_id: runId }, err instanceof Error ? err : undefined);
       setError(msg);
     }
     setActionLoading(null);
@@ -493,6 +535,7 @@ export default function RunDetailPage() {
 
   const isRunning = run.status === "running";
   const isPaused = run.status === "waiting_for_user";
+  const isTabClosed = isPaused && run.pause_reason === "tab_closed";
   const isRecovering = run.status === "recovering";
   const isCancelable = CANCELABLE_STATUSES.includes(run.status);
   const isTerminal = ["completed", "failed", "canceled"].includes(run.status);
@@ -539,6 +582,14 @@ export default function RunDetailPage() {
         </div>
       )}
 
+      {isTabClosed && (
+        <div className="mb-4">
+          <Banner type="warning" title="Tab was closed">
+            The browser tab running this workflow was closed. Resume is unavailable — use Re-run to start a fresh execution.
+          </Banner>
+        </div>
+      )}
+
       {/* Progress Bar */}
       <Card className="mb-6">
         <div className="flex items-center justify-between mb-2">
@@ -548,7 +599,8 @@ export default function RunDetailPage() {
             {isRecovering && <RefreshCw size={14} className="text-warning animate-spin" />}
             <span className="text-sm text-text-secondary">
               {isRunning && currentStep ? `Executing: ${currentStep.action_type}` : ""}
-              {isPaused ? "Waiting for your action" : ""}
+              {isTabClosed ? "Tab closed — re-run to continue" : ""}
+              {isPaused && !isTabClosed ? "Waiting for your action" : ""}
               {isRecovering ? "Attempting recovery..." : ""}
               {run.status === "completed" ? "Completed" : ""}
               {run.status === "failed" ? "Failed" : ""}
@@ -579,7 +631,7 @@ export default function RunDetailPage() {
               <Pause size={14} /> {actionLoading === "pause" ? "..." : "Pause"}
             </button>
           )}
-          {isPaused && (
+          {isPaused && !isTabClosed && (
             <>
               <button
                 onClick={() => handleAction("resume", `/runs/${runId}/resume`)}
@@ -616,8 +668,18 @@ export default function RunDetailPage() {
               <RotateCcw size={14} /> {actionLoading === "retry" ? "Retrying..." : "Retry from failure"}
             </button>
           )}
+          {(isTerminal || isTabClosed) && (
+            <button
+              onClick={handleRerun}
+              disabled={actionLoading !== null}
+              title="Create a new run that re-executes this run's plan"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+            >
+              <RotateCcw size={14} /> {actionLoading === "rerun" ? "Re-running..." : "Re-run"}
+            </button>
+          )}
           <div className="flex-1" />
-          {currentStep && (isRunning || isPaused) && (
+          {currentStep && (isRunning || (isPaused && !isTabClosed)) && (
             <button
               onClick={() => handleAction("skip", `/runs/${runId}/advance_step`)}
               disabled={actionLoading !== null}
@@ -714,6 +776,36 @@ export default function RunDetailPage() {
                 </div>
               );
             })}
+          </div>
+        </Card>
+      )}
+
+      {run.connector_resolution && run.connector_resolution.length > 0 && (
+        <Card className="mb-4">
+          <h2 className="text-sm font-medium text-text-primary mb-3">Connector Resolution</h2>
+          <div className="space-y-3">
+            {run.connector_resolution.map((resolution) => (
+              <div key={resolution.parameter_key} className="rounded-md border border-border bg-bg-elevated p-3">
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <div className="text-sm text-text-primary">{resolution.parameter_key}</div>
+                  {resolution.connector?.name && (
+                    <div className="text-xs text-text-secondary">
+                      {resolution.connector.name}
+                      {resolution.connector.type ? ` (${resolution.connector.type})` : ""}
+                    </div>
+                  )}
+                </div>
+                {resolution.source_record?.job_title && (
+                  <div className="text-xs text-text-secondary mb-2">
+                    Latest job: {resolution.source_record.job_title}
+                    {resolution.source_record.job_id ? ` (#${resolution.source_record.job_id})` : ""}
+                  </div>
+                )}
+                <div className="text-xs text-text-primary whitespace-pre-wrap break-words">
+                  {resolution.resolved_value}
+                </div>
+              </div>
+            ))}
           </div>
         </Card>
       )}

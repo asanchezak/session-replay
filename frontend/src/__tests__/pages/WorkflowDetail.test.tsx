@@ -208,6 +208,91 @@ describe("WorkflowDetailPage", () => {
     );
   });
 
+  it("prefills a connector-backed parameter from preview before run", async () => {
+    (global as any).fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/workflows/wf-1")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...baseWorkflow,
+            analysis: {
+              workflow_goal: "Send a job message",
+              workflow_summary: "Parameterized workflow",
+              confidence_overall: 0.9,
+              replay_strategy: "parameterized",
+              is_user_edited: false,
+              phases: [],
+              parameters: [
+                {
+                  key: "recipient",
+                  type: "string",
+                  default: "Recorded placeholder",
+                  description: "Message body",
+                  confidence: 0.9,
+                  required: true,
+                },
+              ],
+              output_spec: { type: "object", schema: null, confidence: 0.5 },
+            },
+            connector_bindings: [
+              {
+                parameter_key: "recipient",
+                workflow_step_index: 1,
+                connector_id: "conn-1",
+                source_kind: "odoo_latest_job",
+                template: "Hi {job_title}",
+                job_filters: {},
+                enabled: true,
+              },
+            ],
+          }),
+        } as Response;
+      }
+      if (url.includes("/workflows/wf-1/connector-bindings/recipient/preview") && (init?.method || "GET") === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            preview: {
+              parameter_key: "recipient",
+              workflow_step_index: 1,
+              resolved_value: "Hi Senior Python Engineer",
+              source_record: { job_id: "11", job_title: "Senior Python Engineer" },
+              connector: { id: "conn-1", name: "Odoo HR", type: "odoo" },
+              target_summary: "Step 2 - type: i2",
+            },
+          }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [{ id: "conn-1", name: "Odoo HR", type: "odoo", status: "connected" }] } as Response;
+    });
+    vi.stubGlobal("open", vi.fn(() => ({
+      closed: false,
+      close: vi.fn(),
+      location: { href: "/runs/pending" },
+    })));
+    const postMessageSpy = vi.spyOn(window, "postMessage");
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Demo WF/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /^Run$/i }));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Run with Parameters" })).toBeInTheDocument());
+    expect(screen.getByLabelText("Workflow step (optional)")).toHaveValue("1");
+    fireEvent.click(screen.getByRole("button", { name: "Run Workflow" }));
+
+    expect(postMessageSpy).toHaveBeenCalledWith(
+      {
+        type: "DASHBOARD_RUN_WORKFLOW",
+        workflowId: "wf-1",
+        params: { recipient: "Hi Senior Python Engineer" },
+      },
+      "*",
+    );
+  });
+
   it("shows an error when the extension never reports that the run started", async () => {
     mockFetchWorkflow();
     const popupWindow = {

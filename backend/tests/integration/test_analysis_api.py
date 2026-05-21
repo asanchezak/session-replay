@@ -273,3 +273,106 @@ async def test_run_with_params_applies_execution_goal_and_semantic_plan(api_clie
     assert run_detail.status_code == 200
     goal_progress = run_detail.json()["goal_progress"]
     assert goal_progress["workflow_goal"] == "Extract the first 10 job descriptions from the search results"
+
+
+@pytest.mark.asyncio
+async def test_connector_binding_preview_and_run_resolution(api_client, monkeypatch):
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+
+    connector = await api_client.post(
+        "/v1/connectors",
+        json={
+            "name": "Live Odoo",
+            "type": "odoo",
+            "config": {"url": "https://odoo.example.com", "database": "db", "username": "u", "password": "p"},
+        },
+        headers=_HEADERS,
+    )
+    connector_id = connector.json()["id"]
+
+    create = await api_client.post(
+        "/v1/workflows",
+        json={"name": "Connector-backed LinkedIn message"},
+        headers=_HEADERS,
+    )
+    wf_id = create.json()["id"]
+
+    steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://www.linkedin.com/feed/", "intent": "Open LinkedIn"},
+        {"step_index": 1, "action_type": "click", "value": "Messaging", "intent": "Open messaging"},
+        {"step_index": 2, "action_type": "type", "value": "Recorded placeholder", "intent": "Type invite"},
+        {"step_index": 3, "action_type": "click", "value": "Send", "intent": "Send message"},
+    ]
+    for i, step in enumerate(steps):
+        await api_client.post(
+            f"/v1/workflows/{wf_id}/steps",
+            json={
+                "step_index": i,
+                "action_type": step["action_type"],
+                "intent": step["intent"],
+                "value": step["value"],
+            },
+            headers=_HEADERS,
+        )
+
+    await api_client.put(
+        f"/v1/workflows/{wf_id}/status",
+        json={"status": "active"},
+        headers=_HEADERS,
+    )
+    await api_client.post(f"/v1/workflows/{wf_id}/analyze", headers=_HEADERS)
+    await api_client.put(
+        f"/v1/workflows/{wf_id}/analysis",
+        json={"replay_strategy": "parameterized"},
+        headers=_HEADERS,
+    )
+    params = await api_client.get(f"/v1/workflows/{wf_id}/analysis", headers=_HEADERS)
+    recipient = next(
+        parameter["key"]
+        for parameter in params.json()["parameters"]
+        if parameter.get("default") == "Recorded placeholder"
+    )
+
+    async def _jobs(*_args, **_kwargs):
+        return [{"job_id": "11", "job_title": "Senior Python Engineer", "job_description": "Own workflow automation."}]
+
+    monkeypatch.setattr("services.connector_forum_service.ConnectorForumService.fetch_jobs", _jobs)
+
+    save = await api_client.put(
+        f"/v1/workflows/{wf_id}/connector-bindings/{recipient}",
+        json={
+            "connector_id": connector_id,
+            "workflow_step_index": 2,
+            "source_kind": "odoo_latest_job",
+            "template": "Hi, we are hiring for {job_title}. {job_description}",
+            "job_filters": {},
+            "enabled": True,
+        },
+        headers=_HEADERS,
+    )
+    assert save.status_code == 200
+
+    preview = await api_client.post(
+        f"/v1/workflows/{wf_id}/connector-bindings/{recipient}/preview",
+        headers=_HEADERS,
+    )
+    assert preview.status_code == 200
+    assert "Senior Python Engineer" in preview.json()["preview"]["resolved_value"]
+    assert preview.json()["preview"]["workflow_step_index"] == 2
+    assert preview.json()["preview"]["target_summary"].startswith("Step 3 - type")
+
+    run = await api_client.post(
+        f"/v1/workflows/{wf_id}/run-with-params",
+        json={"runtime_params": {}},
+        headers=_HEADERS,
+    )
+    assert run.status_code == 200
+    body = run.json()
+    assert body["execution_plan"]["resolved_parameters"][recipient].startswith("Hi, we are hiring for Senior Python Engineer")
+    type_step = next(step for step in body["execution_plan"]["steps"] if step["action_type"] == "type")
+    assert "Senior Python Engineer" in type_step["value"]
+
+    run_detail = await api_client.get(f"/v1/runs/{body['id']}", headers=_HEADERS)
+    assert run_detail.status_code == 200
+    assert run_detail.json()["connector_resolution"][0]["parameter_key"] == recipient

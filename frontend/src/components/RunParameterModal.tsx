@@ -15,6 +15,16 @@ interface RunParameterModalProps {
   onRun: (values: Record<string, string>, goal?: string) => void;
   onCancel: () => void;
   isRunning?: boolean;
+  prefilledValues?: Record<string, string>;
+  parameterUsageLabels?: Record<string, string[]>;
+  bindingPreviews?: Array<{
+    parameter_key: string;
+    connector?: { name: string; type: string };
+    source_record?: { job_title?: string; job_id?: string };
+    resolved_value?: string;
+    target_summary?: string;
+    error?: string;
+  }>;
   includeGoal?: boolean;
   goalLabel?: string;
   goalPlaceholder?: string;
@@ -30,6 +40,9 @@ export function RunParameterModal({
   onRun,
   onCancel,
   isRunning,
+  prefilledValues,
+  parameterUsageLabels,
+  bindingPreviews,
   includeGoal,
   goalLabel = "Execution goal",
   goalPlaceholder = 'e.g. "Extract the first 10 job descriptions from this search"',
@@ -42,7 +55,7 @@ export function RunParameterModal({
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const p of parameters) {
-      initial[p.key] = p.default || "";
+      initial[p.key] = prefilledValues?.[p.key] || p.default || "";
     }
     return initial;
   });
@@ -83,7 +96,46 @@ export function RunParameterModal({
                 values={values}
                 onChange={handleChange}
                 readOnly={isRunning}
+                usageLabels={parameterUsageLabels}
               />
+            )}
+            {bindingPreviews && bindingPreviews.length > 0 && (
+              <div className="space-y-3">
+                {bindingPreviews.map((preview) => (
+                  <div key={preview.parameter_key} className="rounded-lg border border-[#2D3148] bg-[#1F2330] p-3">
+                    <div className="flex items-center justify-between gap-3 mb-1">
+                      <div className="text-sm text-[#E8EAED] font-medium">
+                        {preview.parameter_key}
+                      </div>
+                      {preview.connector && (
+                        <div className="text-xs text-[#9AA0B0]">
+                          {preview.connector.name} ({preview.connector.type})
+                        </div>
+                      )}
+                    </div>
+                    {preview.error ? (
+                      <p className="text-xs text-[#E17055]">{preview.error}</p>
+                    ) : (
+                      <>
+                        {preview.source_record?.job_title && (
+                          <p className="text-xs text-[#9AA0B0] mb-2">
+                            Latest job: {preview.source_record.job_title}
+                            {preview.source_record.job_id ? ` (#${preview.source_record.job_id})` : ""}
+                          </p>
+                        )}
+                        {preview.target_summary && (
+                          <p className="text-xs text-[#9AA0B0] mb-2">
+                            Used by: {preview.target_summary}
+                          </p>
+                        )}
+                        <p className="text-xs text-[#E8EAED] whitespace-pre-wrap break-words">
+                          {preview.resolved_value}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
             {includeGoal && (
               <div className="flex flex-col gap-1">

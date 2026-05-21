@@ -324,7 +324,7 @@ export function LINKEDIN_SITE_HARNESS(args: Record<string, unknown>): SiteAdapte
   if (operation === "type_message") {
     const composer = findComposer();
     if (composer && normalize(textFor(composer)).includes(normalize(text))) {
-      return noop("linkedin_message_already_present", 500);
+      return measure(composer, "linkedin_message_already_present", "click", undefined, 150);
     }
     return measure(composer, "linkedin_type_message", "type", text, 500);
   }

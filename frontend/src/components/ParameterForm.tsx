@@ -12,9 +12,10 @@ interface ParameterFormProps {
   values: Record<string, string>;
   onChange: (key: string, value: string) => void;
   readOnly?: boolean;
+  usageLabels?: Record<string, string[]>;
 }
 
-export function ParameterForm({ parameters, values, onChange, readOnly }: ParameterFormProps) {
+export function ParameterForm({ parameters, values, onChange, readOnly, usageLabels }: ParameterFormProps) {
   if (parameters.length === 0) {
     return (
       <div className="text-[#9AA0B0] text-sm italic">
@@ -31,7 +32,7 @@ export function ParameterForm({ parameters, values, onChange, readOnly }: Parame
             htmlFor={`param-${param.key}`}
             className="text-[#E8EAED] text-sm font-medium flex items-center gap-2"
           >
-            {param.description || param.key}
+            <span>{param.key}</span>
             {param.required && (
               <span className="text-[#E17055] text-xs">*required</span>
             )}
@@ -55,6 +56,11 @@ export function ParameterForm({ parameters, values, onChange, readOnly }: Parame
               {Math.round(param.confidence * 100)}%
             </span>
           </label>
+          {param.description && param.description !== param.key && (
+            <span className="text-xs text-[#9AA0B0]">
+              {param.description}
+            </span>
+          )}
           <input
             id={`param-${param.key}`}
             type={param.type === "number" ? "number" : "text"}
@@ -70,6 +76,18 @@ export function ParameterForm({ parameters, values, onChange, readOnly }: Parame
           <span className="text-xs text-[#9AA0B0]">
             Type: {param.type}
           </span>
+          {usageLabels?.[param.key] && usageLabels[param.key].length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {usageLabels[param.key].map((label) => (
+                <span
+                  key={label}
+                  className="rounded-full border border-[#2D3148] bg-[#1F2330] px-2 py-1 text-[11px] text-[#9AA0B0]"
+                >
+                  {label}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       ))}
     </div>

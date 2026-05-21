@@ -103,6 +103,9 @@ class RecoverySupervisor:
         }:
             return False
         run_id = str(run.id)
+        if run.pause_reason == "tab_closed":
+            logger.info("Supervisor: skipping tab_closed run %s — tab was closed, human must re-run", run_id)
+            return False
         prior = _auto_resume_count.get(run_id, 0)
         if not forced and prior >= MAX_AUTO_RESUMES_PER_RUN:
             logger.info("Run %s already at auto-resume cap (%d)", run_id, prior)

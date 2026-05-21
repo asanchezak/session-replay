@@ -37,7 +37,9 @@ export function useApi() {
     });
 
     const elapsed = performance.now() - start;
-    const data = await response.json();
+    const data = response.status === 204 || response.headers.get("content-length") === "0"
+      ? null
+      : await response.json();
 
     logger.apiCall("useApi", method, path, response.status, elapsed);
 

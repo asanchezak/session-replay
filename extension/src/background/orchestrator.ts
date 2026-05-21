@@ -4,6 +4,43 @@ import { createLogger } from "../shared/logger";
 
 const log = createLogger("orchestrator");
 const STORAGE_KEY = "recording_state";
+const RUN_TAB_KEY = "active_run_tabs";
+
+// In-memory map of runId → tabId for active runs.
+// Written through to chrome.storage.session so it survives SW sleep/reload.
+export const runTabMap = new Map<string, number>();
+
+export async function setRunTab(runId: string, tabId: number): Promise<void> {
+  runTabMap.set(runId, tabId);
+  try {
+    const stored = await chrome.storage.session.get(RUN_TAB_KEY);
+    const entries = (stored[RUN_TAB_KEY] as Record<string, number>) || {};
+    await chrome.storage.session.set({ [RUN_TAB_KEY]: { ...entries, [runId]: tabId } });
+  } catch { /* non-fatal; in-memory map is authoritative for this SW lifetime */ }
+}
+
+export async function clearRunTab(runId: string): Promise<void> {
+  runTabMap.delete(runId);
+  try {
+    const stored = await chrome.storage.session.get(RUN_TAB_KEY);
+    const entries = { ...((stored[RUN_TAB_KEY] as Record<string, number>) || {}) };
+    delete entries[runId];
+    await chrome.storage.session.set({ [RUN_TAB_KEY]: entries });
+  } catch { }
+}
+
+async function restoreRunTabMap(): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(RUN_TAB_KEY);
+    const entries = (stored[RUN_TAB_KEY] as Record<string, number>) || {};
+    for (const [runId, tabId] of Object.entries(entries)) {
+      runTabMap.set(runId, tabId);
+    }
+    if (Object.keys(entries).length > 0) {
+      log.log(`[TabLifecycle] Restored ${Object.keys(entries).length} active run-tab entries from storage`);
+    }
+  } catch { }
+}
 
 // Allow content scripts to read recording state directly from storage
 // This eliminates the race between SET_RECORDING message and SW restart
@@ -92,6 +129,7 @@ export class Orchestrator {
     } catch {
       // first run or storage unavailable
     }
+    await restoreRunTabMap();
   }
 
   async persist(): Promise<void> {

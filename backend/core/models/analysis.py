@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin
@@ -82,3 +82,18 @@ class WorkflowTemplate(Base, TimestampMixin, UUIDMixin):
     template_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     template_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class WorkflowConnectorBinding(Base, TimestampMixin, UUIDMixin):
+    __tablename__ = "workflow_connector_bindings"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "parameter_key", name="uq_workflow_connector_param"),
+    )
+
+    workflow_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    parameter_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    connector_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(50), nullable=False, default="odoo_latest_job")
+    job_filters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

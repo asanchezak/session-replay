@@ -12,6 +12,7 @@ from core.models.analysis import (
     SemanticAction,
     SemanticPhase,
     WorkflowAnalysis,
+    WorkflowConnectorBinding,
     WorkflowParameter,
     WorkflowTemplate,
 )
@@ -212,6 +213,7 @@ class WorkflowService:
             (SemanticPhase, "semantic_phases"),
             (WorkflowParameter, "workflow_parameters"),
             (WorkflowAnalysis, "workflow_analyses"),
+            (WorkflowConnectorBinding, "workflow_connector_bindings"),
             (OutputSpecification, "output_specifications"),
             (WorkflowTemplate, "workflow_templates"),
             (WorkflowStep, "workflow_steps"),
@@ -229,6 +231,7 @@ class WorkflowService:
             SemanticPhase,
             WorkflowParameter,
             WorkflowAnalysis,
+            WorkflowConnectorBinding,
             OutputSpecification,
             WorkflowTemplate,
             WorkflowStep,

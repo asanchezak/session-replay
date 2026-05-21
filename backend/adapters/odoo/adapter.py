@@ -52,7 +52,7 @@ class OdooAdapter(BaseAdapter):
             return ConnectorHealth(status="down", latency_ms=0, last_error="Not initialized")
         start = time.monotonic()
         try:
-            await self._client.call("ir.http", "db_list")
+            await self._client.search_read("res.lang", [], fields=["id"], limit=1)
             latency = int((time.monotonic() - start) * 1000)
             return ConnectorHealth(status="healthy", latency_ms=latency)
         except Exception as e:

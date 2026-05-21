@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
+from core.state_machine import RunStatus
 from core.models.ai_decision_outcome import AIDecisionOutcome
 from core.models.ai_reasoning_chain import AIReasoningChain
 from core.models.artifact import Artifact
@@ -177,6 +178,8 @@ async def get_run(
         "created_at": run.created_at.isoformat(),
         "goal_progress": run.goal_progress,
         "extracted_data": run.extracted_data or [],
+        "resolved_parameters": (run.workflow_snapshot or {}).get("resolved_parameters", {}),
+        "connector_resolution": (run.workflow_snapshot or {}).get("connector_resolution", []),
     }
 
 
@@ -232,13 +235,13 @@ async def get_run_events(
 @router.post("/{run_id}/pause")
 async def pause_run(
     run_id: str,
-    body: dict,
+    body: dict = None,
     db: AsyncSession = Depends(get_db),
 ):
     svc = ExecutionService(db)
     try:
         run = await svc.pause(
-            run_id, reason=body.get("reason", "Manual pause")
+            run_id, reason=(body or {}).get("reason", "Manual pause")
         )
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
@@ -268,6 +271,19 @@ async def resume_run(
     return {"id": str(run.id), "status": run.status}
 
 
+@router.post("/{run_id}/tab-closed")
+async def tab_closed_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ExecutionService(db)
+    try:
+        run = await svc.tab_closed(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    return {"id": str(run.id), "status": run.status, "pause_reason": run.pause_reason}
+
+
 @router.post("/{run_id}/cancel")
 async def cancel_run(
     run_id: str,
@@ -293,6 +309,31 @@ async def cancel_run(
         return _error("INTERNAL_ERROR", str(e), status=500, details=detail)
 
     return {"id": str(run.id), "status": run.status}
+
+
+@router.post("/{run_id}/rerun")
+async def rerun_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new run that re-executes the source run's substituted plan."""
+    svc = ExecutionService(db)
+    try:
+        new_run = await svc.rerun(run_id)
+        new_run = await svc.transition(str(new_run.id), RunStatus.RUNNING)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Source run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+
+    return {
+        "id": str(new_run.id),
+        "workflow_id": new_run.workflow_id,
+        "status": new_run.status,
+        "current_step_index": new_run.current_step_index,
+        "total_steps": new_run.total_steps,
+        "rerun_of": run_id,
+    }
 
 
 @router.post("/{run_id}/checkpoint")

@@ -459,7 +459,7 @@ def test_linkedin_site_command_uses_intent_when_context_url_is_stale(db_session:
     assert cmd.script_args["label"] == "Home"
 
 
-def test_linkedin_site_type_message_uses_visible_text_condition(db_session: AsyncSession):
+def test_linkedin_site_type_message_omits_fragile_draft_success_condition(db_session: AsyncSession):
     agent = AgentService(db_session)
     cmd = agent._build_linkedin_site_command(
         {
@@ -478,7 +478,7 @@ def test_linkedin_site_type_message_uses_visible_text_condition(db_session: Asyn
     )
     assert cmd is not None
     assert cmd.script_args["operation"] == "type_message"
-    assert cmd.success_condition == {"type": "visible_text_contains", "value": "Hello"}
+    assert cmd.success_condition is None
 
 
 def test_build_command_resolves_navigate_url_from_intent(db_session: AsyncSession):

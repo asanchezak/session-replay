@@ -1,4 +1,4 @@
-import { orchestrator } from "./orchestrator";
+import { orchestrator, runTabMap, setRunTab, clearRunTab } from "./orchestrator";
 import { apiClient, DEV_DEFAULTS } from "./api";
 import { createLogger } from "../shared/logger";
 import { stepHealer } from "./healer";
@@ -332,6 +332,7 @@ async function executeWorkflowRun(
   if (!targetTabId) {
     return { id: runId, status: "failed", total_steps: steps.length };
   }
+  await setRunTab(runId, targetTabId);
 
   // Navigate to target URL if set
   if (workflow.target_url) {
@@ -574,6 +575,7 @@ async function executeWorkflowRun(
     orchestrator.broadcastState();
   }
 
+  await clearRunTab(runId);
   return { id: runId, status: statusOverride || (allStepsSucceeded ? "completed" : "failed"), total_steps: steps.length };
 }
 
@@ -624,6 +626,7 @@ async function executeAgentRun(
     await apiClient.failRun(runId, "No target tab found");
     return { id: runId, status: "failed", total_steps: totalSteps };
   }
+  await setRunTab(runId, targetTabId);
 
   // Phase 2: fresh run = fresh diff history. Clear the per-tab snapshot
   // cache so the first poll doesn't show a "diff" against another run.
@@ -1071,6 +1074,7 @@ async function executeAgentRun(
       "Agent run failed",
     );
   }
+  await clearRunTab(runId);
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }
 
@@ -1275,6 +1279,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     page_title: tab.title || "",
     timestamp: new Date().toISOString(),
   }).catch(() => {});
+});
+
+// Tab lifecycle monitoring: when the target tab of an active run is closed,
+// notify the backend so the run is marked tab_closed (not resumable).
+chrome.tabs.onRemoved.addListener((tabId: number) => {
+  for (const [runId, trackedTabId] of runTabMap.entries()) {
+    if (trackedTabId === tabId) {
+      log.log(`[TabLifecycle] Tab ${tabId} closed for run ${runId} — notifying backend`);
+      apiClient.reportTabClosed(runId).catch((err) => {
+        log.error(`[TabLifecycle] Failed to report tab closed for run ${runId}:`, err);
+      });
+      clearRunTab(runId);
+    }
+  }
 });
 
 chrome.action.onClicked.addListener(() => {

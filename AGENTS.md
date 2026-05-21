@@ -97,6 +97,18 @@ curl -s -H "X-API-Key: dev-api-key-change-in-production" http://localhost:8081/v
 | `python3 scripts/verify_autonomy.py` | live probe — proves the AI is consulted on `cf7e5f3b` |
 | `python3 scripts/autonomy_report.py` | emit `test-results/autonomy-report-latest.md` decision-mix report |
 
+## Testing operator guide
+
+For execution-oriented testing, live proof, restart/build discipline, and the
+common false-failure patterns in this repo, read:
+
+- `docs/testing-operator-guide.md`
+
+For cross-layer features, final acceptance should be against the live system
+and should prefer end-to-end tests. When browser proof matters, run the live
+browser test outside the sandbox if needed; API-only or mocked proof is not
+enough.
+
 ## Backend conventions
 
 - Python 3.12, FastAPI, SQLAlchemy async, Pydantic, ruff, mypy

@@ -5,6 +5,7 @@ from core.models.analysis import (
     SemanticAction,
     SemanticPhase,
     WorkflowAnalysis,
+    WorkflowConnectorBinding,
     WorkflowParameter,
     WorkflowTemplate,
 )
@@ -25,6 +26,6 @@ __all__ = [
     "AuditOutbox", "Base", "ConnectorConfig", "EventLog", "ExecutionRun",
     "OutputSpecification", "PageStateSnapshot", "RecoveryAttemptTrace",
     "RunSummary", "SemanticAction", "SemanticPhase",
-    "Workflow", "WorkflowAnalysis", "WorkflowParameter",
+    "Workflow", "WorkflowAnalysis", "WorkflowConnectorBinding", "WorkflowParameter",
     "WorkflowStep", "WorkflowStatus", "WorkflowTemplate",
 ]

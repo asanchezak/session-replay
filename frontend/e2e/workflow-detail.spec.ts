@@ -40,6 +40,17 @@ const PARAMETERIZED_WORKFLOW = {
   },
 };
 
+function mockRunsSilent(page: any) {
+  return page.route("**/v1/runs*", async (route: any) => {
+    const url = route.request().url();
+    if (url.includes("status=waiting_for_user") || url.includes("limit=100")) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    } else {
+      await new Promise(() => {});
+    }
+  });
+}
+
 test.describe("Workflow detail run entry", () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
@@ -74,6 +85,7 @@ test.describe("Workflow detail run entry", () => {
     await page.route("**/v1/workflows/wf-1", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(WORKFLOW) });
     });
+    await mockRunsSilent(page);
 
     await page.goto("/workflows/wf-1");
     await page.getByRole("button", { name: /^Run$/i }).click();
@@ -100,6 +112,7 @@ test.describe("Workflow detail run entry", () => {
     await page.route("**/v1/workflows/wf-1", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PARAMETERIZED_WORKFLOW) });
     });
+    await mockRunsSilent(page);
 
     await page.goto("/workflows/wf-1");
     await page.getByRole("button", { name: /^Run$/i }).click();

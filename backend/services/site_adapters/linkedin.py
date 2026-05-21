@@ -154,15 +154,15 @@ class LinkedInSiteAdapter:
             "scope": scope,
             **args,
         }
-        success_condition = (
-            {"type": "visible_text_contains", "value": value}
-            if operation == "type_message" and isinstance(value, str)
-            else (
-                step.get("success_condition")
-                if isinstance(step.get("success_condition"), dict)
-                else None
-            )
+        existing_success_condition = (
+            step.get("success_condition")
+            if isinstance(step.get("success_condition"), dict)
+            else None
         )
+        if operation == "type_message" and isinstance(value, str):
+            success_condition = None
+        else:
+            success_condition = existing_success_condition
 
         return AgentCommand(
             action=CommandAction.RUN_SCRIPT,

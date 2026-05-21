@@ -130,9 +130,13 @@ class ExecutionService:
             analysis["execution_plan"] = {
                 "strategy": execution_plan.get("strategy"),
                 "mode": execution_plan.get("mode"),
+                "resolved_parameters": execution_plan.get("resolved_parameters") or execution_plan.get("parameters") or {},
+                "connector_resolution": execution_plan.get("connector_resolution") or [],
             }
         if analysis:
             snapshot["analysis"] = analysis
+        snapshot["resolved_parameters"] = execution_plan.get("resolved_parameters") or execution_plan.get("parameters") or {}
+        snapshot["connector_resolution"] = execution_plan.get("connector_resolution") or []
 
         run.workflow_snapshot = snapshot
         run.goal_progress = _seed_goal_progress(snapshot.get("analysis"), snapshot.get("steps", []))
@@ -164,6 +168,60 @@ class ExecutionService:
             payload={"current_step_index": 0, "total_steps": run.total_steps},
             run_id=run_id,
         ))
+        return run
+
+    async def rerun(self, source_run_id: str) -> ExecutionRun:
+        """Create a NEW run that re-executes a previous run's substituted plan.
+
+        Clones the source run's workflow_snapshot (preserving any runtime
+        parameter substitutions that were baked in by `apply_execution_plan`)
+        and seeds a fresh queued run. The caller is expected to transition the
+        returned run to RUNNING.
+        """
+        source = await self.get_run(source_run_id)
+        source_snapshot = deepcopy(source.workflow_snapshot or {})
+
+        # Prefer original_steps (the pre-execution baseline that already
+        # carries any param substitution). Fall back to current steps.
+        baseline_steps = deepcopy(
+            source_snapshot.get("original_steps") or source_snapshot.get("steps") or []
+        )
+        for i, step in enumerate(baseline_steps):
+            step["step_index"] = i
+
+        snapshot: dict = {
+            "workflow": source_snapshot.get("workflow"),
+            "steps": baseline_steps,
+            "original_steps": deepcopy(baseline_steps),
+        }
+        if "analysis" in source_snapshot:
+            snapshot["analysis"] = deepcopy(source_snapshot["analysis"])
+
+        WorkflowStateMachine.transition(RunStatus.IDLE, RunStatus.QUEUED)
+
+        goal_progress = _seed_goal_progress(snapshot.get("analysis"), snapshot.get("steps", []))
+
+        run = ExecutionRun(
+            workflow_id=source.workflow_id,
+            workflow_snapshot=snapshot,
+            user_id=source.user_id,
+            total_steps=len(baseline_steps),
+            status="queued",
+            goal_progress=goal_progress,
+        )
+        self.session.add(run)
+        await self.session.flush()
+
+        await self.audit.append(AppendEvent(
+            event_type="run_started",
+            payload={
+                "workflow_id": source.workflow_id,
+                "step_count": run.total_steps,
+                "rerun_of": str(source.id),
+            },
+            run_id=str(run.id),
+        ))
+        logger.info("Created rerun id=%s source_run_id=%s", run.id, source.id)
         return run
 
     async def get_run(self, run_id: str) -> ExecutionRun:
@@ -291,8 +349,58 @@ class ExecutionService:
         ))
         return run
 
+    async def tab_closed(self, run_id: str) -> ExecutionRun:
+        """Mark a run as waiting_for_user with pause_reason='tab_closed'.
+
+        Idempotent: only acts on runs that have an active browser tab
+        (running, recovering, waiting_for_user). Terminal and pre-running
+        states are returned unchanged.
+        """
+        run = await self.get_run(run_id)
+        active_states = {
+            RunStatus.RUNNING.value,
+            RunStatus.RECOVERING.value,
+            RunStatus.WAITING_FOR_USER.value,
+        }
+        if run.status not in active_states:
+            return run  # no active tab for queued/terminal states
+        if run.pause_reason == "tab_closed":
+            return run  # already recorded — idempotent
+        previous_status = run.status
+        if run.status == RunStatus.WAITING_FOR_USER.value:
+            # Already paused — just stamp the reason without re-transitioning
+            run.pause_reason = "tab_closed"
+            await self.session.flush()
+            await self.audit.append(AppendEvent(
+                event_type="run_tab_closed",
+                payload={"previous_status": previous_status, "step_index": run.current_step_index},
+                run_id=run_id,
+            ))
+            return run
+        run = await self.transition(run_id, RunStatus.WAITING_FOR_USER)
+        run.pause_reason = "tab_closed"
+        await self.session.flush()
+        await self.audit.append(AppendEvent(
+            event_type="run_tab_closed",
+            payload={"previous_status": previous_status, "step_index": run.current_step_index},
+            run_id=run_id,
+        ))
+        return run
+
     async def resume(self, run_id: str) -> ExecutionRun:
-        """Resume a paused run."""
+        """Resume a paused run. Raises StateTransitionError if the tab was closed."""
+        uid = to_uuid(run_id)
+        # Read under lock so the pause_reason guard can't race with tab_closed().
+        result = await self.session.execute(
+            select(ExecutionRun).where(ExecutionRun.id == uid).with_for_update()
+        )
+        run = result.scalar_one_or_none()
+        if not run:
+            raise NotFoundError(f"Run {run_id} not found")
+        if run.pause_reason == "tab_closed":
+            raise StateTransitionError(
+                "Cannot resume: the browser tab was closed. Use Re-run to start a new execution."
+            )
         logger.info("Resuming run=%s", run_id)
         return await self.transition(run_id, RunStatus.RUNNING)
 

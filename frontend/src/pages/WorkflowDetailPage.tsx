@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
-import { ParameterForm } from "../components/ParameterForm";
 import { PhaseTimeline } from "../components/PhaseTimeline";
 import { ConfidenceIndicator } from "../components/ConfidenceIndicator";
 import { OutputSchemaPreview } from "../components/OutputSchemaPreview";
@@ -17,6 +16,7 @@ interface Step {
   intent?: string;
   selector_chain?: Array<{ type: string; value: string }>;
   value?: string;
+  success_condition?: { type?: string; value?: string } | null;
 }
 
 interface AnalysisPhase {
@@ -64,6 +64,84 @@ interface WorkflowDetail {
   version: number;
   steps: Step[];
   analysis: Analysis | null;
+  connector_bindings?: ConnectorBinding[];
+}
+
+interface ConnectorSummary {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+}
+
+interface ConnectorBinding {
+  parameter_key: string;
+  connector_id: string;
+  source_kind: string;
+  template: string;
+  job_filters: Record<string, unknown>;
+  enabled: boolean;
+}
+
+interface ConnectorBindingDraft {
+  parameter_key: string;
+  connector_id: string;
+  source_kind: string;
+  template: string;
+  enabled: boolean;
+}
+
+interface BindingPreview {
+  parameter_key: string;
+  resolved_value?: string;
+  source_record?: { job_id?: string; job_title?: string; job_description?: string };
+  connector?: { id: string; name: string; type: string };
+  target_summary?: string;
+  error?: string;
+}
+
+function normalizeText(value: string | null | undefined): string {
+  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function describeStep(step: Step): string {
+  const number = step.step_index + 1;
+  const intent = (step.intent || "").replace(/\s+/g, " ").trim();
+  if (intent) return `Step ${number} - ${step.action_type}: ${intent}`;
+  return `Step ${number} - ${step.action_type}`;
+}
+
+function formatStepLabel(step: Step): string {
+  const base = describeStep(step);
+  if (step.action_type === "type") return `${base}`;
+  if (step.action_type === "click") return `${base}`;
+  return base;
+}
+
+function parameterConsumerSteps(workflow: WorkflowDetail | null, parameter: AnalysisParam): Step[] {
+  if (!workflow || !parameter.default) return [];
+  const needle = normalizeText(parameter.default);
+  if (!needle) return [];
+  return workflow.steps.filter((step) => {
+    const valueMatch = normalizeText(step.value).includes(needle);
+    const intentMatch = normalizeText(step.intent).includes(needle);
+    const successMatch = normalizeText(step.success_condition?.value).includes(needle);
+    return valueMatch || intentMatch || successMatch;
+  });
+}
+
+function getBindingDraftForParameter(
+  workflow: WorkflowDetail | null,
+  parameterKey: string,
+): ConnectorBindingDraft {
+  const existingBinding = workflow?.connector_bindings?.find((binding) => binding.parameter_key === parameterKey);
+  return {
+    parameter_key: parameterKey,
+    connector_id: existingBinding?.connector_id || "",
+    source_kind: existingBinding?.source_kind || "odoo_latest_job",
+    template: existingBinding?.template || "Hi, we are hiring for {job_title}.\n\n{job_description}",
+    enabled: existingBinding?.enabled ?? true,
+  };
 }
 
 export default function WorkflowDetailPage() {
@@ -71,6 +149,7 @@ export default function WorkflowDetailPage() {
   const navigate = useNavigate();
   const { request } = useApi();
   const { data, loading, error, fetchData } = useApiData<WorkflowDetail>();
+  const { data: connectors, fetchData: fetchConnectors } = useApiData<ConnectorSummary[]>();
   const [running, setRunning] = useState(false);
   const [showParamModal, setShowParamModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
@@ -80,10 +159,29 @@ export default function WorkflowDetailPage() {
   const [nameInput, setNameInput] = useState("");
   const [activating, setActivating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [bindingDrafts, setBindingDrafts] = useState<Record<string, ConnectorBindingDraft>>({});
+  const [bindingPreview, setBindingPreview] = useState<Record<string, BindingPreview>>({});
+  const [bindingLoading, setBindingLoading] = useState<Record<string, boolean>>({});
+  const [bindingSaving, setBindingSaving] = useState<Record<string, boolean>>({});
+  const [bindingErrors, setBindingErrors] = useState<Record<string, string | null>>({});
 
   useEffect(() => {
     if (workflowId) fetchData("GET", `/workflows/${workflowId}`);
   }, [workflowId]);
+
+  useEffect(() => {
+    fetchConnectors("GET", "/connectors");
+  }, [fetchConnectors]);
+
+  const analysis = data?.analysis;
+
+  useEffect(() => {
+    const drafts: Record<string, ConnectorBindingDraft> = {};
+    for (const binding of data?.connector_bindings || []) {
+      drafts[binding.parameter_key] = getBindingDraftForParameter(data || null, binding.parameter_key);
+    }
+    setBindingDrafts(drafts);
+  }, [data?.connector_bindings]);
 
   const waitForRunStarted = (): Promise<
     | { type: "started"; runId: string }
@@ -178,8 +276,12 @@ export default function WorkflowDetailPage() {
   const handleRun = async () => {
     if (!workflowId) return;
     setRunError(null);
-    const analysis = data?.analysis;
     if (analysis?.parameters && analysis.parameters.length > 0 && analysis.replay_strategy === "parameterized") {
+      for (const draft of Object.values(bindingDrafts)) {
+        if (draft.connector_id && draft.enabled) {
+          await previewConnectorBinding(draft);
+        }
+      }
       setShowParamModal(true);
       return;
     }
@@ -236,6 +338,91 @@ export default function WorkflowDetailPage() {
     await startWorkflowRun(params, goal, "Failed to start parameterized run");
   };
 
+  const previewConnectorBinding = async (draft: ConnectorBindingDraft) => {
+    const key = draft.parameter_key;
+    if (!workflowId || !key || !draft.connector_id) return;
+    setBindingLoading((prev) => ({ ...prev, [key]: true }));
+    setBindingErrors((prev) => ({ ...prev, [key]: null }));
+    try {
+      const result = await request<{ preview: {
+        parameter_key: string;
+        resolved_value: string;
+        source_record: { job_id?: string; job_title?: string; job_description?: string };
+        connector: { id: string; name: string; type: string };
+      } }>(
+        "POST",
+        `/workflows/${workflowId}/connector-bindings/${key}/preview`,
+        {
+          connector_id: draft.connector_id,
+          source_kind: draft.source_kind,
+          template: draft.template,
+          job_filters: {},
+          enabled: draft.enabled,
+        },
+      );
+      const parameter = analysis?.parameters.find((item) => item.key === key);
+      const targetSummary = parameter
+        ? parameterConsumerSteps(data || null, parameter).map(formatStepLabel)
+        : [];
+      setBindingPreview((prev) => ({
+        ...prev,
+        [key]: {
+          ...result.preview,
+          target_summary: targetSummary.length > 0 ? targetSummary.join(" | ") : undefined,
+        },
+      }));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to preview connector binding";
+      setBindingPreview((prev) => ({ ...prev, [key]: { parameter_key: key, error: message } }));
+      setBindingErrors((prev) => ({ ...prev, [key]: message }));
+    }
+    setBindingLoading((prev) => ({ ...prev, [key]: false }));
+  };
+
+  const saveConnectorBinding = async (draft: ConnectorBindingDraft) => {
+    const key = draft.parameter_key;
+    if (!workflowId || !key) return;
+    setBindingSaving((prev) => ({ ...prev, [key]: true }));
+    setBindingErrors((prev) => ({ ...prev, [key]: null }));
+    try {
+      await request("PUT", `/workflows/${workflowId}/connector-bindings/${key}`, {
+        connector_id: draft.connector_id,
+        source_kind: draft.source_kind,
+        template: draft.template,
+        job_filters: {},
+        enabled: draft.enabled,
+      });
+      await fetchData("GET", `/workflows/${workflowId}`);
+      await previewConnectorBinding(draft);
+    } catch (e) {
+      setBindingErrors((prev) => ({ ...prev, [key]: e instanceof Error ? e.message : "Failed to save connector binding" }));
+    }
+    setBindingSaving((prev) => ({ ...prev, [key]: false }));
+  };
+
+  const deleteConnectorBinding = async (paramKey: string) => {
+    if (!workflowId) return;
+    try {
+      await request("DELETE", `/workflows/${workflowId}/connector-bindings/${paramKey}`);
+      await fetchData("GET", `/workflows/${workflowId}`);
+      setBindingDrafts((prev) => { const n = { ...prev }; delete n[paramKey]; return n; });
+      setBindingPreview((prev) => { const n = { ...prev }; delete n[paramKey]; return n; });
+    } catch (e) {
+      setBindingErrors((prev) => ({ ...prev, [paramKey]: e instanceof Error ? e.message : "Failed to remove binding" }));
+    }
+  };
+
+  const setParameterMode = (paramKey: string, mode: "text" | "connector") => {
+    if (mode === "connector") {
+      setBindingDrafts((prev) => ({
+        ...prev,
+        [paramKey]: getBindingDraftForParameter(data || null, paramKey),
+      }));
+    } else {
+      deleteConnectorBinding(paramKey);
+    }
+  };
+
   if (loading) {
     return (
       <div>
@@ -266,7 +453,21 @@ export default function WorkflowDetailPage() {
     );
   }
 
-  const analysis = data.analysis;
+  const runPrefilledValues = Object.fromEntries(
+    (analysis?.parameters || []).map((parameter) => [
+      parameter.key,
+      bindingPreview[parameter.key]?.resolved_value || parameter.default || "",
+    ]),
+  );
+  const parameterUsageMap = Object.fromEntries(
+    (analysis?.parameters || []).map((parameter) => [
+      parameter.key,
+      parameterConsumerSteps(data, parameter).map(formatStepLabel),
+    ]),
+  ) as Record<string, string[]>;
+  const activeBindingPreviews = Object.values(bindingPreview).filter(
+    (p) => (analysis?.parameters || []).some((param) => param.key === p.parameter_key),
+  );
 
   return (
     <div>
@@ -402,11 +603,144 @@ export default function WorkflowDetailPage() {
             <h2 className="text-sm font-medium text-text-primary mb-3 flex items-center gap-2">
               <Settings2 size={14} /> Parameters
             </h2>
-            <ParameterForm
-              parameters={analysis.parameters || []}
-              values={{}}
-              onChange={() => {}}
-            />
+            {(analysis.parameters || []).length === 0 ? (
+              <div className="text-text-secondary text-sm italic">No parameters configured for this workflow.</div>
+            ) : (
+              <div className="space-y-5">
+                {analysis.parameters.map((param) => {
+                  const isConnector = param.type === "string" && !!bindingDrafts[param.key];
+                  const draft = bindingDrafts[param.key];
+                  const preview = bindingPreview[param.key];
+                  const isLoading = bindingLoading[param.key] ?? false;
+                  const isSaving = bindingSaving[param.key] ?? false;
+                  const bindingErr = bindingErrors[param.key] ?? null;
+                  return (
+                    <div key={param.key} className="flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[#E8EAED] text-sm font-medium flex items-center gap-2">
+                          <span>{param.key}</span>
+                          {param.required && <span className="text-[#E17055] text-xs">*required</span>}
+                          <span
+                            className="text-xs px-1.5 py-0.5 rounded-full"
+                            style={{
+                              backgroundColor: param.confidence > 0.8 ? "rgba(0,184,148,0.15)" : param.confidence > 0.5 ? "rgba(253,203,110,0.15)" : "rgba(225,112,85,0.15)",
+                              color: param.confidence > 0.8 ? "#00B894" : param.confidence > 0.5 ? "#FDCB6E" : "#E17055",
+                            }}
+                          >
+                            {Math.round(param.confidence * 100)}%
+                          </span>
+                        </label>
+                        {param.type === "string" && (
+                          <div className="flex rounded-md border border-border text-xs overflow-hidden">
+                            <button
+                              type="button"
+                              onClick={() => isConnector && setParameterMode(param.key, "text")}
+                              className={`px-2 py-1 transition-colors ${!isConnector ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary"}`}
+                            >
+                              Text
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => !isConnector && setParameterMode(param.key, "connector")}
+                              className={`px-2 py-1 border-l border-border transition-colors ${isConnector ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary"}`}
+                            >
+                              Connector
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      {param.description && param.description !== param.key && (
+                        <span className="text-xs text-[#9AA0B0]">{param.description}</span>
+                      )}
+                      {!isConnector ? (
+                        <>
+                          <input
+                            type={param.type === "number" ? "number" : "text"}
+                            defaultValue={param.default || ""}
+                            readOnly
+                            disabled
+                            className="rounded-lg border border-[#2D3148] bg-[#2A2E3D] px-3 py-2 text-sm text-[#E8EAED] opacity-60 cursor-not-allowed"
+                          />
+                          <span className="text-xs text-[#9AA0B0]">Type: {param.type}</span>
+                          {(parameterUsageMap[param.key] || []).length > 0 && (
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              {parameterUsageMap[param.key].map((label) => (
+                                <span key={label} className="rounded-full border border-[#2D3148] bg-[#1F2330] px-2 py-1 text-[11px] text-[#9AA0B0]">{label}</span>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      ) : draft && (
+                        <div className="space-y-3 mt-1 pl-2 border-l-2 border-accent/30">
+                          <div>
+                            <label className="block text-xs text-text-secondary mb-1">Connector</label>
+                            <select
+                              value={draft.connector_id}
+                              onChange={(e) => setBindingDrafts((prev) => ({ ...prev, [param.key]: { ...prev[param.key], connector_id: e.target.value } }))}
+                              className="w-full rounded-md border border-border bg-bg-input px-3 py-2 text-sm text-text-primary"
+                            >
+                              <option value="">Select an Odoo connector</option>
+                              {(connectors || []).filter((c) => c.type === "odoo").map((c) => (
+                                <option key={c.id} value={c.id}>{c.name} ({c.status})</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="text-xs text-text-secondary">Source: latest Odoo job</div>
+                          <div className="flex flex-wrap gap-2 text-xs">
+                            {["{job_title}", "{job_description}"].map((token) => (
+                              <button
+                                key={token}
+                                type="button"
+                                onClick={() => setBindingDrafts((prev) => ({ ...prev, [param.key]: { ...prev[param.key], template: `${prev[param.key].template}${prev[param.key].template ? "\n" : ""}${token}` } }))}
+                                className="rounded-md border border-border px-2 py-1 text-text-secondary hover:text-text-primary"
+                              >
+                                Insert {token}
+                              </button>
+                            ))}
+                          </div>
+                          <div>
+                            <label className="block text-xs text-text-secondary mb-1">Message template</label>
+                            <textarea
+                              value={draft.template}
+                              onChange={(e) => setBindingDrafts((prev) => ({ ...prev, [param.key]: { ...prev[param.key], template: e.target.value } }))}
+                              rows={5}
+                              className="w-full rounded-md border border-border bg-bg-input px-3 py-2 text-sm text-text-primary"
+                            />
+                          </div>
+                          {bindingErr && (
+                            <Banner type="error" title="Connector binding error">{bindingErr}</Banner>
+                          )}
+                          {preview && !preview.error && (
+                            <div className="rounded-md border border-border bg-bg-elevated p-3">
+                              <div className="text-xs text-text-secondary mb-1">Latest job: {preview.source_record?.job_title || "Unknown"}</div>
+                              <pre className="text-xs text-text-primary whitespace-pre-wrap font-sans">{preview.resolved_value}</pre>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => previewConnectorBinding(draft)}
+                              disabled={isLoading || !draft.connector_id}
+                              className="px-3 py-2 rounded-md border border-border text-sm text-text-secondary hover:text-text-primary disabled:opacity-50"
+                            >
+                              {isLoading ? "Previewing..." : "Preview latest job"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => saveConnectorBinding(draft)}
+                              disabled={isSaving || !draft.connector_id}
+                              className="px-3 py-2 rounded-md bg-accent text-sm text-white hover:bg-accent-hover disabled:opacity-50"
+                            >
+                              {isSaving ? "Saving..." : "Save binding"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </Card>
 
           {/* Output Spec */}
@@ -442,6 +776,16 @@ export default function WorkflowDetailPage() {
                 >
                   <span className="text-text-gray text-xs w-5">{step.step_index}.</span>
                   <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  {(analysis?.parameters || [])
+                    .filter((parameter) => parameterConsumerSteps(data, parameter).some((candidate) => candidate.step_index === step.step_index))
+                    .map((parameter) => (
+                      <span
+                        key={`${step.step_index}-${parameter.key}`}
+                        className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[11px] text-accent"
+                      >
+                        Uses {parameter.key}
+                      </span>
+                    ))}
                   {step.selector_chain && step.selector_chain[0] && (
                     <span className="text-text-gray text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
                       {step.selector_chain[0].value}
@@ -468,6 +812,16 @@ export default function WorkflowDetailPage() {
                 >
                   <span className="text-text-gray text-xs w-5">{step.step_index}.</span>
                   <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  {(analysis?.parameters || [])
+                    .filter((parameter) => parameterConsumerSteps(data, parameter).some((candidate) => candidate.step_index === step.step_index))
+                    .map((parameter) => (
+                      <span
+                        key={`${step.step_index}-${parameter.key}`}
+                        className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[11px] text-accent"
+                      >
+                        Uses {parameter.key}
+                      </span>
+                    ))}
                   {step.selector_chain && step.selector_chain[0] && (
                     <span className="text-text-gray text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
                       {step.selector_chain[0].value}
@@ -509,9 +863,12 @@ export default function WorkflowDetailPage() {
           onRun={handleRunWithParams}
           onCancel={() => setShowParamModal(false)}
           isRunning={running}
+          prefilledValues={runPrefilledValues}
+          parameterUsageLabels={parameterUsageMap}
+          bindingPreviews={activeBindingPreviews}
           includeGoal
           title="Run with Parameters"
-          description="Configure runtime parameters and an optional execution goal before executing this workflow."
+          description="Configure runtime parameters before executing this workflow. Connector-backed values will be injected into the recorded steps shown for each parameter."
           goalLabel="Execution goal (optional)"
           goalPlaceholder='e.g. "Use these parameters, then extract the top 10 matching results"'
         />

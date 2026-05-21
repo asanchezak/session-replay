@@ -115,12 +115,13 @@ class ConnectorForumService:
         connector: ConnectorConfig,
         *,
         limit: int = 25,
+        filters: dict | None = None,
     ) -> list[dict]:
         adapter = await self._build_adapter(connector)
         try:
             records = await adapter.list(
                 "job",
-                filters={},
+                filters=filters or {},
                 limit=limit,
                 fields=self.JOB_FIELDS,
             )

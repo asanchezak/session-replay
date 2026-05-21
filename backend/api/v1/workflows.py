@@ -15,6 +15,7 @@ from services.execution_service import ExecutionService
 from services.idempotency_cache import get_cache, hash_payload
 from services.semantic_analysis_service import SemanticAnalysisService
 from services.template_service import TemplateService
+from services.workflow_connector_service import WorkflowConnectorService
 from services.workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -370,9 +371,22 @@ async def get_workflow(
 
     # Include semantic analysis data if available
     analysis_data = None
+    connector_bindings: list[dict] = []
     try:
         analysis_svc = SemanticAnalysisService(db)
+        connector_svc = WorkflowConnectorService(db)
         analysis = await analysis_svc.get_analysis(workflow_id)
+        connector_bindings = [
+            {
+                "parameter_key": binding.parameter_key,
+                "connector_id": binding.connector_id,
+                "source_kind": binding.source_kind,
+                "template": binding.template,
+                "job_filters": binding.job_filters or {},
+                "enabled": binding.enabled,
+            }
+            for binding in await connector_svc.list_bindings(workflow_id)
+        ]
         if analysis:
             phases = await analysis_svc.get_phases(workflow_id)
             params = await analysis_svc.get_parameters(workflow_id)
@@ -414,8 +428,8 @@ async def get_workflow(
                 },
                 "template_version": template.template_version if template else 0,
             }
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.warning("Failed to load analysis data for workflow=%s: %s", workflow_id, _exc, exc_info=True)
 
     return {
         "id": str(workflow.id),
@@ -439,6 +453,7 @@ async def get_workflow(
             for s in steps
         ],
         "analysis": analysis_data,
+        "connector_bindings": connector_bindings,
     }
 
 
