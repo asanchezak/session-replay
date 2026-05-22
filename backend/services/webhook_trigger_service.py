@@ -10,6 +10,7 @@ from core.models.webhook import WebhookTrigger
 from core.models.workflow import Workflow
 from services.connector_forum_service import ConnectorForumService
 from services.execution_service import ExecutionService
+from services.workflow_connector_service import _short_description
 from services.template_service import TemplateService
 from services.workflow_connector_service import WorkflowConnectorService
 
@@ -80,17 +81,35 @@ class WebhookTriggerService:
         connector = await self._get_connector_or_raise(connector_id)
         odoo_base = (connector.config.get("url") or "").rstrip("/")
         raw_job_id = str(payload.get("job_id") or payload.get("id") or "")
+
+        # Resolve job_url: prefer explicit url fields, then website_url (make absolute),
+        # then fall back to Odoo admin URL built from job_id.
+        raw_website_url = str(payload.get("website_url") or "")
+        if raw_website_url and not raw_website_url.startswith("http"):
+            raw_website_url = f"{odoo_base}{raw_website_url}"
+        job_url = (
+            str(payload.get("url") or payload.get("job_url") or "")
+            or raw_website_url
+            or (f"{odoo_base}/web#action=recruitment&id={raw_job_id}" if odoo_base and raw_job_id else "")
+        )
+
+        # Resolve description: if absent from payload, fetch from Odoo by job_id.
+        raw_description = str(payload.get("description") or payload.get("job_description") or "")
+        if not raw_description and raw_job_id:
+            raw_description = await self._fetch_job_description(connector, raw_job_id)
+
         job_data = {
             "job_id": raw_job_id,
             "job_title": str(payload.get("job_title") or payload.get("name") or ""),
-            "job_description": str(
-                payload.get("description") or payload.get("job_description") or ""
-            ),
-            "job_url": str(
-                payload.get("url")
-                or payload.get("job_url")
-                or (f"{odoo_base}/web#action=recruitment&id={raw_job_id}" if odoo_base and raw_job_id else "")
-            ),
+            "job_description": raw_description,
+            "job_description_short": _short_description(raw_description),
+            "job_url": job_url,
+            "department": str(payload.get("department") or ""),
+            "company": str(payload.get("company") or ""),
+            "job_location": str(payload.get("job_location") or ""),
+            "seniority_level": str(payload.get("seniority_level") or ""),
+            "employment_model": str(payload.get("employment_model") or ""),
+            "internal_area": str(payload.get("internal_area") or ""),
         }
         run_ids: list[str] = []
         for trigger in triggers:
@@ -98,6 +117,37 @@ class WebhookTriggerService:
             if run_id:
                 run_ids.append(run_id)
         return run_ids
+
+    async def _fetch_job_description(self, connector: ConnectorConfig, job_id: str) -> str:
+        """Fetch the description of a specific job from Odoo by ID."""
+        try:
+            from adapters.odoo.adapter import OdooAdapter
+            from adapters.registry import get_adapter
+            try:
+                adapter_cls = get_adapter(connector.connector_type)
+            except ValueError:
+                adapter_cls = OdooAdapter
+            adapter = adapter_cls()
+            await adapter.initialize(connector.config)
+            try:
+                records = await adapter.list(
+                    "job",
+                    filters={"id": int(job_id)},
+                    limit=1,
+                    fields=["id", "name", "description", "website_description", "requirements"],
+                )
+                if records:
+                    r = records[0]
+                    raw = str(
+                        r.get("description") or r.get("website_description") or r.get("requirements") or ""
+                    )
+                    from services.connector_forum_service import ConnectorForumService
+                    return ConnectorForumService._strip_html(raw)
+            finally:
+                await adapter.dispose()
+        except Exception:
+            pass
+        return ""
 
     async def trigger_now(
         self, workflow_id: str, connector_id: str, job_url: str | None = None
@@ -119,11 +169,19 @@ class WebhookTriggerService:
             if odoo_base
             else ""
         )
+        full_desc = latest["job_description"]
         job_data = {
             "job_id": latest["job_id"],
             "job_title": latest["job_title"],
-            "job_description": latest["job_description"],
+            "job_description": full_desc,
+            "job_description_short": _short_description(full_desc),
             "job_url": job_url or auto_url,
+            "department": "",
+            "company": "",
+            "job_location": "",
+            "seniority_level": "",
+            "employment_model": "",
+            "internal_area": "",
         }
         run_id = await self._fire(workflow_id, job_data)
         return {"run_id": run_id, "resolved_params": job_data}

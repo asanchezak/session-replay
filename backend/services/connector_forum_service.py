@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import uuid
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -253,8 +254,26 @@ class ConnectorForumService:
             "summary": summary,
         }
 
+    @staticmethod
+    def _strip_html(raw: str) -> str:
+        """Strip HTML tags and collapse whitespace for use in plain-text messages."""
+        class _Stripper(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self._parts: list[str] = []
+            def handle_data(self, data: str) -> None:
+                self._parts.append(data)
+            def get_text(self) -> str:
+                return re.sub(r"\n{3,}", "\n\n", "\n".join(
+                    line for line in (p.strip() for p in self._parts) if line
+                )).strip()
+
+        stripper = _Stripper()
+        stripper.feed(raw)
+        return stripper.get_text()
+
     def _normalize_job(self, record: dict[str, Any]) -> dict[str, str]:
-        description = (
+        raw_description = (
             record.get("description")
             or record.get("website_description")
             or record.get("requirements")
@@ -263,7 +282,7 @@ class ConnectorForumService:
         return {
             "job_id": str(record.get("id") or ""),
             "job_title": str(record.get("name") or "Untitled role"),
-            "job_description": str(description).strip(),
+            "job_description": self._strip_html(str(raw_description)),
         }
 
     def _is_candidate_fallback_error(self, exc: Exception) -> bool:

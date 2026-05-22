@@ -3,6 +3,16 @@ from __future__ import annotations
 import uuid
 from string import Formatter
 
+
+def _short_description(text: str, max_chars: int = 300) -> str:
+    """Return the first paragraph of text, capped at max_chars."""
+    first_para = (text.split("\n\n")[0] if "\n\n" in text else text).strip()
+    if len(first_para) <= max_chars:
+        return first_para
+    cut = first_para[:max_chars]
+    last_space = cut.rfind(" ")
+    return (cut[:last_space] if last_space > 0 else cut) + "…"
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +24,11 @@ from services.connector_forum_service import ConnectorForumService
 class WorkflowConnectorService:
     SOURCE_KIND_ODOO_LATEST_JOB = "odoo_latest_job"
     SUPPORTED_SOURCE_KINDS = {SOURCE_KIND_ODOO_LATEST_JOB}
-    TEMPLATE_FIELDS = {"job_id", "job_title", "job_description", "job_url"}
+    TEMPLATE_FIELDS = {
+        "job_id", "job_title", "job_description", "job_description_short", "job_url",
+        "department", "company", "job_location",
+        "seniority_level", "employment_model", "internal_area",
+    }
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -207,11 +221,20 @@ class WorkflowConnectorService:
             if odoo_base
             else ""
         )
+        full_desc = latest_job["job_description"]
         return {
             "job_id": latest_job["job_id"],
             "job_title": latest_job["job_title"],
-            "job_description": latest_job["job_description"],
+            "job_description": full_desc,
+            "job_description_short": _short_description(full_desc),
             "job_url": job_url,
+            # Fields only available from webhook payload; empty on connector-fetch path.
+            "department": "",
+            "company": "",
+            "job_location": "",
+            "seniority_level": "",
+            "employment_model": "",
+            "internal_area": "",
         }
 
     def _validate_template(self, template: str) -> None:
