@@ -8,7 +8,7 @@ import { useApi } from "../hooks/useApi";
 import { logger } from "../lib/logger";
 import { formatTime, formatTimeShort } from "../lib/formatTime";
 import {
-  ArrowLeft, Pause, Play, RotateCcw, Square, ChevronDown, ChevronRight,
+  ArrowLeft, Play, RotateCcw, Square, ChevronDown, ChevronRight,
   CheckCircle, AlertTriangle, Circle, CircleDot, Loader2, SkipForward,
   Eye, MousePointer, Keyboard, Navigation, Database, RefreshCw
 } from "lucide-react";
@@ -641,15 +641,6 @@ export default function RunDetailPage() {
 
         {/* Action buttons */}
         <div className="flex items-center gap-2 mt-4 flex-wrap">
-          {(isRunning || isRecovering) && (
-            <button
-              onClick={() => handleAction("pause", `/runs/${runId}/pause`)}
-              disabled={actionLoading !== null}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-hover transition-colors disabled:opacity-50"
-            >
-              <Pause size={14} /> {actionLoading === "pause" ? "..." : "Pause"}
-            </button>
-          )}
           {isPaused && !isTabClosed && (
             <>
               <button
