@@ -290,6 +290,7 @@ export default function RunDetailPage() {
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasShownIntervention = useRef<string | null>(null);
   const timelineEndRef = useRef<HTMLDivElement>(null);
+  const activeStepRef = useRef<HTMLDivElement>(null);
 
   const fetchRun = useCallback(async () => {
     if (!runId) return;
@@ -363,7 +364,7 @@ export default function RunDetailPage() {
       }
       return;
     }
-    const intervalMs = run.status === "running" || run.status === "recovering" ? 1500 : 3000;
+    const intervalMs = run.status === "running" || run.status === "recovering" ? 800 : 3000;
     if (pollingRef.current) clearInterval(pollingRef.current);
     pollingRef.current = setInterval(() => {
       fetchRun();
@@ -389,6 +390,13 @@ export default function RunDetailPage() {
       hasShownIntervention.current = null;
     }
   }, [run?.status, run?.id, run?.pause_reason]);
+
+  // Auto-scroll the active step into view whenever it advances.
+  useEffect(() => {
+    if (activeStepRef.current) {
+      activeStepRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [run?.current_step_index]);
 
   const handleAction = async (action: string, endpoint: string) => {
     setActionLoading(action);
@@ -489,24 +497,35 @@ export default function RunDetailPage() {
   const currentStepStatus = run ? getStepStatus(run.current_step_index, run.current_step_index, run.status, events) : "pending";
 
   if (loading && !run) {
+    const isPending = runId === "pending";
     return (
       <div>
         <div className="flex items-center gap-3 mb-6">
           <div className="w-8 h-4 bg-bg-elevated rounded animate-pulse" />
           <div className="w-40 h-6 bg-bg-elevated rounded animate-pulse" />
         </div>
-        <Card>
-          <div className="space-y-3">
-            <div className="h-4 bg-bg-elevated rounded animate-pulse w-3/4" />
-            <div className="h-4 bg-bg-elevated rounded animate-pulse w-1/2" />
-            <div className="h-4 bg-bg-elevated rounded animate-pulse w-2/3" />
+        {isPending ? (
+          <div className="flex flex-col items-center justify-center py-24 gap-4">
+            <Loader2 size={32} className="text-accent animate-spin" />
+            <p className="text-text-primary font-medium">Starting workflow…</p>
+            <p className="text-text-secondary text-sm">Waiting for the extension to launch the run</p>
           </div>
-        </Card>
-        <div className="mt-4 space-y-2">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-10 bg-bg-elevated rounded animate-pulse" />
-          ))}
-        </div>
+        ) : (
+          <>
+            <Card>
+              <div className="space-y-3">
+                <div className="h-4 bg-bg-elevated rounded animate-pulse w-3/4" />
+                <div className="h-4 bg-bg-elevated rounded animate-pulse w-1/2" />
+                <div className="h-4 bg-bg-elevated rounded animate-pulse w-2/3" />
+              </div>
+            </Card>
+            <div className="mt-4 space-y-2">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="h-10 bg-bg-elevated rounded animate-pulse" />
+              ))}
+            </div>
+          </>
+        )}
       </div>
     );
   }
@@ -697,6 +716,12 @@ export default function RunDetailPage() {
           isPaused ? "border-warning" : isRecovering ? "border-warning" : "border-accent"
         }`}>
           <div className="flex items-center gap-2 mb-2">
+            {isRunning && (
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
+              </span>
+            )}
             {(() => {
               const ActionIcon = actionIcons[currentStep.action_type] || CircleDot;
               return <ActionIcon size={14} style={{ color: isPaused ? "var(--color-warning)" : "var(--color-accent)" }} />;
@@ -834,8 +859,11 @@ export default function RunDetailPage() {
                 return (
                   <div
                     key={step.step_index}
+                    ref={isActive ? activeStepRef : null}
                     className={`flex items-center gap-3 py-2 px-3 rounded-md text-sm transition-colors ${
-                      isActive ? "bg-accent/10 border border-accent/20" : "hover:bg-bg-elevated"
+                      isActive
+                        ? "bg-accent/10 border border-accent/30 shadow-[0_0_0_1px_var(--color-accent)]"
+                        : "hover:bg-bg-elevated"
                     }`}
                   >
                     <Icon

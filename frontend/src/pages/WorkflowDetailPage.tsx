@@ -369,7 +369,9 @@ export default function WorkflowDetailPage() {
     // Open a placeholder run window immediately. Once the extension reports
     // the run id, we point the same window at /runs/<id>. This is what keeps
     // the run page open for the whole duration of the workflow.
-    const runWindow = window.open("/runs/pending", "session-replay-run", "noopener");
+    // Do NOT pass "noopener" — it makes window.open return null, which prevents
+    // us from redirecting the tab to the real run URL once the extension responds.
+    const runWindow = window.open("/runs/pending", "session-replay-run");
     try {
       const message: {
         type: "DASHBOARD_RUN_WORKFLOW";
