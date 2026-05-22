@@ -20,7 +20,7 @@ from core.models.run import ExecutionRun
 from core.models.run_summary import RunSummary
 from core.models.settings import AppSetting
 from core.models.webhook import WebhookTrigger
-from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep
+from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep, WorkflowType
 
 __all__ = [
     "AIDecisionOutcome", "AIReasoningChain", "AppSetting", "Artifact", "ArtifactType",
@@ -29,5 +29,5 @@ __all__ = [
     "RunSummary", "SemanticAction", "SemanticPhase",
     "WebhookTrigger",
     "Workflow", "WorkflowAnalysis", "WorkflowConnectorBinding", "WorkflowParameter",
-    "WorkflowStep", "WorkflowStatus", "WorkflowTemplate",
+    "WorkflowStep", "WorkflowStatus", "WorkflowTemplate", "WorkflowType",
 ]

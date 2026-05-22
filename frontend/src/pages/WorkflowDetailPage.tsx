@@ -8,7 +8,7 @@ import { OutputSchemaPreview } from "../components/OutputSchemaPreview";
 import { RunParameterModal } from "../components/RunParameterModal";
 import Banner from "../components/Banner";
 import { useApi, useApiData } from "../hooks/useApi";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User } from "lucide-react";
 
 interface Step {
   step_index: number;
@@ -61,6 +61,7 @@ interface WorkflowDetail {
   prompt?: string;
   target_url?: string;
   status: string;
+  workflow_type: string;
   version: number;
   steps: Step[];
   analysis: Analysis | null;
@@ -168,7 +169,7 @@ export default function WorkflowDetailPage() {
   const [runError, setRunError] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
-  const [activating, setActivating] = useState(false);
+  const [promoting, setPromoting] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [bindingDrafts, setBindingDrafts] = useState<Record<string, ConnectorBindingDraft>>({});
   const [bindingPreview, setBindingPreview] = useState<Record<string, BindingPreview>>({});
@@ -401,16 +402,16 @@ export default function WorkflowDetailPage() {
     setShowGoalModal(true);
   };
 
-  const handleActivate = async () => {
+  const handlePromote = async () => {
     if (!workflowId) return;
-    setActivating(true);
+    setPromoting(true);
     try {
-      await request("PUT", `/workflows/${workflowId}/status`, { status: "active" });
+      await request("POST", `/workflows/${workflowId}/promote`);
       fetchData("GET", `/workflows/${workflowId}`);
     } catch (e) {
-      setRunError(e instanceof Error ? e.message : "Failed to activate workflow");
+      setRunError(e instanceof Error ? e.message : "Failed to promote workflow");
     }
-    setActivating(false);
+    setPromoting(false);
   };
 
   const startEditName = () => {
@@ -636,7 +637,13 @@ export default function WorkflowDetailPage() {
             <p className="text-text-secondary text-sm mb-2">{data.description}</p>
           )}
           <div className="flex items-center gap-4 text-xs text-text-secondary">
-            <StatusBadge status={data.status as any} size="sm" />
+            <span
+              className={`flex items-center gap-1 font-medium ${data.workflow_type === "system" ? "text-accent" : "text-text-secondary"}`}
+            >
+              {data.workflow_type === "system" ? <Settings2 size={11} /> : <User size={11} />}
+              {data.workflow_type === "system" ? "System" : "My Workflow"}
+            </span>
+            {data.status === "archived" && <StatusBadge status="archived" size="sm" />}
             <span>Version {data.version}</span>
             {data.target_url && <span>{data.target_url}</span>}
             {analysis?.replay_strategy && (
@@ -645,20 +652,20 @@ export default function WorkflowDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {data.status === "draft" && (
+          {data.workflow_type === "user" && data.status !== "archived" && (
             <button
-              onClick={handleActivate}
-              disabled={activating}
+              onClick={handlePromote}
+              disabled={promoting}
               className="flex items-center gap-2 px-4 py-2 border border-accent text-accent text-sm rounded-md hover:bg-accent/10 transition-colors disabled:opacity-50"
             >
-              {activating ? "Activating..." : "Activate"}
+              {promoting ? "Promoting..." : "Promote to System"}
             </button>
           )}
           <button
             onClick={handleRun}
-            disabled={running || data.status !== "active"}
+            disabled={running || data.status === "archived"}
             className="flex items-center gap-2 px-4 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors disabled:opacity-50"
-            title={data.status !== "active" ? "Workflow must be active to run" : ""}
+            title={data.status === "archived" ? "Workflow is archived" : ""}
           >
             <Play size={14} /> {running ? "Starting..." : "Run"}
           </button>

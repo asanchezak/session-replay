@@ -6,18 +6,21 @@ export interface WorkflowSummary {
   name: string;
   description?: string;
   status: string;
+  workflow_type: string;
   version: number;
   target_url?: string;
   created_at: string;
 }
 
-export function useWorkflows(pollInterval?: number) {
+export function useWorkflows(pollInterval?: number, workflowType?: "system" | "user") {
   const { data, loading, error, fetchData } = useApiData<WorkflowSummary[]>();
   const { request } = useApi();
 
+  const path = workflowType ? `/workflows?type=${workflowType}` : "/workflows";
+
   const refetch = useCallback(() => {
-    fetchData("GET", "/workflows");
-  }, [fetchData]);
+    fetchData("GET", path);
+  }, [fetchData, path]);
 
   const deleteWorkflow = useCallback(async (workflowId: string) => {
     await request("DELETE", `/workflows/${workflowId}`);

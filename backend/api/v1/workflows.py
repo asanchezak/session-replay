@@ -295,6 +295,7 @@ async def _do_record_workflow(
         "id": str(workflow.id),
         "name": workflow.name,
         "status": workflow.status,
+        "workflow_type": workflow.workflow_type,
         "version": workflow.version,
         "step_count": len(steps),
         "simplified_from": None,
@@ -326,6 +327,7 @@ async def create_workflow(
         "id": str(workflow.id),
         "name": workflow.name,
         "status": workflow.status,
+        "workflow_type": workflow.workflow_type,
         "version": workflow.version,
         "created_at": workflow.created_at.isoformat(),
     }
@@ -334,19 +336,21 @@ async def create_workflow(
 @router.get("")
 async def list_workflows(
     status: str | None = None,
+    type: str | None = Query(default=None, alias="type"),
     limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    logger.info("Listing workflows status=%s", status)
+    logger.info("Listing workflows status=%s type=%s", status, type)
     svc = WorkflowService(db)
-    workflows = await svc.list(status=status, limit=limit, offset=offset)
+    workflows = await svc.list(status=status, workflow_type=type, limit=limit, offset=offset)
     return [
         {
             "id": str(w.id),
             "name": w.name,
             "description": w.description,
             "status": w.status,
+            "workflow_type": w.workflow_type,
             "version": w.version,
             "target_url": w.target_url,
             "created_at": w.created_at.isoformat(),
@@ -438,6 +442,7 @@ async def get_workflow(
         "prompt": workflow.prompt,
         "target_url": workflow.target_url,
         "status": workflow.status,
+        "workflow_type": workflow.workflow_type,
         "version": workflow.version,
         "created_at": workflow.created_at.isoformat(),
         "steps": [
@@ -528,7 +533,10 @@ async def update_workflow_status(
     req: UpdateStatusRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    valid_statuses = {"draft", "active", "archived"}
+    valid_statuses = {"active", "archived"}
+    # Backward compat: "draft" was the old initial status; treat as no-op activation.
+    if req.status == "draft":
+        req.status = "active"
     if req.status not in valid_statuses:
         return JSONResponse(
             status_code=422,
@@ -544,7 +552,32 @@ async def update_workflow_status(
         )
     svc = WorkflowService(db)
     try:
+        workflow = await svc.get(workflow_id)
+    except NotFoundError:
+        return _not_found("Workflow not found")
+    # No-op if already in target status
+    if workflow.status == req.status:
+        return {"id": str(workflow.id), "status": workflow.status, "workflow_type": workflow.workflow_type}
+    try:
         workflow = await svc.update_status(workflow_id, req.status)
+    except StateTransitionError as e:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "INVALID_TRANSITION", "message": str(e)}},
+        )
+
+    return {"id": str(workflow.id), "status": workflow.status, "workflow_type": workflow.workflow_type}
+
+
+@router.post("/{workflow_id}/promote")
+async def promote_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Promote a user workflow to a system workflow."""
+    svc = WorkflowService(db)
+    try:
+        workflow = await svc.promote(workflow_id)
     except NotFoundError:
         return _not_found("Workflow not found")
     except StateTransitionError as e:
@@ -552,8 +585,8 @@ async def update_workflow_status(
             status_code=409,
             content={"error": {"code": "INVALID_TRANSITION", "message": str(e)}},
         )
-
-    return {"id": str(workflow.id), "status": workflow.status}
+    await db.commit()
+    return {"id": str(workflow.id), "status": workflow.status, "workflow_type": workflow.workflow_type}
 
 
 @router.put("/{workflow_id}")
@@ -580,6 +613,7 @@ async def update_workflow(
         "description": workflow.description,
         "prompt": workflow.prompt,
         "status": workflow.status,
+        "workflow_type": workflow.workflow_type,
         "version": workflow.version,
     }
 

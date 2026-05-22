@@ -1,17 +1,19 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Card from "../components/Card";
-import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
-import { GitBranch, Plus, Trash2 } from "lucide-react";
+import { GitBranch, Plus, Trash2, Settings2, User } from "lucide-react";
+
+type TabType = "system" | "user";
 
 export default function WorkflowsPage() {
   const navigate = useNavigate();
-  const { workflows, loading, error, refetch, deleteAllWorkflows } = useWorkflows();
+  const [activeTab, setActiveTab] = useState<TabType>("system");
+  const { workflows, loading, error, refetch, deleteAllWorkflows } = useWorkflows(undefined, activeTab);
   const [deleting, setDeleting] = useState(false);
 
   const handleDeleteAll = async () => {
@@ -54,12 +56,17 @@ export default function WorkflowsPage() {
     );
   }
 
+  const emptyMessages = {
+    system: { title: "No system workflows", description: "Promote a workflow from My Workflows to make it a system automation." },
+    user: { title: "No recorded workflows yet", description: "Record your first workflow from the browser extension." },
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold text-text-primary">Workflows</h1>
         <div className="flex items-center gap-2">
-          {workflows.length > 0 && (
+          {workflows.length > 0 && activeTab === "user" && (
             <button
               onClick={handleDeleteAll}
               disabled={deleting}
@@ -77,6 +84,30 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
+      {/* Tabs */}
+      <div className="flex gap-1 mb-4 border-b border-border">
+        <button
+          onClick={() => setActiveTab("system")}
+          className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === "system"
+              ? "border-accent text-text-primary"
+              : "border-transparent text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          <Settings2 size={14} /> System
+        </button>
+        <button
+          onClick={() => setActiveTab("user")}
+          className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === "user"
+              ? "border-accent text-text-primary"
+              : "border-transparent text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          <User size={14} /> My Workflows
+        </button>
+      </div>
+
       <Card padding="sm">
         <DataTable
           columns={[
@@ -84,9 +115,6 @@ export default function WorkflowsPage() {
               <span className="font-medium">{w.name}</span>
             )},
             { key: "connector", label: "Connector", render: () => "—" },
-            { key: "status", label: "Status", render: (w: WorkflowSummary) => (
-              <StatusBadge status={w.status as any} size="sm" />
-            )},
             { key: "version", label: "Version", render: (w: WorkflowSummary) => (
               <span className="text-text-secondary">v{w.version}</span>
             )},
@@ -99,24 +127,33 @@ export default function WorkflowsPage() {
           onRowClick={(w) => navigate(`/workflows/${w.id}`)}
           emptyState={
             <EmptyState
-              icon={<GitBranch size={32} />}
-              title="No workflows yet"
-              description="Record your first workflow from the browser extension, or start from a template."
+              icon={activeTab === "system" ? <Settings2 size={32} /> : <GitBranch size={32} />}
+              title={emptyMessages[activeTab].title}
+              description={emptyMessages[activeTab].description}
               actions={
-                <>
+                activeTab === "user" ? (
+                  <>
+                    <button
+                      onClick={() => navigate("/settings")}
+                      className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
+                    >
+                      Install Extension
+                    </button>
+                    <button
+                      onClick={() => navigate("/dashboard")}
+                      className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors"
+                    >
+                      Open Dashboard
+                    </button>
+                  </>
+                ) : (
                   <button
-                    onClick={() => navigate("/settings")}
-                    className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
-                  >
-                    Install Extension
-                  </button>
-                  <button
-                    onClick={() => navigate("/dashboard")}
+                    onClick={() => setActiveTab("user")}
                     className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors"
                   >
-                    Open Dashboard
+                    View My Workflows
                   </button>
-                </>
+                )
               }
             />
           }

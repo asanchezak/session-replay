@@ -16,7 +16,7 @@ from core.models.analysis import (
     WorkflowParameter,
     WorkflowTemplate,
 )
-from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep
+from core.models.workflow import Workflow, WorkflowStatus, WorkflowStep, WorkflowType
 from services.audit import AppendEvent, AuditService
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ class WorkflowService:
         prompt: str | None = None,
         target_url: str | None = None,
         created_by: str | None = None,
+        workflow_type: str = "user",
     ) -> Workflow:
         """Create a new workflow definition."""
         workflow = Workflow(
@@ -44,7 +45,8 @@ class WorkflowService:
             prompt=prompt,
             target_url=target_url,
             created_by=created_by,
-            status="draft",
+            status="active",
+            workflow_type=workflow_type,
         )
         self.session.add(workflow)
         await self.session.flush()
@@ -65,15 +67,37 @@ class WorkflowService:
         return workflow
 
     async def list(
-        self, status: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        status: str | None = None,
+        workflow_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[Workflow]:
-        """List workflows with optional status filter."""
+        """List workflows with optional status and type filters."""
         query = select(Workflow)
         if status:
             query = query.where(Workflow.status == status)
+        if workflow_type:
+            query = query.where(Workflow.workflow_type == workflow_type)
         query = query.order_by(Workflow.created_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(query)
         return list(result.scalars().all())
+
+    async def promote(self, workflow_id: str) -> Workflow:
+        """Promote a user workflow to a system workflow."""
+        workflow = await self.get(workflow_id)
+        if workflow.workflow_type == WorkflowType.SYSTEM:
+            return workflow
+        if workflow.status == WorkflowStatus.ARCHIVED:
+            raise StateTransitionError("Cannot promote an archived workflow.")
+        workflow.workflow_type = WorkflowType.SYSTEM
+        await self.session.flush()
+        await self.audit.append(AppendEvent(
+            event_type="workflow_status_changed",
+            payload={"workflow_id": workflow_id, "workflow_type": "system"},
+            run_id=workflow_id,
+        ))
+        return workflow
 
     async def update_status(self, workflow_id: str, status: str) -> Workflow:
         """Update the status of a workflow."""

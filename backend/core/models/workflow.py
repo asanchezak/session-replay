@@ -7,18 +7,21 @@ from core.models.base import Base, TimestampMixin, UUIDMixin
 
 
 class WorkflowStatus(str, Enum):
-    DRAFT = "draft"
     ACTIVE = "active"
     ARCHIVED = "archived"
 
     @classmethod
     def valid_transitions(cls, current: str, target: str) -> bool:
         transitions = {
-            cls.DRAFT: {cls.ACTIVE, cls.ARCHIVED},
             cls.ACTIVE: {cls.ARCHIVED},
             cls.ARCHIVED: set(),
         }
         return target in transitions.get(cls(current), set())
+
+
+class WorkflowType(str, Enum):
+    SYSTEM = "system"
+    USER = "user"
 
 
 class Workflow(Base, TimestampMixin, UUIDMixin):
@@ -30,7 +33,10 @@ class Workflow(Base, TimestampMixin, UUIDMixin):
     target_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="draft", index=True
+        String(20), nullable=False, default="active", index=True
+    )
+    workflow_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="user", index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
