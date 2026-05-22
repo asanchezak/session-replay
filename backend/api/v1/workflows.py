@@ -140,9 +140,32 @@ async def _do_record_workflow(
         target_url=req.target_url,
         prompt=req.prompt,
     )
+
+    # Collapse consecutive type events on the same element with the same value.
+    # These are recording artifacts (e.g. React re-renders firing a second input
+    # event for the same keystroke sequence). Keep only the first occurrence.
+    def _primary_selector(sc) -> str | None:
+        if isinstance(sc, list) and sc:
+            return sc[0].get("value") if isinstance(sc[0], dict) else None
+        return None
+
+    deduped_events: list[RecordEventInput] = []
+    for ev in req.events:
+        if deduped_events and ev.event_type == "type":
+            prev = deduped_events[-1]
+            if (
+                prev.event_type == "type"
+                and prev.payload.get("value") == ev.payload.get("value")
+                and _primary_selector(ev.payload.get("selector_chain")) is not None
+                and _primary_selector(ev.payload.get("selector_chain"))
+                == _primary_selector(prev.payload.get("selector_chain"))
+            ):
+                continue  # exact duplicate on the same element — drop it
+        deduped_events.append(ev)
+
     step_objs = []
     last_typed_value: str | None = None
-    for i, ev in enumerate(req.events):
+    for i, ev in enumerate(deduped_events):
         payload = ev.payload
 
         # Extract selector_chain from capture payload
@@ -217,9 +240,9 @@ async def _do_record_workflow(
     # derived from the raw event stream.  Stored in accessibility_metadata (no
     # migration needed) so the AI can surface skip hints and timing guidance.
     from datetime import datetime, timezone
-    for i, ev in enumerate(req.events):
-        prev = req.events[i - 1] if i > 0 else None
-        nxt = req.events[i + 1] if i < len(req.events) - 1 else None
+    for i, ev in enumerate(deduped_events):
+        prev = deduped_events[i - 1] if i > 0 else None
+        nxt = deduped_events[i + 1] if i < len(deduped_events) - 1 else None
 
         time_gap: int | None = None
         if prev and prev.timestamp and ev.timestamp:
