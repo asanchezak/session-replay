@@ -80,6 +80,7 @@ Expected payload from Odoo:
   "department": "Engineering",
   "company": "AKUREY S.A.",
   "website_url": "/jobs/detail/senior-software-engineer-42",
+  "apply_url": "https://akurey.com/careers/apply/?pId=42",
   "job_location": "global",
   "seniority_level": "senior",
   "employment_model": "full_time",
@@ -114,7 +115,7 @@ The message template for the connector binding supports:
 | `{job_title}` | Payload `name` field |
 | `{job_description}` | Fetched from Odoo (full, HTML-stripped) |
 | `{job_description_short}` | First paragraph, max 300 chars |
-| `{job_url}` | Payload `website_url` (made absolute) |
+| `{job_url}` | `apply_url` → `website_url` (made absolute) → Odoo admin URL |
 | `{department}` | Payload field |
 | `{company}` | Payload field |
 | `{job_location}` | Payload field |

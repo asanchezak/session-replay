@@ -90,7 +90,7 @@ class WebhookTriggerService:
         if raw_website_url and not raw_website_url.startswith("http"):
             raw_website_url = f"{odoo_base}{raw_website_url}"
         job_url = (
-            str(payload.get("url") or payload.get("job_url") or "")
+            str(payload.get("apply_url") or payload.get("url") or payload.get("job_url") or "")
             or raw_website_url
             or (f"{odoo_base}/web#action=recruitment&id={raw_job_id}" if odoo_base and raw_job_id else "")
         )
