@@ -21,6 +21,9 @@ const log = createLogger("service-worker");
 // so the panel stays visible for the entire run instead of closing like a popup.
 chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => {});
 
+/** Run IDs that have been explicitly canceled by the user while the loop was still running. */
+const canceledRuns = new Set<string>();
+
 /** Send a SHOW_OVERLAY or HIDE_OVERLAY message to the content script in `tabId`. */
 function sendOverlay(
   tabId: number,
@@ -149,6 +152,7 @@ chrome.runtime.onMessage.addListener(
       case "CANCEL_RUN": {
         const runId = (message as any).runId as string | undefined;
         if (runId) {
+          canceledRuns.add(runId);
           const tabId = runTabMap.get(runId);
           apiClient.cancelRun(runId).catch(() => {});
           if (tabId) sendOverlay(tabId, null);
@@ -378,6 +382,12 @@ async function executeWorkflowRun(
   let statusOverride: string | null = null;
 
   for (let i = 0; i < steps.length && allStepsSucceeded; i++) {
+    if (canceledRuns.has(runId)) {
+      canceledRuns.delete(runId);
+      statusOverride = "canceled";
+      break;
+    }
+
     const step = steps[i];
     const actionType = step.action_type;
     log.log(`Executing step ${i + 1}/${steps.length}: ${actionType}`);
@@ -589,7 +599,7 @@ async function executeWorkflowRun(
     }
   }
 
-  if (allStepsSucceeded) {
+  if (allStepsSucceeded && statusOverride !== "canceled") {
     try {
       await apiClient.completeRun(runId);
       log.log(`Run ${runId} completed`);
@@ -604,12 +614,13 @@ async function executeWorkflowRun(
   }
 
   if (targetTabId) sendOverlay(targetTabId, null);
-  if (statusOverride !== "waiting_for_user") {
+  if (statusOverride !== "waiting_for_user" && statusOverride !== "canceled") {
     orchestrator.notifyIdle();
     orchestrator.broadcastState();
   }
 
   await clearRunTab(runId);
+  canceledRuns.delete(runId);
   return { id: runId, status: statusOverride || (allStepsSucceeded ? "completed" : "failed"), total_steps: steps.length };
 }
 
@@ -699,6 +710,14 @@ async function executeAgentRun(
   try {
   while (true) {
     pollCount++;
+
+    // If the user canceled the run from the side panel while we were mid-loop,
+    // exit cleanly without attempting any further API calls.
+    if (canceledRuns.has(runId)) {
+      canceledRuns.delete(runId);
+      finalStatus = "canceled";
+      break;
+    }
 
     try {
       await chrome.tabs.get(targetTabId);
@@ -1082,22 +1101,29 @@ async function executeAgentRun(
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.error(`[Agent] Run loop crashed: ${message}`);
-    try {
-      await apiClient.pauseRun(
+    // If the user canceled the run, the loop may throw a 409 from a terminal
+    // API call racing against the cancel. Suppress the error cleanly.
+    if (canceledRuns.has(runId)) {
+      canceledRuns.delete(runId);
+      finalStatus = "canceled";
+    } else {
+      log.error(`[Agent] Run loop crashed: ${message}`);
+      try {
+        await apiClient.pauseRun(
+          runId,
+          `Extension agent stopped unexpectedly: ${message}`,
+          currentStepIndex,
+        );
+      } catch (pauseErr) {
+        log.error("[Agent] Failed to pause crashed run:", pauseErr);
+      }
+      orchestrator.notifyWaiting(
         runId,
         `Extension agent stopped unexpectedly: ${message}`,
-        currentStepIndex,
       );
-    } catch (pauseErr) {
-      log.error("[Agent] Failed to pause crashed run:", pauseErr);
+      if (targetTabId) sendOverlay(targetTabId, null);
+      finalStatus = "waiting_for_user";
     }
-    orchestrator.notifyWaiting(
-      runId,
-      `Extension agent stopped unexpectedly: ${message}`,
-    );
-    if (targetTabId) sendOverlay(targetTabId, null);
-    finalStatus = "waiting_for_user";
   }
 
   if (targetTabId) sendOverlay(targetTabId, null);
@@ -1117,7 +1143,10 @@ async function executeAgentRun(
       "Agent run failed",
     );
   }
+  // "canceled" and "waiting_for_user" need no further API calls — the run is
+  // already in the target terminal state on the backend.
   await clearRunTab(runId);
+  canceledRuns.delete(runId);
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }
 
