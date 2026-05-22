@@ -17,6 +17,21 @@ import type { AgentDecision, AgentCommand, PageContext } from "../shared/types";
 
 const log = createLogger("service-worker");
 
+// Configure side panel to open when the extension action button is clicked
+// so the panel stays visible for the entire run instead of closing like a popup.
+chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => {});
+
+/** Send a SHOW_OVERLAY or HIDE_OVERLAY message to the content script in `tabId`. */
+function sendOverlay(
+  tabId: number,
+  payload: { step: number; total: number; action_type: string; workflow_name: string } | null,
+): void {
+  const msg = payload
+    ? { type: "SHOW_OVERLAY", ...payload }
+    : { type: "HIDE_OVERLAY" };
+  chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   log.log("Session Replay extension installed");
   chrome.storage.session.get(["apiBaseUrl", "apiKey"]).then((stored) => {
@@ -130,6 +145,18 @@ chrome.runtime.onMessage.addListener(
       case "RESUME_RUN":
         sendResponse({ type: "RUN_RESUMED" });
         break;
+
+      case "CANCEL_RUN": {
+        const runId = (message as any).runId as string | undefined;
+        if (runId) {
+          const tabId = runTabMap.get(runId);
+          apiClient.cancelRun(runId).catch(() => {});
+          if (tabId) sendOverlay(tabId, null);
+          orchestrator.notifyIdle();
+        }
+        sendResponse({ ok: true });
+        break;
+      }
 
       case "GET_STATE":
         sendResponse({ type: "STATE", state: orchestrator.getState() });
@@ -333,6 +360,7 @@ async function executeWorkflowRun(
     return { id: runId, status: "failed", total_steps: steps.length };
   }
   await setRunTab(runId, targetTabId);
+  sendOverlay(targetTabId, { step: 0, total: steps.length, action_type: "starting", workflow_name: workflow.name });
 
   // Navigate to target URL if set
   if (workflow.target_url) {
@@ -355,6 +383,7 @@ async function executeWorkflowRun(
     log.log(`Executing step ${i + 1}/${steps.length}: ${actionType}`);
 
     orchestrator.notifyRunning(workflow.name, i, steps.length, runId);
+    sendOverlay(targetTabId, { step: i, total: steps.length, action_type: actionType, workflow_name: workflow.name });
 
     // Pre-step: wait if previous step caused navigation
     if (pendingNavigation) {
@@ -390,6 +419,7 @@ async function executeWorkflowRun(
         log.error("Failed to pause run for challenge:", err);
       }
       orchestrator.notifyWaiting(runId, c.description || `${c.type} challenge`);
+      sendOverlay(targetTabId, null);
       allStepsSucceeded = false;
       statusOverride = "waiting_for_user";
       break;
@@ -451,6 +481,7 @@ async function executeWorkflowRun(
         log.error(`Navigate step ${i + 1} failed: ${result.error}`);
         await reportStepFailure(runId, i, result.error || "Navigate failed", actionType);
         orchestrator.notifyFailed(workflow.name, i, steps.length, runId, result.error || "Navigate failed");
+        sendOverlay(targetTabId, null);
         allStepsSucceeded = false;
         break;
       }
@@ -513,6 +544,7 @@ async function executeWorkflowRun(
             await reportStepFailure(runId, i, healResult.error || result.error || "Step failed", actionType);
           }
           orchestrator.notifyFailed(workflow.name, i, steps.length, runId, healResult.error || result.error || "Step failed");
+          sendOverlay(targetTabId, null);
           allStepsSucceeded = false;
           break;
         }
@@ -526,6 +558,7 @@ async function executeWorkflowRun(
         log.error("Failed to confirm step on backend:", err);
         await reportStepFailure(runId, i, "Failed to confirm step execution", actionType);
         orchestrator.notifyFailed(workflow.name, i, steps.length, runId, "Failed to confirm step execution");
+        sendOverlay(targetTabId, null);
         allStepsSucceeded = false;
         break;
       }
@@ -570,6 +603,7 @@ async function executeWorkflowRun(
     }
   }
 
+  if (targetTabId) sendOverlay(targetTabId, null);
   if (statusOverride !== "waiting_for_user") {
     orchestrator.notifyIdle();
     orchestrator.broadcastState();
@@ -627,6 +661,7 @@ async function executeAgentRun(
     return { id: runId, status: "failed", total_steps: totalSteps };
   }
   await setRunTab(runId, targetTabId);
+  sendOverlay(targetTabId, { step: 0, total: totalSteps, action_type: "starting", workflow_name: workflow.name });
 
   // Phase 2: fresh run = fresh diff history. Clear the per-tab snapshot
   // cache so the first poll doesn't show a "diff" against another run.
@@ -671,6 +706,7 @@ async function executeAgentRun(
       log.error("[Agent] Target tab closed");
       await apiClient.failRun(runId, "Target tab closed");
       orchestrator.notifyFailed(workflow.name, currentStepIndex, totalSteps, runId, "Target tab closed");
+      sendOverlay(targetTabId, null);
       finalStatus = "failed";
       break;
     }
@@ -684,6 +720,7 @@ async function executeAgentRun(
       log.log(`[Agent] Blocking challenge: ${pageContext.blocking_type}`);
       await apiClient.pauseRun(runId, `Blocking: ${pageContext.blocking_type}`, currentStepIndex);
       orchestrator.notifyWaiting(runId, `Blocking: ${pageContext.blocking_type}`);
+      sendOverlay(targetTabId, null);
       finalStatus = "waiting_for_user";
       break;
     }
@@ -803,6 +840,7 @@ async function executeAgentRun(
         const waitMs = Math.min(5000, Math.max(500, pollResponse.wait_ms ?? 1500));
         log.log(`[Agent] WAIT ${waitMs}ms: ${pollResponse.reasoning}`);
         orchestrator.notifyRunning(workflow.name, currentStepIndex, totalSteps, runId);
+        sendOverlay(targetTabId, { step: currentStepIndex, total: totalSteps, action_type: "waiting", workflow_name: workflow.name });
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
@@ -849,6 +887,7 @@ async function executeAgentRun(
           pollResponse.pause_reason || "Agent paused",
         );
         if (pausePollCount >= pauseRePollCap) {
+          sendOverlay(targetTabId, null);
           finalStatus = "waiting_for_user";
           break;
         }
@@ -912,6 +951,7 @@ async function executeAgentRun(
         orchestrator.notifyRunning(
           workflow.name, currentStepIndex, totalSteps, runId,
         );
+        sendOverlay(targetTabId, { step: currentStepIndex, total: totalSteps, action_type: cmd.action ?? "execute", workflow_name: workflow.name });
 
         if (cmd.action === "navigate") {
           const url = cmd.value || cmd.target;
@@ -1056,8 +1096,11 @@ async function executeAgentRun(
       runId,
       `Extension agent stopped unexpectedly: ${message}`,
     );
+    if (targetTabId) sendOverlay(targetTabId, null);
     finalStatus = "waiting_for_user";
   }
+
+  if (targetTabId) sendOverlay(targetTabId, null);
 
   if (finalStatus === "completed") {
     if (targetTabId) {
@@ -1171,8 +1214,10 @@ chrome.tabs.onRemoved.addListener((tabId: number) => {
   }
 });
 
-chrome.action.onClicked.addListener(() => {
-  chrome.runtime.openOptionsPage?.();
+chrome.action.onClicked.addListener((tab) => {
+  if (tab.id) {
+    chrome.sidePanel?.open?.({ tabId: tab.id }).catch(() => {});
+  }
 });
 
 // Expose for e2e testing

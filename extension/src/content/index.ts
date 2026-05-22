@@ -290,6 +290,116 @@ export function hideReplayPanel(): void {
   shadowRoot = null;
 }
 
+// ── Full-page blocking overlay ────────────────────────────────────
+
+const OVERLAY_STYLES = `
+  :host { all: initial; position: fixed; inset: 0; z-index: 2147483646; pointer-events: all; }
+  .sr-overlay-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .sr-overlay-card {
+    background: #1A1D27; color: #E8EAED;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px; padding: 16px 20px; border-radius: 12px;
+    border: 1px solid #2D3148; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    min-width: 280px; max-width: 380px;
+  }
+  .sr-overlay-header {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; font-weight: 600; font-size: 14px;
+  }
+  .sr-overlay-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #6C5CE7;
+    animation: sr-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes sr-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+  .sr-overlay-name { font-size: 12px; color: #9AA0B0; margin-bottom: 8px; }
+  .sr-overlay-step { color: #74B9FF; font-size: 12px; margin-bottom: 8px; }
+  .sr-overlay-progress { height: 3px; background: #2A2E3D; border-radius: 2px; overflow: hidden; }
+  .sr-overlay-bar { height: 100%; background: #6C5CE7; border-radius: 2px; transition: width 0.3s ease; }
+  .sr-overlay-action { font-size: 11px; color: #9AA0B0; margin-top: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+`;
+
+let overlayHost: HTMLDivElement | null = null;
+let overlayShadow: ShadowRoot | null = null;
+
+export function showRunningOverlay(step: number, total: number, actionType: string, workflowName: string): void {
+  if (!overlayHost || !overlayHost.isConnected) {
+    overlayHost = document.createElement("div");
+    overlayHost.id = "sr-running-overlay";
+    document.documentElement.appendChild(overlayHost);
+    overlayShadow = overlayHost.attachShadow({ mode: "closed" });
+
+    const style = document.createElement("style");
+    style.textContent = OVERLAY_STYLES;
+    overlayShadow.appendChild(style);
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "sr-overlay-backdrop";
+
+    const card = document.createElement("div");
+    card.className = "sr-overlay-card";
+
+    const header = document.createElement("div");
+    header.className = "sr-overlay-header";
+    const dot = document.createElement("span");
+    dot.className = "sr-overlay-dot";
+    header.appendChild(dot);
+    header.appendChild(document.createTextNode("Workflow Running"));
+
+    const name = document.createElement("div");
+    name.className = "sr-overlay-name";
+
+    const stepInfo = document.createElement("div");
+    stepInfo.className = "sr-overlay-step";
+
+    const progressWrap = document.createElement("div");
+    progressWrap.className = "sr-overlay-progress";
+    const progressBar = document.createElement("div");
+    progressBar.className = "sr-overlay-bar";
+    progressWrap.appendChild(progressBar);
+
+    const action = document.createElement("div");
+    action.className = "sr-overlay-action";
+
+    card.appendChild(header);
+    card.appendChild(name);
+    card.appendChild(stepInfo);
+    card.appendChild(progressWrap);
+    card.appendChild(action);
+    backdrop.appendChild(card);
+    overlayShadow.appendChild(backdrop);
+  }
+
+  if (!overlayShadow) return;
+  const pct = total > 0 ? Math.round(((step + 1) / total) * 100) : 0;
+
+  const name = overlayShadow.querySelector(".sr-overlay-name");
+  if (name) name.textContent = workflowName;
+
+  const stepEl = overlayShadow.querySelector(".sr-overlay-step");
+  if (stepEl) stepEl.textContent = `Step ${step + 1} of ${total}`;
+
+  const bar = overlayShadow.querySelector(".sr-overlay-bar") as HTMLElement | null;
+  if (bar) bar.style.width = `${pct}%`;
+
+  const actionEl = overlayShadow.querySelector(".sr-overlay-action");
+  if (actionEl) actionEl.textContent = actionType;
+}
+
+export function hideRunningOverlay(): void {
+  if (overlayHost && overlayHost.parentNode) {
+    overlayHost.parentNode.removeChild(overlayHost);
+  }
+  overlayHost = null;
+  overlayShadow = null;
+}
+
 // ── Merged onMessage listener (E-C-12) ────────────────────────────
 
 chrome.runtime.onMessage.addListener(
@@ -312,6 +422,16 @@ chrome.runtime.onMessage.addListener(
         eventCount = 0;
         sendDebugLog("log", `Recording ${recordingEnabled ? "enabled" : "disabled"}`);
         sendResponse({ success: true });
+        break;
+      case "SHOW_OVERLAY": {
+        const m = msg as any;
+        showRunningOverlay(m.step ?? 0, m.total ?? 1, m.action_type ?? "", m.workflow_name ?? "");
+        sendResponse({ ok: true });
+        break;
+      }
+      case "HIDE_OVERLAY":
+        hideRunningOverlay();
+        sendResponse({ ok: true });
         break;
       case "DETECT_CHALLENGES":
         sendResponse({ type: "CHALLENGES_DETECTED", challenges: detectChallenges() });

@@ -209,6 +209,10 @@ export class ApiClient {
     );
   }
 
+  async cancelRun(runId: string) {
+    return this.request<{ id: string; status: string }>("POST", `/runs/${runId}/cancel`);
+  }
+
   async reportTabClosed(runId: string): Promise<{ id: string; status: string }> {
     return this.request<{ id: string; status: string }>("POST", `/runs/${runId}/tab-closed`);
   }

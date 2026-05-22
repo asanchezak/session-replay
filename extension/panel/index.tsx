@@ -101,7 +101,7 @@ function SidePanel() {
         </div>
       )}
 
-      <div style={{ display: "flex", gap: "8px" }}>
+      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
         <button
           onClick={() => chrome.runtime.sendMessage({ type: "GET_STATE" }, (response) => { if (response?.state) setState(response.state as PopupState); })}
           style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid #2D3148", background: "transparent", color: "#9AA0B0", cursor: "pointer", fontSize: "12px" }}
@@ -115,6 +115,14 @@ function SidePanel() {
         >
           View Run
         </button>
+        {(state.type === "running" || state.type === "running_parameterized" || state.type === "recovering") && details.runId && (
+          <button
+            onClick={() => chrome.runtime.sendMessage({ type: "CANCEL_RUN", runId: details.runId })}
+            style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid #E17055", background: "transparent", color: "#E17055", cursor: "pointer", fontSize: "12px" }}
+          >
+            Cancel Run
+          </button>
+        )}
       </div>
     </div>
   );
