@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type React from "react";
 import { useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import DataTable from "../components/DataTable";
@@ -13,8 +14,21 @@ type TabType = "system" | "user";
 export default function WorkflowsPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabType>("system");
-  const { workflows, loading, error, refetch, deleteAllWorkflows } = useWorkflows(undefined, activeTab);
+  const { workflows, loading, error, refetch, deleteWorkflow, deleteAllWorkflows } = useWorkflows(undefined, activeTab);
   const [deleting, setDeleting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDeleteOne = async (e: React.MouseEvent, workflowId: string) => {
+    e.stopPropagation();
+    if (!window.confirm("Delete this workflow? This cannot be undone.")) return;
+    setDeletingId(workflowId);
+    try {
+      await deleteWorkflow(workflowId);
+      refetch();
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const handleDeleteAll = async () => {
     if (!window.confirm(`Delete all ${workflows.length} workflow(s)? This cannot be undone.`)) {
@@ -121,6 +135,20 @@ export default function WorkflowsPage() {
             { key: "created", label: "Created", render: (w: WorkflowSummary) => (
               <span className="text-text-secondary">{formatTime(w.created_at)}</span>
             )},
+            ...(activeTab === "user" ? [{
+              key: "delete",
+              label: "",
+              render: (w: WorkflowSummary) => (
+                <button
+                  onClick={(e) => handleDeleteOne(e, w.id)}
+                  disabled={deletingId === w.id}
+                  className="p-1 text-text-gray hover:text-error transition-colors disabled:opacity-50"
+                  title="Delete workflow"
+                >
+                  <Trash2 size={14} />
+                </button>
+              ),
+            }] : []),
           ]}
           data={workflows}
           keyExtractor={(w) => w.id}
