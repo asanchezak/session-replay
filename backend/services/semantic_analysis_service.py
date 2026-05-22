@@ -256,6 +256,9 @@ class SemanticAnalysisService:
     def _detect_parameter_candidates(self, steps: list[WorkflowStep]) -> list[dict]:
         params: list[dict] = []
         seen_keys: set[str] = set()
+        # Maps a typed value to the parameter key that already covers it, so
+        # duplicate type steps with the same value don't create extra parameters.
+        seen_typed_values: dict[str, str] = {}
 
         for step in steps:
             value = (step.value or "").strip()
@@ -287,6 +290,11 @@ class SemanticAnalysisService:
                         break
 
             if not candidate and step.action_type in ("type", "select"):
+                # If an earlier type step already captured the same value, this
+                # step is a duplicate input event (e.g. React re-render, autocomplete
+                # confirmation). Skip creating a new parameter for it.
+                if value in seen_typed_values:
+                    continue
                 candidate = f"input_{step.step_index}"
 
             if candidate and candidate not in seen_keys:
@@ -305,6 +313,8 @@ class SemanticAnalysisService:
                     "required": True,
                 })
                 seen_keys.add(candidate)
+                if step.action_type in ("type", "select"):
+                    seen_typed_values[value] = candidate
 
         return params
 

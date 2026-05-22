@@ -99,15 +99,35 @@ class TemplateService:
             else:
                 template["fixed_steps"].append(step["step_index"])
 
-        # Conditions on downstream steps (for example "Send" click checks) may
-        # reference literal values that were parameterized on earlier steps.
-        # Promote matching literals to the same {{param}} placeholder.
+        # Steps whose value or success_condition matches a parameter default but
+        # weren't given their own parameter (e.g. duplicate type events) should
+        # also use the same {{param}} placeholder.
         defaults_to_param = {
             p.default_value: p.parameter_key
             for p in parameters
             if p.default_value and p.parameter_key
         }
         for step in template["steps"]:
+            # Substitute step value if it matches a known parameter default.
+            step_val = step.get("value")
+            if (
+                isinstance(step_val, str)
+                and step_val in defaults_to_param
+                and step["step_index"] not in param_step_indices
+            ):
+                placeholder = f"{{{{{defaults_to_param[step_val]}}}}}"
+                step["value"] = placeholder
+                if step["step_index"] not in template["variable_steps"]:
+                    template["variable_steps"].append(step["step_index"])
+                if step["step_index"] in template["fixed_steps"]:
+                    template["fixed_steps"].remove(step["step_index"])
+                # Also rewrite matching success_condition in the same pass.
+                sc = step.get("success_condition")
+                if isinstance(sc, dict) and sc.get("value") == step_val:
+                    sc["value"] = placeholder
+                continue
+
+            # Promote matching success_condition literals on remaining steps.
             success_condition = step.get("success_condition")
             if not isinstance(success_condition, dict):
                 continue
