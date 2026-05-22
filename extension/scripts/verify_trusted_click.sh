@@ -9,7 +9,7 @@
 # Usage: ./verify_trusted_click.sh <workflow-id>
 set -e
 WORKFLOW_ID="${1:-8b75b13f-a88c-4883-a4b6-add38a7a21ef}"
-API_KEY="${E2E_API_KEY:-mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw}"
+API_KEY="${E2E_API_KEY:-dev-api-key-change-in-production}"
 BACKEND="http://localhost:8081"
 FRONTEND="http://localhost:5173"
 CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"

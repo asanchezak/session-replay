@@ -38,7 +38,7 @@ async def test_create_workflow(api_client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["name"] == "Test WF"
-    assert data["status"] == "draft"
+    assert data["status"] == "active"
 
 
 @pytest.mark.asyncio

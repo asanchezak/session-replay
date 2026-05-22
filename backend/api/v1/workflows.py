@@ -1,5 +1,5 @@
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
@@ -47,10 +47,10 @@ class AddStepRequest(BaseModel):
     step_index: int
     action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract"]
     intent: str | None = None
-    selector_chain: list[dict] | None = None
+    selector_chain: list[SelectorSet] | None = None
     value: str | None = None
     methods: list[MethodDef] | None = None
-    success_condition: dict | None = None
+    success_condition: dict[str, Any] | None = None
 
 
 class UpdateStatusRequest(BaseModel):
@@ -77,7 +77,7 @@ def _not_found(msg: str):
 
 class RecordEventInput(BaseModel):
     event_type: str
-    payload: dict = {}
+    payload: dict[str, Any] = Field(default_factory=dict)
     page_url: str | None = None
     page_title: str | None = None
     timestamp: str | None = None
@@ -87,7 +87,7 @@ class RecordWorkflowRequest(BaseModel):
     name: str
     target_url: str | None = None
     prompt: str | None = None
-    events: list[RecordEventInput] = []
+    events: list[RecordEventInput] = Field(default_factory=list)
 
 
 @router.post("/record")
@@ -465,7 +465,7 @@ async def get_workflow(
 @router.put("/{workflow_id}/steps")
 async def replace_steps(
     workflow_id: str,
-    steps: list[dict],
+    steps: list[dict[str, Any]],
     db: AsyncSession = Depends(get_db),
 ):
     svc = WorkflowService(db)
@@ -506,13 +506,14 @@ async def add_step(
         return _not_found("Workflow not found")
 
     methods_data = [m.model_dump() for m in req.methods] if req.methods else None
+    selector_chain_data = [s.model_dump() for s in req.selector_chain] if req.selector_chain else None
 
     step = await svc.add_step(
         workflow_id=workflow_id,
         step_index=req.step_index,
         action_type=req.action_type,
         intent=req.intent,
-        selector_chain=req.selector_chain,
+        selector_chain=selector_chain_data,
         value=req.value,
         methods=methods_data,
         success_condition=req.success_condition,
@@ -783,7 +784,7 @@ async def run_workflow(
 
 
 class RunWithParamsRequest(BaseModel):
-    runtime_params: dict = Field(default_factory=dict, description="key-value pairs for parameter substitution")
+    runtime_params: dict[str, Any] = Field(default_factory=dict, description="key-value pairs for parameter substitution")
     execution_goal: str | None = Field(default=None, description="Optional per-run goal override")
 
 

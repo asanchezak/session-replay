@@ -88,7 +88,8 @@ test("recorded workflow appears in dashboard list", async ({ context, extensionI
   await dashboard.gotoWorkflows();
   await dashPage.waitForTimeout(2000);
 
-  await expect(dashPage.getByText("Draft").first()).toBeVisible();
+  await expect(dashPage.getByText("No recorded workflows yet")).toHaveCount(0);
+  await expect(dashPage.locator("table tbody tr").first()).toBeVisible();
   expect(errors.filter(e => e.type === "console")).toHaveLength(0);
 
   await popup.page.close();

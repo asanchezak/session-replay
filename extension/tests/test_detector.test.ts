@@ -22,6 +22,7 @@ globalThis.chrome = {
     query: vi.fn(),
     get: vi.fn(),
     update: vi.fn(),
+    onRemoved: { addListener: vi.fn() },
     onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
   },
   storage: {

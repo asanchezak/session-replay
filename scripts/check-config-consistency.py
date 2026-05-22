@@ -8,7 +8,6 @@ Validates that all layers of the stack agree on the API key:
 
 Run from project root:  python scripts/check-config-consistency.py
 """
-import os
 import re
 import sys
 from pathlib import Path
@@ -50,6 +49,15 @@ INVALID_DEFAULTS = {
 }
 
 
+def mask_secret(value: str, visible: int = 4) -> str:
+    """Mask most of a secret while preserving short prefix/suffix for debugging."""
+    if not value:
+        return "<empty>"
+    if len(value) <= visible * 2:
+        return "*" * len(value)
+    return f"{value[:visible]}...{value[-visible:]}"
+
+
 def main() -> int:
     errors: list[str] = []
     root = Path(__file__).resolve().parent.parent
@@ -66,9 +74,9 @@ def main() -> int:
     print("─" * 48)
     print("Config Consistency Check")
     print("─" * 48)
-    print(f"  Backend   (.env)                    API_KEY    = {backend_key}")
-    print(f"  Frontend  (frontend/.env)           VITE_API_KEY = {frontend_key}")
-    print(f"  Extension (extension/.../api.ts)    DEV_DEFAULTS = {extension_key}")
+    print(f"  Backend   (.env)                    API_KEY      = {mask_secret(backend_key)}")
+    print(f"  Frontend  (frontend/.env)           VITE_API_KEY = {mask_secret(frontend_key)}")
+    print(f"  Extension (extension/.../api.ts)    DEV_DEFAULTS = {mask_secret(extension_key)}")
     print("─" * 48)
 
     # ── Check: no source uses the old insecure default ─────────────
@@ -94,14 +102,22 @@ def main() -> int:
         errors.append("No API key found anywhere — at least one layer must define it.")
     else:
         if backend_key and backend_key != resolved:
-            errors.append(f"Backend API_KEY ({backend_key}) differs from reference ({resolved}).")
+            errors.append(
+                "Backend API_KEY ({}) differs from reference ({}).".format(
+                    mask_secret(backend_key), mask_secret(resolved)
+                )
+            )
         if frontend_key and frontend_key != resolved:
             errors.append(
-                f"Frontend VITE_API_KEY ({frontend_key}) differs from reference ({resolved})."
+                "Frontend VITE_API_KEY ({}) differs from reference ({}).".format(
+                    mask_secret(frontend_key), mask_secret(resolved)
+                )
             )
         if extension_key and extension_key != resolved:
             errors.append(
-                f"Extension DEV_DEFAULTS.apiKey ({extension_key}) differs from reference ({resolved})."
+                "Extension DEV_DEFAULTS.apiKey ({}) differs from reference ({}).".format(
+                    mask_secret(extension_key), mask_secret(resolved)
+                )
             )
 
     # ── Check: frontend .env exists and has a key ──────────────────

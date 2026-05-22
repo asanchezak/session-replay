@@ -77,12 +77,13 @@ export default function ConnectorsPage() {
     }
     try {
       const detail = await request<{ name: string; config: Record<string, string> }>("GET", `/connectors/${connectorId}`);
+      const loadedPassword = detail.config.password === "[REDACTED]" ? "" : (detail.config.password || "");
       setConfigDraft({
         name: detail.name,
         url: detail.config.url || "",
         database: detail.config.database || "",
         username: detail.config.username || "",
-        password: detail.config.password || "",
+        password: loadedPassword,
       });
       setConfiguringId(connectorId);
       setConfigError(null);
@@ -100,14 +101,17 @@ export default function ConnectorsPage() {
     setConfigSaving(true);
     setConfigError(null);
     try {
+      const configPayload: Record<string, string> = {
+        url: configDraft.url,
+        database: configDraft.database,
+        username: configDraft.username,
+      };
+      if (configDraft.password.trim()) {
+        configPayload.password = configDraft.password;
+      }
       await request("PUT", `/connectors/${connectorId}`, {
         name: configDraft.name,
-        config: {
-          url: configDraft.url,
-          database: configDraft.database,
-          username: configDraft.username,
-          password: configDraft.password,
-        },
+        config: configPayload,
       });
       setConfiguringId(null);
       setConfigDraft(null);
@@ -273,6 +277,7 @@ export default function ConnectorsPage() {
                       <div>
                         <label className="block text-xs text-text-secondary mb-1">Password</label>
                         <input type="password" value={configDraft.password} onChange={(e) => setConfigDraft((p) => p ? { ...p, password: e.target.value } : p)} className="w-full bg-[#2A2E3D] text-[#E8EAED] border border-[#2D3148] rounded-md px-3 py-2 text-sm" />
+                        <p className="mt-1 text-[11px] text-text-secondary">Leave blank to keep the stored password.</p>
                       </div>
                     </div>
                     {configError && <div className="text-xs text-[#E17055]">{configError}</div>}

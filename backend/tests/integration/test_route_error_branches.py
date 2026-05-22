@@ -173,7 +173,7 @@ async def test_workflow_update_status_invalid_and_transition_error(api_client, m
     conflict = await api_client.put(
         f"/v1/workflows/{wf_id}/status",
         headers=HEADERS,
-        json={"status": "active"},
+        json={"status": "archived"},
     )
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "INVALID_TRANSITION"

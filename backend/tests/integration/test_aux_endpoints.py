@@ -113,7 +113,11 @@ async def test_connectors_crud_and_test(api_client, monkeypatch):
     create = await api_client.post(
         "/v1/connectors",
         headers=HEADERS,
-        json={"type": "odoo", "name": "Test Odoo", "config": {"url": "http://x"}},
+        json={
+            "type": "odoo",
+            "name": "Test Odoo",
+            "config": {"url": "http://x", "username": "user", "password": "super-secret"},
+        },
     )
     assert create.status_code == 200
     connector_id = create.json()["id"]
@@ -125,6 +129,7 @@ async def test_connectors_crud_and_test(api_client, monkeypatch):
     detail = await api_client.get(f"/v1/connectors/{connector_id}", headers=HEADERS)
     assert detail.status_code == 200
     assert detail.json()["name"] == "Test Odoo"
+    assert detail.json()["config"]["password"] == "[REDACTED]"
 
     class _FakeAdapter:
         async def initialize(self, _config):

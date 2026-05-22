@@ -14,14 +14,34 @@ If <workflow_id> is omitted, defaults to cf7e5f3b-92c8-4bf9-93db-bfe278800129
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 from urllib import error, request
 
 BACKEND = "http://localhost:8081"
-API_KEY = "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw"
-HEADERS = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_api_key() -> str:
+    key = os.environ.get("API_KEY", "").strip()
+    if key:
+        return key
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            k, _, v = stripped.partition("=")
+            if k.strip() == "API_KEY":
+                return v.strip().strip("\"'")
+    return "dev-api-key-change-in-production"
+
+
+HEADERS = {"X-API-Key": _load_api_key(), "Content-Type": "application/json"}
 
 DEFAULT_WORKFLOW = "cf7e5f3b-92c8-4bf9-93db-bfe278800129"
 
@@ -34,6 +54,15 @@ def call(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str
             return json.loads(resp.read())
     except error.HTTPError as e:
         return {"_error": e.code, "_body": e.read().decode()}
+
+
+def _pick_fallback_workflow() -> str | None:
+    workflows = call("GET", "/v1/workflows")
+    if isinstance(workflows, dict) and "_error" in workflows:
+        return None
+    if isinstance(workflows, list) and workflows:
+        return str(workflows[0].get("id", "")) or None
+    return None
 
 
 def make_page_context(url: str, title: str, visible_elements: list[dict]) -> dict:
@@ -56,6 +85,12 @@ def run() -> int:
 
     print(f"Workflow: {workflow_id}")
     wf = call("GET", f"/v1/workflows/{workflow_id}")
+    if "_error" in wf and workflow_id == DEFAULT_WORKFLOW:
+        fallback_workflow = _pick_fallback_workflow()
+        if fallback_workflow:
+            workflow_id = fallback_workflow
+            print(f"  default workflow missing; falling back to {workflow_id}")
+            wf = call("GET", f"/v1/workflows/{workflow_id}")
     if "_error" in wf:
         print(f"  ✗ Could not fetch workflow: {wf}")
         return 1

@@ -5,7 +5,8 @@ import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -184,6 +185,48 @@ async def global_exception_handler(_request: Request, exc: Exception):
             "error": {
                 "code": "INTERNAL_ERROR",
                 "message": "Internal server error",
+            }
+        },
+    )
+
+
+_HTTP_ERROR_CODES = {
+    400: "BAD_REQUEST",
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED",
+    409: "CONFLICT",
+    422: "VALIDATION_ERROR",
+    429: "RATE_LIMITED",
+}
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+        return JSONResponse(status_code=exc.status_code, content=detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": _HTTP_ERROR_CODES.get(exc.status_code, "HTTP_ERROR"),
+                "message": str(detail) if detail else "Request failed",
+            }
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Request validation failed",
+                "details": exc.errors(),
             }
         },
     )

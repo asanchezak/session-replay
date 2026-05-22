@@ -19,16 +19,22 @@ lint-backend:
 	cd backend && uv run ruff check .
 
 lint-extension:
-	cd extension && npx tsc --noEmit && npx eslint src/ 2>/dev/null; true
+	cd extension && npx tsc --noEmit && npx eslint src/
 
 lint-frontend:
-	cd frontend && npx tsc --noEmit && npx eslint src/ 2>/dev/null; true
+	cd frontend && npx tsc --noEmit && npx eslint src/
 
 # ── Typecheck ──────────────────────────────────────────
-typecheck: typecheck-backend
+typecheck: typecheck-backend typecheck-extension typecheck-frontend
 
 typecheck-backend:
-	cd backend && uv run mypy . 2>/dev/null; true
+	cd backend && uv run mypy .
+
+typecheck-extension:
+	cd extension && npx tsc --noEmit
+
+typecheck-frontend:
+	cd frontend && npx tsc --noEmit
 
 # ── Test ───────────────────────────────────────────────
 test: test-backend test-extension test-e2e

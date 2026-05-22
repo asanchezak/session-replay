@@ -1,6 +1,7 @@
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -32,12 +33,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/runs", tags=["runs"])
 
 # In-memory heal overrides for testing (maps run_id → override dict, "__all__" for global)
-_HEAL_OVERRIDES: dict[str, dict] = {}
+_HEAL_OVERRIDES: dict[str, dict[str, Any]] = {}
 
 
 class InjectHealOverrideRequest(BaseModel):
     run_id: str = "__all__"
-    response: dict
+    response: dict[str, Any]
 
 
 @router.post("/testing/inject-heal-override")
@@ -63,11 +64,22 @@ class CreateRunRequest(BaseModel):
 
 class CheckpointRequest(BaseModel):
     step_index: int
-    snapshot: dict = {}
+    snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class FailRequest(BaseModel):
     error: str
+
+
+class PauseRunRequest(BaseModel):
+    reason: str = "Manual pause"
+    step_index: int | None = None
+
+
+class RecoverRunRequest(BaseModel):
+    step_index: int = 0
+    error: str = "Step failed - attempting recovery"
+    dom_snippet: str = ""
 
 
 class InterventionRequest(BaseModel):
@@ -235,14 +247,12 @@ async def get_run_events(
 @router.post("/{run_id}/pause")
 async def pause_run(
     run_id: str,
-    body: dict = None,
+    req: PauseRunRequest,
     db: AsyncSession = Depends(get_db),
 ):
     svc = ExecutionService(db)
     try:
-        run = await svc.pause(
-            run_id, reason=(body or {}).get("reason", "Manual pause")
-        )
+        run = await svc.pause(run_id, reason=req.reason)
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
     except StateTransitionError as e:
@@ -548,16 +558,16 @@ async def report_step_result(
 @router.post("/{run_id}/recover")
 async def recover_run(
     run_id: str,
-    body: dict,
+    req: RecoverRunRequest,
     db: AsyncSession = Depends(get_db),
 ):
     svc = HealingService(db)
     try:
         run = await svc.recover(
             run_id,
-            step_index=body.get("step_index", 0),
-            error=body.get("error", "Step failed — attempting recovery"),
-            dom_snippet=body.get("dom_snippet", ""),
+            step_index=req.step_index,
+            error=req.error,
+            dom_snippet=req.dom_snippet,
         )
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")

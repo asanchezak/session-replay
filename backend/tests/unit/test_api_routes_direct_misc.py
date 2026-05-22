@@ -31,6 +31,7 @@ from api.v1.connectors import (
     get_connector,
     list_connectors,
     register_connector,
+    update_connector,
     test_connector as connector_test_route,
 )
 from api.v1.debug import get_logs, ingest_log
@@ -75,7 +76,11 @@ async def _seed_run(db_session: AsyncSession) -> str:
 @pytest.mark.asyncio
 async def test_connectors_integrations_and_settings_routes(db_session: AsyncSession, monkeypatch):
     created = await register_connector(
-        types.SimpleNamespace(type="odoo", name="C1", config={"url": "http://x"}),
+        types.SimpleNamespace(
+            type="odoo",
+            name="C1",
+            config={"url": "http://x", "username": "user", "password": "top-secret"},
+        ),
         db=db_session,
     )
     connector_id = created["id"]
@@ -84,8 +89,18 @@ async def test_connectors_integrations_and_settings_routes(db_session: AsyncSess
 
     detail = await get_connector(connector_id, db=db_session)
     assert detail["id"] == connector_id
+    assert detail["config"]["url"] == "http://x"
+    assert detail["config"]["password"] == "[REDACTED]"
     invalid = await get_connector("bad-id", db=db_session)
     assert isinstance(invalid, JSONResponse) and invalid.status_code == 404
+
+    await update_connector(
+        connector_id,
+        types.SimpleNamespace(name=None, config={"password": "[REDACTED]"}),
+        db=db_session,
+    )
+    detail_after = await get_connector(connector_id, db=db_session)
+    assert detail_after["config"]["password"] == "[REDACTED]"
 
     class _Adapter:
         async def initialize(self, _cfg):

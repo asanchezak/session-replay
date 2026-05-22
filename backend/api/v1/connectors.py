@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -17,12 +18,33 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 class RegisterConnectorRequest(BaseModel):
     type: str
     name: str
-    config: dict
+    config: dict[str, Any]
 
 
 class UpdateConnectorRequest(BaseModel):
     name: str | None = None
-    config: dict | None = None
+    config: dict[str, Any] | None = None
+
+
+_SENSITIVE_TOKENS = ("password", "secret", "token", "api_key", "apikey")
+_REDACTED = "[REDACTED]"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in {"key", "private_key", "client_secret"}:
+        return True
+    return any(token in lowered for token in _SENSITIVE_TOKENS)
+
+
+def _redact_config(value: Any, *, key: str | None = None) -> Any:
+    if key and _is_sensitive_key(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {k: _redact_config(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_config(v) for v in value]
+    return value
 
 
 def _resolve(connector_id: str, db: AsyncSession):
@@ -70,7 +92,7 @@ async def get_connector(connector_id: str, db: AsyncSession = Depends(get_db)):
         "id": str(c.id),
         "name": c.name,
         "type": c.connector_type,
-        "config": c.config,
+        "config": _redact_config(c.config),
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
     }
@@ -108,7 +130,13 @@ async def update_connector(
     if req.name is not None:
         connector.name = req.name
     if req.config is not None:
-        connector.config = {**connector.config, **req.config}
+        merged = dict(connector.config or {})
+        for key, value in req.config.items():
+            # Allow round-tripping redacted payloads without clobbering stored secrets.
+            if value == _REDACTED:
+                continue
+            merged[key] = value
+        connector.config = merged
     await db.flush()
     return {"id": str(connector.id), "name": connector.name, "type": connector.connector_type}
 

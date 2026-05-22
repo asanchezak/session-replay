@@ -57,7 +57,7 @@ test("recording events via content script creates workflow", async ({ context, e
     headers: { "X-API-Key": API_KEY },
   });
   const workflows = await wfResp.json() as any[];
-  const hasNewWorkflow = workflows.some((w: any) => w.status === "draft");
+  const hasNewWorkflow = workflows.some((w: any) => ["draft", "active"].includes(w.status));
   expect(hasNewWorkflow).toBeTruthy();
 
   expect(errors.filter(e => e.type === "console" && !e.text.includes("favicon"))).toHaveLength(0);

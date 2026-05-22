@@ -88,9 +88,18 @@ async def test_422_invalid_event_type(api_client):
         json={"event_type": "fly", "payload": {}},  # not in VALID_EVENT_TYPES
         headers=_HEADERS,
     )
-    # FastAPI returns 422 from the regex validator, but the wrapper differs;
-    # we accept either FastAPI's default or our normalized one.
-    assert r.status_code in (422,)
+    assert r.status_code == 422
+    assert _is_error_shape(r.json())
+
+
+@pytest.mark.asyncio
+async def test_422_validation_error_normalized_shape(api_client):
+    r = await api_client.post(
+        "/v1/runs/not-a-real-run-id/pause",
+        json={"reason": {"bad": "type"}},
+        headers=_HEADERS,
+    )
+    assert r.status_code == 422
     body = r.json()
-    # FastAPI's default 422 uses {"detail": [...]} — once normalized, _is_error_shape passes.
-    assert "detail" in body or _is_error_shape(body)
+    assert _is_error_shape(body)
+    assert body["error"]["code"] == "VALIDATION_ERROR"
