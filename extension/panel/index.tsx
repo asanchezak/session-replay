@@ -1,36 +1,200 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { PopupState } from "../src/shared/types";
+import { DASHBOARD_ORIGIN } from "../src/shared/constants";
 
-function PanelBadge({ label, color }: { label: string; color: string }) {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function openDashboard(path = "/dashboard") {
+  chrome.tabs.create({ url: `${DASHBOARD_ORIGIN}${path}` });
+}
+
+function send(msg: Record<string, unknown>) {
+  chrome.runtime.sendMessage(msg);
+}
+
+// ── Shared primitives ────────────────────────────────────────────────────────
+
+const colors = {
+  bg: "#0F1117",
+  surface: "#1A1D27",
+  border: "#2D3148",
+  text: "#E8EAED",
+  muted: "#9AA0B0",
+  accent: "#6C5CE7",
+  blue: "#74B9FF",
+  red: "#E17055",
+  yellow: "#FDCB6E",
+  green: "#00B894",
+};
+
+const btn = (extra?: React.CSSProperties): React.CSSProperties => ({
+  width: "100%", padding: "10px 14px", borderRadius: "7px",
+  border: "none", background: colors.accent, color: "#fff",
+  fontSize: "13px", fontWeight: 500, cursor: "pointer", ...extra,
+});
+
+const ghostBtn = (color = colors.muted): React.CSSProperties => ({
+  ...btn({ background: "transparent", border: `1px solid ${colors.border}`, color }),
+});
+
+function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "6px",
-        padding: "4px 8px",
-        borderRadius: "999px",
-        fontSize: "12px",
-        fontWeight: 500,
-        background: `${color}22`,
-        color,
-      }}
-    >
-      <span style={{ width: 8, height: 8, borderRadius: "50%", background: color }} />
-      {label}
-    </span>
+    <span style={{
+      display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+      background: color, flexShrink: 0,
+      animation: pulse ? "sr-panel-pulse 1.4s ease-in-out infinite" : "none",
+    }} />
   );
 }
 
-function statusColor(type: PopupState["type"]): string {
-  if (type === "recording") return "#E17055";
-  if (type === "running" || type === "running_parameterized") return "#74B9FF";
-  if (type === "waiting_for_user") return "#FDCB6E";
-  if (type === "recovering") return "#74B9FF";
-  if (type === "failed" || type === "error") return "#E17055";
-  return "#9AA0B0";
+function ProgressBar({ pct, color = colors.accent }: { pct: number; color?: string }) {
+  return (
+    <div style={{ height: 4, background: "#2A2E3D", borderRadius: 2, overflow: "hidden" }}>
+      <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 2, transition: "width 0.3s ease" }} />
+    </div>
+  );
 }
+
+function Section({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      border: `1px solid ${colors.border}`, borderRadius: "8px",
+      padding: "12px", background: colors.surface, marginBottom: "10px",
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// ── State-specific views ─────────────────────────────────────────────────────
+
+function IdleView() {
+  return (
+    <>
+      <style>{`@keyframes sr-panel-pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+        <button style={btn({ background: colors.red })}
+          onClick={() => send({ type: "START_RECORDING" })}>
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+            <Dot color="#fff" /> Record Workflow
+          </span>
+        </button>
+        <button style={btn()} onClick={() => openDashboard("/workflows")}>
+          ▶ Run Workflow
+        </button>
+        <button style={ghostBtn(colors.blue)} onClick={() => openDashboard()}>
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+            Open Dashboard
+          </span>
+        </button>
+        <div style={{ padding: "10px", borderRadius: "6px", background: colors.surface, textAlign: "center", color: colors.muted, fontSize: "12px" }}>
+          No active workflow. Record or run one to start.
+        </div>
+      </div>
+    </>
+  );
+}
+
+function RecordingView({ stepCount }: { stepCount: number }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <Section>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <Dot color={colors.red} pulse />
+          <span style={{ color: colors.red, fontWeight: 600, fontSize: "13px" }}>
+            Recording — {stepCount} step{stepCount !== 1 ? "s" : ""} captured
+          </span>
+        </div>
+      </Section>
+      <button style={btn({ background: "#242836", border: `1px solid ${colors.border}` })}
+        onClick={() => send({ type: "STOP_RECORDING" })}>
+        ■ Stop Recording
+      </button>
+    </div>
+  );
+}
+
+function RunningView({
+  workflowName, currentStep, totalSteps, runId, label = "Running",
+}: {
+  workflowName: string; currentStep: number; totalSteps: number; runId: string; label?: string;
+}) {
+  const pct = totalSteps > 0 ? Math.round(((currentStep + 1) / totalSteps) * 100) : 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <Section>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+          <Dot color={colors.blue} pulse />
+          <span style={{ color: colors.blue, fontWeight: 600, fontSize: "13px" }}>{label}</span>
+        </div>
+        <div style={{ fontSize: "13px", color: colors.text, marginBottom: "6px" }}>{workflowName}</div>
+        <div style={{ fontSize: "11px", color: colors.muted, marginBottom: "8px" }}>
+          Step {currentStep + 1} of {totalSteps} · {pct}%
+        </div>
+        <ProgressBar pct={pct} />
+      </Section>
+      <button style={ghostBtn(colors.blue)}
+        onClick={() => openDashboard(`/runs/${runId}`)}>
+        View Run →
+      </button>
+      <button style={ghostBtn(colors.red)}
+        onClick={() => send({ type: "CANCEL_RUN", runId })}>
+        Cancel Run
+      </button>
+    </div>
+  );
+}
+
+function WaitingView({ reason, runId }: { reason: string; runId?: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <Section>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+          <span style={{ fontSize: "16px" }}>⚠️</span>
+          <span style={{ color: colors.yellow, fontWeight: 600, fontSize: "13px" }}>Action Required</span>
+        </div>
+        <p style={{ color: colors.text, fontSize: "12px", margin: 0 }}>{reason}</p>
+      </Section>
+      <button style={btn()} onClick={() => send({ type: "RESUME_RUN" })}>
+        I've Handled It → Resume
+      </button>
+      {runId && (
+        <button style={ghostBtn(colors.blue)} onClick={() => openDashboard(`/runs/${runId}`)}>
+          View Run →
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FailedView({ error, runId }: { error: string; runId?: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <Section>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+          <Dot color={colors.red} />
+          <span style={{ color: colors.red, fontWeight: 600, fontSize: "13px" }}>Run Failed</span>
+        </div>
+        <p style={{ color: colors.muted, fontSize: "12px", margin: 0 }}>{error}</p>
+      </Section>
+      {runId && (
+        <button style={ghostBtn(colors.blue)} onClick={() => openDashboard(`/runs/${runId}`)}>
+          View Run →
+        </button>
+      )}
+      <button style={ghostBtn()} onClick={() => openDashboard()}>
+        Open Dashboard
+      </button>
+    </div>
+  );
+}
+
+// ── Main panel ───────────────────────────────────────────────────────────────
 
 function SidePanel() {
   const [state, setState] = useState<PopupState>({ type: "idle" });
@@ -39,7 +203,6 @@ function SidePanel() {
     chrome.runtime.sendMessage({ type: "GET_STATE" }, (response) => {
       if (response?.state?.type) setState(response.state as PopupState);
     });
-
     const listener = (message: { type: string; state?: PopupState }) => {
       if (message.type === "STATE_UPDATE" && message.state?.type) {
         setState(message.state);
@@ -49,81 +212,80 @@ function SidePanel() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  const details = useMemo(() => {
-    if (state.type === "running" || state.type === "running_parameterized" || state.type === "recovering" || state.type === "failed") {
-      return {
-        runId: state.run_id,
-        workflowName: state.workflow_name,
-        step: `${state.current_step}/${state.total_steps}`,
-        error: "error" in state ? state.error : "",
-      };
+  function renderContent() {
+    switch (state.type) {
+      case "idle":
+        return <IdleView />;
+
+      case "recording":
+        return <RecordingView stepCount={state.step_count} />;
+
+      case "running":
+      case "running_parameterized":
+        return (
+          <RunningView
+            workflowName={state.workflow_name}
+            currentStep={state.current_step}
+            totalSteps={state.total_steps}
+            runId={state.run_id}
+          />
+        );
+
+      case "recovering":
+        return (
+          <RunningView
+            workflowName={state.workflow_name}
+            currentStep={state.current_step}
+            totalSteps={state.total_steps}
+            runId={state.run_id}
+            label="Auto-Healing…"
+          />
+        );
+
+      case "waiting_for_user":
+        return <WaitingView reason={state.reason} runId={state.run_id} />;
+
+      case "failed":
+        return <FailedView error={state.error} runId={state.run_id} />;
+
+      case "error":
+        return <FailedView error={state.message} />;
+
+      default:
+        return <IdleView />;
     }
-    if (state.type === "waiting_for_user") {
-      return {
-        runId: state.run_id,
-        workflowName: "",
-        step: "",
-        error: state.reason,
-      };
-    }
-    return { runId: "", workflowName: "", step: "", error: "" };
-  }, [state]);
+  }
+
+  const stateLabel: Record<string, string> = {
+    idle: "Ready",
+    recording: "Recording",
+    running: "Running",
+    running_parameterized: "Running",
+    recovering: "Healing",
+    waiting_for_user: "Needs Attention",
+    failed: "Failed",
+    error: "Error",
+    setting_goal: "Setting Goal",
+  };
 
   return (
-    <div style={{ padding: "16px", color: "#E8EAED" }} data-panel>
-      <h2 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>
-        Workflow Panel
-      </h2>
-
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
-        <PanelBadge label={state.type.replaceAll("_", " ")} color={statusColor(state.type)} />
+    <div style={{
+      padding: "16px", color: colors.text, background: colors.bg,
+      minHeight: "100vh", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      boxSizing: "border-box",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" }}>
+        <h2 style={{ fontSize: "14px", fontWeight: 600, margin: 0 }}>Session Replay</h2>
+        <span style={{
+          fontSize: "11px", padding: "2px 8px", borderRadius: "999px",
+          background: `${state.type === "running" || state.type === "running_parameterized" || state.type === "recovering" ? colors.blue : state.type === "waiting_for_user" ? colors.yellow : state.type === "failed" || state.type === "error" ? colors.red : state.type === "recording" ? colors.red : colors.green}22`,
+          color: state.type === "running" || state.type === "running_parameterized" || state.type === "recovering" ? colors.blue : state.type === "waiting_for_user" ? colors.yellow : state.type === "failed" || state.type === "error" ? colors.red : state.type === "recording" ? colors.red : colors.green,
+          fontWeight: 500,
+        }}>
+          {stateLabel[state.type] ?? state.type}
+        </span>
       </div>
-
-      {(details.workflowName || details.runId) && (
-        <div style={{ border: "1px solid #2D3148", borderRadius: "8px", padding: "10px", marginBottom: "12px", background: "#1A1D27" }}>
-          {details.workflowName && (
-            <div style={{ fontSize: "13px", marginBottom: "6px" }}>{details.workflowName}</div>
-          )}
-          {details.runId && (
-            <div style={{ fontSize: "12px", color: "#9AA0B0", marginBottom: "4px" }}>
-              Run: {details.runId}
-            </div>
-          )}
-          {details.step && (
-            <div style={{ fontSize: "12px", color: "#9AA0B0" }}>Step: {details.step}</div>
-          )}
-        </div>
-      )}
-
-      {details.error && (
-        <div style={{ fontSize: "12px", color: "#9AA0B0", border: "1px solid #2D3148", borderRadius: "8px", padding: "10px", background: "#1A1D27", marginBottom: "12px" }}>
-          {details.error}
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-        <button
-          onClick={() => chrome.runtime.sendMessage({ type: "GET_STATE" }, (response) => { if (response?.state) setState(response.state as PopupState); })}
-          style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid #2D3148", background: "transparent", color: "#9AA0B0", cursor: "pointer", fontSize: "12px" }}
-        >
-          Refresh
-        </button>
-        <button
-          onClick={() => chrome.runtime.sendMessage({ type: "VIEW_DETAILS", runId: details.runId })}
-          disabled={!details.runId}
-          style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid #2D3148", background: "transparent", color: details.runId ? "#74B9FF" : "#6B7280", cursor: details.runId ? "pointer" : "not-allowed", fontSize: "12px" }}
-        >
-          View Run
-        </button>
-        {(state.type === "running" || state.type === "running_parameterized" || state.type === "recovering") && details.runId && (
-          <button
-            onClick={() => chrome.runtime.sendMessage({ type: "CANCEL_RUN", runId: details.runId })}
-            style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid #E17055", background: "transparent", color: "#E17055", cursor: "pointer", fontSize: "12px" }}
-          >
-            Cancel Run
-          </button>
-        )}
-      </div>
+      {renderContent()}
     </div>
   );
 }
