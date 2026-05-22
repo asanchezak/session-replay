@@ -107,6 +107,8 @@ interface WebhookTrigger {
   event_kind: string;
   enabled: boolean;
   created_at: string | null;
+  last_fired_at: string | null;
+  last_job: { job_title: string; job_url: string; job_id: string } | null;
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -185,6 +187,8 @@ export default function WorkflowDetailPage() {
   const [triggerNowRunning, setTriggerNowRunning] = useState(false);
   const [triggerNowResult, setTriggerNowResult] = useState<{ run_id: string } | null>(null);
   const [triggerNowError, setTriggerNowError] = useState<string | null>(null);
+  const [replayingId, setReplayingId] = useState<string | null>(null);
+  const [replayResult, setReplayResult] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (workflowId) fetchData("GET", `/workflows/${workflowId}`);
@@ -250,6 +254,22 @@ export default function WorkflowDetailPage() {
       await request("DELETE", `/workflows/${workflowId}/webhook-triggers/${triggerId}`);
       await fetchWebhookTriggers();
     } catch { /* ignore */ }
+  };
+
+  const replayWebhookTrigger = async (triggerId: string) => {
+    if (!workflowId) return;
+    setReplayingId(triggerId);
+    try {
+      const res = await request<{ run_id: string; replayed_from: string | null }>(
+        "POST",
+        `/workflows/${workflowId}/webhook-triggers/${triggerId}/replay`,
+      );
+      setReplayResult((prev) => ({ ...prev, [triggerId]: res.run_id }));
+    } catch (e) {
+      setReplayResult((prev) => ({ ...prev, [triggerId]: `error: ${e instanceof Error ? e.message : "failed"}` }));
+    } finally {
+      setReplayingId(null);
+    }
   };
 
   const handleTriggerNow = async () => {
@@ -867,22 +887,58 @@ export default function WorkflowDetailPage() {
               <div className="mb-4 space-y-2">
                 {webhookTriggers.map((t) => {
                   const connName = connectors?.find((c) => c.id === t.connector_id)?.name ?? t.connector_id.slice(0, 8);
+                  const runId = replayResult[t.id];
+                  const isReplaying = replayingId === t.id;
                   return (
-                    <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-md bg-bg-elevated border border-border text-sm">
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
-                        <span className="text-text-primary">{connName}</span>
-                        <span className="text-text-secondary">—</span>
-                        <span className="text-info text-xs">{t.event_kind}</span>
+                    <div key={t.id} className="rounded-md bg-bg-elevated border border-border text-sm overflow-hidden">
+                      <div className="flex items-center justify-between px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
+                          <span className="text-text-primary">{connName}</span>
+                          <span className="text-text-secondary">—</span>
+                          <span className="text-info text-xs">{t.event_kind}</span>
+                          {t.last_fired_at && (
+                            <span className="text-text-gray text-xs">
+                              last fired {new Date(t.last_fired_at).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => deleteWebhookTrigger(t.id)}
+                          className="text-text-gray hover:text-error transition-colors"
+                          title="Remove trigger"
+                        >
+                          <Trash2 size={13} />
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => deleteWebhookTrigger(t.id)}
-                        className="text-text-gray hover:text-error transition-colors"
-                        title="Remove trigger"
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                      {t.last_job && (
+                        <div className="px-3 pb-2 flex items-center justify-between border-t border-border/50 pt-2">
+                          <div className="text-xs text-text-secondary truncate max-w-[60%]">
+                            Last: <span className="text-text-primary">{t.last_job.job_title}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {runId && !runId.startsWith("error") && (
+                              <a href={`/runs/${runId}`} target="_blank" rel="noreferrer"
+                                className="flex items-center gap-1 text-xs text-success underline hover:text-success/80">
+                                #{runId.slice(0, 8)} <ExternalLink size={10} />
+                              </a>
+                            )}
+                            {runId?.startsWith("error") && (
+                              <span className="text-xs text-error">{runId.replace("error: ", "")}</span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => replayWebhookTrigger(t.id)}
+                              disabled={isReplaying}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-border text-text-secondary hover:text-text-primary hover:border-accent transition-colors disabled:opacity-50"
+                            >
+                              <Zap size={11} />
+                              {isReplaying ? "Replaying…" : "Replay last job"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

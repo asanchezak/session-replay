@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.models.connector import ConnectorConfig
 from core.models.webhook import WebhookTrigger
@@ -116,6 +118,10 @@ class WebhookTriggerService:
             run_id = await self._fire(trigger.workflow_id, job_data)
             if run_id:
                 run_ids.append(run_id)
+                trigger.last_job_payload = job_data
+                trigger.last_fired_at = datetime.now(UTC)
+                flag_modified(trigger, "last_job_payload")
+                await self.session.flush()
         return run_ids
 
     async def _fetch_job_description(self, connector: ConnectorConfig, job_id: str) -> str:
@@ -185,6 +191,23 @@ class WebhookTriggerService:
         }
         run_id = await self._fire(workflow_id, job_data)
         return {"run_id": run_id, "resolved_params": job_data}
+
+    async def replay_last(self, trigger_id: str) -> dict:
+        """Re-fire a trigger using the last job payload it received."""
+        try:
+            uid = uuid.UUID(trigger_id)
+        except ValueError as exc:
+            raise ValueError("Trigger not found.") from exc
+        result = await self.session.execute(
+            select(WebhookTrigger).where(WebhookTrigger.id == uid)
+        )
+        trigger = result.scalar_one_or_none()
+        if trigger is None:
+            raise ValueError("Trigger not found.")
+        if not trigger.last_job_payload:
+            raise ValueError("No previous job recorded for this trigger. Fire the webhook at least once first.")
+        run_id = await self._fire(trigger.workflow_id, trigger.last_job_payload)
+        return {"run_id": run_id, "replayed_from": trigger.last_fired_at.isoformat() if trigger.last_fired_at else None, "job_data": trigger.last_job_payload}
 
     async def _fire(self, workflow_id: str, job_data: dict) -> str | None:
         """Render all enabled connector bindings with job_data, build plan, create and start run."""

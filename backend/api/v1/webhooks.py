@@ -15,6 +15,23 @@ def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
+def _serialize_trigger(t) -> dict:
+    return {
+        "id": str(t.id),
+        "connector_id": t.connector_id,
+        "workflow_id": t.workflow_id,
+        "event_kind": t.event_kind,
+        "enabled": t.enabled,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "last_fired_at": t.last_fired_at.isoformat() if t.last_fired_at else None,
+        "last_job": {
+            "job_title": t.last_job_payload.get("job_title", ""),
+            "job_url": t.last_job_payload.get("job_url", ""),
+            "job_id": t.last_job_payload.get("job_id", ""),
+        } if t.last_job_payload else None,
+    }
+
+
 # ── Incoming webhook from Odoo ────────────────────────────────────────────────
 
 @router.post("/webhooks/incoming/odoo/{connector_id}")
@@ -75,17 +92,7 @@ async def list_webhook_triggers(
     svc = WebhookTriggerService(db)
     triggers = await svc.list_triggers(workflow_id=workflow_id)
     return {
-        "triggers": [
-            {
-                "id": str(t.id),
-                "connector_id": t.connector_id,
-                "workflow_id": t.workflow_id,
-                "event_kind": t.event_kind,
-                "enabled": t.enabled,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
-            }
-            for t in triggers
-        ]
+        "triggers": [_serialize_trigger(t) for t in triggers]
     }
 
 
@@ -105,13 +112,7 @@ async def create_webhook_trigger(
     except ValueError as exc:
         return _err(400, "BAD_REQUEST", str(exc))
     await db.commit()
-    return {
-        "id": str(trigger.id),
-        "connector_id": trigger.connector_id,
-        "workflow_id": trigger.workflow_id,
-        "event_kind": trigger.event_kind,
-        "enabled": trigger.enabled,
-    }
+    return _serialize_trigger(trigger)
 
 
 @router.delete("/workflows/{workflow_id}/webhook-triggers/{trigger_id}")
@@ -126,6 +127,22 @@ async def delete_webhook_trigger(
         return _err(404, "NOT_FOUND", "Webhook trigger not found.")
     await db.commit()
     return {"deleted": True}
+
+
+@router.post("/workflows/{workflow_id}/webhook-triggers/{trigger_id}/replay")
+async def replay_webhook_trigger(
+    workflow_id: str,
+    trigger_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-fire a trigger using the last job payload it received from Odoo."""
+    svc = WebhookTriggerService(db)
+    try:
+        result = await svc.replay_last(trigger_id)
+    except ValueError as exc:
+        return _err(400, "BAD_REQUEST", str(exc))
+    await db.commit()
+    return result
 
 
 @router.get("/connectors/{connector_id}/webhook-triggers")
