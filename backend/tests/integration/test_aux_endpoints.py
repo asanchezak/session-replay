@@ -14,6 +14,18 @@ from core.models.workflow import Workflow
 from services.agent_models import PollResponse, ResultResponse
 
 HEADERS = {"X-API-Key": "dev-api-key-change-in-production"}
+ALLOWED_AGENT_DECISIONS = {
+    "EXECUTE",
+    "SKIP",
+    "RETRY",
+    "HEAL",
+    "ADAPT",
+    "WAIT",
+    "RESTART",
+    "ROLLBACK",
+    "PAUSE",
+    "COMPLETED",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -307,7 +319,9 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
         },
     )
     assert poll.status_code == 200
-    assert poll.json()["decision"] == "EXECUTE"
+    poll_body = poll.json()
+    assert poll_body["decision"] == "EXECUTE"
+    assert poll_body["decision"] in ALLOWED_AGENT_DECISIONS
 
     result = await api_client.post(
         f"/v1/agent/{run_id}/result",
@@ -315,7 +329,10 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
         json={"step_index": 0, "success": True, "error": None, "page_context_after": None},
     )
     assert result.status_code == 200
-    assert result.json()["accepted"] is True
+    result_body = result.json()
+    assert result_body["accepted"] is True
+    if result_body.get("decision") is not None:
+        assert result_body["decision"] in ALLOWED_AGENT_DECISIONS
 
     action = await api_client.post(
         f"/v1/agent/{run_id}/action",
@@ -327,7 +344,12 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
 
     decisions = await api_client.get(f"/v1/agent/{run_id}/decisions?limit=1", headers=HEADERS)
     assert decisions.status_code == 200
-    assert len(decisions.json()) == 1
+    decisions_body = decisions.json()
+    assert len(decisions_body) == 1
+    for entry in decisions_body:
+        decision_value = entry.get("payload", {}).get("decision")
+        if decision_value is not None:
+            assert decision_value in ALLOWED_AGENT_DECISIONS
 
     outcome = AIDecisionOutcome(
         run_id=run_id,
@@ -345,7 +367,12 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
     await db_session.flush()
     outcomes = await api_client.get(f"/v1/agent/{run_id}/outcomes", headers=HEADERS)
     assert outcomes.status_code == 200
-    assert len(outcomes.json()) == 1
+    outcomes_body = outcomes.json()
+    assert len(outcomes_body) == 1
+    first = outcomes_body[0]
+    assert first["decision"] in ALLOWED_AGENT_DECISIONS
+    assert first["actual_outcome"] == "success"
+    assert first["step_index"] == 0
 
     not_found_resume = await api_client.post(f"/v1/agent/{uuid.uuid4()}/resume", headers=HEADERS)
     assert not_found_resume.status_code == 404
@@ -374,3 +401,27 @@ async def test_agent_routes_success_and_error_paths(api_client, db_session, monk
     )
     assert failed.status_code == 500
     assert failed.json()["error"]["code"] == "AGENT_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_agent_route_validation_error_envelopes(api_client, db_session):
+    run_id = await _create_run(db_session)
+
+    invalid_action = await api_client.post(
+        f"/v1/agent/{run_id}/action",
+        headers=HEADERS,
+        json={"action": "stop-now"},
+    )
+    assert invalid_action.status_code == 422
+    invalid_action_body = invalid_action.json()
+    assert invalid_action_body["error"]["code"] == "VALIDATION_ERROR"
+    assert "message" in invalid_action_body["error"]
+
+    invalid_limit = await api_client.get(
+        f"/v1/agent/{run_id}/decisions?limit=0",
+        headers=HEADERS,
+    )
+    assert invalid_limit.status_code == 422
+    invalid_limit_body = invalid_limit.json()
+    assert invalid_limit_body["error"]["code"] == "VALIDATION_ERROR"
+    assert "message" in invalid_limit_body["error"]
