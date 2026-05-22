@@ -280,7 +280,7 @@ describe("WorkflowDetailPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Run$/i }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Run with Parameters" })).toBeInTheDocument());
-    expect(screen.getByLabelText("Workflow step (optional)")).toHaveValue("1");
+    await waitFor(() => expect(screen.getAllByText(/Latest job: Senior Python Engineer/i).length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: "Run Workflow" }));
 
     expect(postMessageSpy).toHaveBeenCalledWith(

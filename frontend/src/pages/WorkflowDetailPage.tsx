@@ -112,6 +112,32 @@ interface WebhookTrigger {
   last_job: { job_title: string; job_url: string; job_id: string } | null;
 }
 
+function normalizeWebhookTriggerResponse(payload: unknown): WebhookTrigger[] {
+  const isTrigger = (value: unknown): value is WebhookTrigger => {
+    if (!value || typeof value !== "object") return false;
+    const candidate = value as Partial<WebhookTrigger>;
+    return (
+      typeof candidate.id === "string" &&
+      typeof candidate.connector_id === "string" &&
+      typeof candidate.workflow_id === "string" &&
+      typeof candidate.event_kind === "string"
+    );
+  };
+
+  if (Array.isArray(payload)) {
+    return payload.filter(isTrigger);
+  }
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "triggers" in payload &&
+    Array.isArray((payload as { triggers?: unknown }).triggers)
+  ) {
+    return (payload as { triggers: unknown[] }).triggers.filter(isTrigger);
+  }
+  return [];
+}
+
 function normalizeText(value: string | null | undefined): string {
   return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -211,8 +237,8 @@ export default function WorkflowDetailPage() {
 
   useEffect(() => {
     if (!workflowId) return;
-    request<{ triggers: WebhookTrigger[] }>("GET", `/workflows/${workflowId}/webhook-triggers`)
-      .then((res) => setWebhookTriggers(res.triggers))
+    request<unknown>("GET", `/workflows/${workflowId}/webhook-triggers`)
+      .then((res) => setWebhookTriggers(normalizeWebhookTriggerResponse(res)))
       .catch(() => {});
   }, [workflowId]);
 
@@ -225,8 +251,8 @@ export default function WorkflowDetailPage() {
   const fetchWebhookTriggers = async () => {
     if (!workflowId) return;
     try {
-      const res = await request<{ triggers: WebhookTrigger[] }>("GET", `/workflows/${workflowId}/webhook-triggers`);
-      setWebhookTriggers(res.triggers);
+      const res = await request<unknown>("GET", `/workflows/${workflowId}/webhook-triggers`);
+      setWebhookTriggers(normalizeWebhookTriggerResponse(res));
     } catch { /* ignore */ }
   };
 
@@ -391,7 +417,13 @@ export default function WorkflowDetailPage() {
     if (!workflowId) return;
     setRunError(null);
     if (analysis?.parameters && analysis.parameters.length > 0 && analysis.replay_strategy === "parameterized") {
-      for (const draft of Object.values(bindingDrafts)) {
+      const draftsByParamKey: Record<string, ConnectorBindingDraft> = { ...bindingDrafts };
+      for (const binding of data?.connector_bindings || []) {
+        if (!draftsByParamKey[binding.parameter_key]) {
+          draftsByParamKey[binding.parameter_key] = getBindingDraftForParameter(data || null, binding.parameter_key);
+        }
+      }
+      for (const draft of Object.values(draftsByParamKey)) {
         if (draft.connector_id && draft.enabled) {
           await previewConnectorBinding(draft);
         }

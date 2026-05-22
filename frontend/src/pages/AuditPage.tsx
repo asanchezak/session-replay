@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { Fragment, useState, useEffect } from "react";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import EmptyState from "../components/EmptyState";
@@ -153,9 +153,8 @@ export default function AuditPage() {
               </thead>
               <tbody>
                 {filteredEvents.map((ev) => (
-                  <>
+                  <Fragment key={ev.id}>
                     <tr
-                      key={ev.id}
                       onClick={() => setExpandedEvent(expandedEvent === ev.id ? null : ev.id)}
                       className="border-b border-border hover:bg-bg-elevated transition-colors cursor-pointer"
                     >
@@ -192,7 +191,7 @@ export default function AuditPage() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 ))}
               </tbody>
             </table>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ParameterForm } from "./ParameterForm";
 
 interface Parameter {
@@ -60,6 +60,21 @@ export function RunParameterModal({
     return initial;
   });
   const [goal, setGoal] = useState("");
+
+  useEffect(() => {
+    if (!prefilledValues) return;
+    setValues((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      for (const [key, value] of Object.entries(prefilledValues)) {
+        if (typeof value === "string" && next[key] !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [prefilledValues]);
 
   const handleChange = (key: string, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));

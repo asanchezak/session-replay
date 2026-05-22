@@ -4,10 +4,10 @@
  * Pins F-M-02 (filter decoupled from refetch), F-N-11 (hash truncated, no copy).
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import AuditPage from "../../src/pages/AuditPage";
+import AuditPage from "../../pages/AuditPage";
 
 function withFetch(runs: any[], events: any[]) {
   (global as any).fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -31,13 +31,17 @@ describe("AuditPage", () => {
   it("renders events for selected run", async () => {
     withFetch([{ id: "r1", workflow_id: "w1", status: "running", current_step_index: 0, total_steps: 0, created_at: new Date().toISOString() }], events);
     render(<MemoryRouter><AuditPage /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByText(/step_executed/)).toBeInTheDocument());
-    expect(screen.getByText(/recovery_attempt/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("option", { name: /#r1/i })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "r1" } });
+    await waitFor(() => expect(screen.getAllByText(/step_executed/).length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/recovery_attempt/).length).toBeGreaterThan(0);
   });
 
   it.fails("F-M-02: filtering does not lose events when changing dropdown", async () => {
     withFetch([{ id: "r1", workflow_id: "w1", status: "running", current_step_index: 0, total_steps: 0, created_at: new Date().toISOString() }], events);
     render(<MemoryRouter><AuditPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByRole("option", { name: /#r1/i })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "r1" } });
     await waitFor(() => expect(screen.getByText(/step_executed/)).toBeInTheDocument());
 
     // Switch filter to recovery_attempt; old "step_executed" row must remain in DOM until filter clears.

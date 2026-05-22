@@ -4,7 +4,7 @@ type RunStatus =
   | "idle" | "recording" | "validated" | "queued" | "running"
   | "waiting_for_user" | "recovering" | "failed" | "completed" | "canceled";
 
-type WorkflowStatus = "active" | "archived";
+type WorkflowStatus = "draft" | "active" | "archived";
 
 interface StatusBadgeProps {
   status: RunStatus | WorkflowStatus | string;
@@ -25,6 +25,7 @@ const runConfig: Record<RunStatus, { color: string; label: string; icon: typeof 
 };
 
 const workflowConfig: Record<WorkflowStatus, { color: string; label: string }> = {
+  draft: { color: "var(--color-warning)", label: "Draft" },
   active: { color: "var(--color-success)", label: "Active" },
   archived: { color: "var(--color-text-gray)", label: "Archived" },
 };

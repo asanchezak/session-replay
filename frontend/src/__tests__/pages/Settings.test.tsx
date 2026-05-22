@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import SettingsPage from "../../src/pages/SettingsPage";
+import SettingsPage from "../../pages/SettingsPage";
 
 describe("SettingsPage", () => {
   it.fails("F-C-01: save persists values via POST /v1/settings", async () => {
@@ -27,10 +27,10 @@ describe("SettingsPage", () => {
 
   it("renders the four cards", () => {
     render(<SettingsPage />);
-    expect(screen.getByText(/Policies/)).toBeInTheDocument();
-    expect(screen.getByText(/Retention/)).toBeInTheDocument();
-    expect(screen.getByText(/API Keys/)).toBeInTheDocument();
-    expect(screen.getByText(/Notifications/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Policies$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Retention$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^API Keys$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Notifications$/i })).toBeInTheDocument();
   });
 
   it("shows the success banner after clicking Save", async () => {

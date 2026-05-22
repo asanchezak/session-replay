@@ -110,7 +110,7 @@ describe("DataTable", () => {
     expect(screen.getByText("No data")).toBeInTheDocument();
   });
 
-  it.fails("F-C-08: clickable row is keyboard-navigable", () => {
+  it("F-C-08: clickable row is keyboard-navigable", () => {
     const fn = vi.fn();
     render(
       <DataTable<Row>

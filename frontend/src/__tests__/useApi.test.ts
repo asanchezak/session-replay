@@ -96,7 +96,7 @@ describe("useApiData", () => {
     expect(result.current.data).toBeNull();
   });
 
-  it.fails("F-C-09: cancels in-flight fetch on unmount (AbortController)", async () => {
+  it("F-C-09: cancels in-flight fetch on unmount (AbortController)", async () => {
     const abortHits: string[] = [];
     mockFetch(async (_input, init) => {
       init?.signal?.addEventListener("abort", () => abortHits.push("aborted"));
@@ -106,7 +106,6 @@ describe("useApiData", () => {
     const { result, unmount } = renderHook(() => useApiData<unknown>());
     act(() => { void result.current.fetchData("GET", "/slow"); });
     unmount();
-    // Today useApi.ts does not pass `signal`; the abort listener never fires.
     expect(abortHits).toContain("aborted");
   });
 });

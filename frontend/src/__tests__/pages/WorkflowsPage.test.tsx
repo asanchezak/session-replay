@@ -34,7 +34,7 @@ function setupFetch({ initialWorkflows = sampleWorkflows, deleteOk = true }: Set
             : { error: { message: "Internal server error" } },
       } as Response;
     }
-    if (url.endsWith("/workflows")) {
+    if (url.includes("/workflows")) {
       return {
         ok: true,
         status: 200,
@@ -50,6 +50,16 @@ function renderPage() {
     <MemoryRouter>
       <WorkflowsPage />
     </MemoryRouter>,
+  );
+}
+
+async function switchToUserTab() {
+  await waitFor(() =>
+    expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /My Workflows/i }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /Delete all/i })).toBeInTheDocument(),
   );
 }
 
@@ -73,6 +83,7 @@ describe("WorkflowsPage — delete all", () => {
   it("shows the delete-all button with the workflow count", async () => {
     setupFetch();
     renderPage();
+    await switchToUserTab();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Delete all \(2\)/i })).toBeInTheDocument(),
     );
@@ -82,9 +93,7 @@ describe("WorkflowsPage — delete all", () => {
     setupFetch();
     vi.stubGlobal("confirm", vi.fn(() => false));
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Delete all/i })).toBeInTheDocument(),
-    );
+    await switchToUserTab();
     fireEvent.click(screen.getByRole("button", { name: /Delete all/i }));
     const deleteCalls = (global as any).fetch.mock.calls.filter(
       ([, init]: [unknown, RequestInit | undefined]) =>
@@ -97,9 +106,7 @@ describe("WorkflowsPage — delete all", () => {
     setupFetch();
     vi.stubGlobal("confirm", vi.fn(() => true));
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Delete all/i })).toBeInTheDocument(),
-    );
+    await switchToUserTab();
     fireEvent.click(screen.getByRole("button", { name: /Delete all/i }));
     await waitFor(() => {
       const deleteCalls = (global as any).fetch.mock.calls.filter(
@@ -109,7 +116,7 @@ describe("WorkflowsPage — delete all", () => {
       expect(deleteCalls).toHaveLength(1);
     });
     // Refetch returns empty list → empty state is shown
-    await waitFor(() => expect(screen.getByText(/No workflows yet/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/No recorded workflows yet/i)).toBeInTheDocument());
     // Button disappears once the list is empty
     expect(screen.queryByRole("button", { name: /Delete all/i })).not.toBeInTheDocument();
   });
@@ -130,9 +137,7 @@ describe("WorkflowsPage — delete all", () => {
 
     vi.stubGlobal("confirm", vi.fn(() => true));
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Delete all/i })).toBeInTheDocument(),
-    );
+    await switchToUserTab();
     fireEvent.click(screen.getByRole("button", { name: /Delete all/i }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Deleting/i })).toBeDisabled(),
@@ -147,9 +152,7 @@ describe("WorkflowsPage — delete all", () => {
     setupFetch({ deleteOk: false });
     vi.stubGlobal("confirm", vi.fn(() => true));
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Delete all/i })).toBeInTheDocument(),
-    );
+    await switchToUserTab();
     fireEvent.click(screen.getByRole("button", { name: /Delete all/i }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Delete all \(2\)/i })).not.toBeDisabled(),

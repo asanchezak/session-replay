@@ -37,18 +37,43 @@ export function useApi() {
     });
 
     const elapsed = performance.now() - start;
-    const data = response.status === 204 || response.headers.get("content-length") === "0"
-      ? null
-      : await response.json();
+    const headerGet =
+      response.headers && typeof response.headers.get === "function"
+        ? (name: string) => response.headers.get(name)
+        : (_name: string) => null;
+    const contentLength = headerGet("content-length");
+    const contentType = (headerGet("content-type") || "").toLowerCase();
+
+    let data: unknown = null;
+    if (response.status !== 204 && contentLength !== "0") {
+      if (contentType.includes("application/json") || contentType === "") {
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+      } else {
+        try {
+          const text = await response.text();
+          data = text ? { raw: text } : null;
+        } catch {
+          data = null;
+        }
+      }
+    }
 
     logger.apiCall("useApi", method, path, response.status, elapsed);
 
     if (!response.ok) {
-      const message = data?.error?.message || data?.detail?.error?.message || `Request failed: ${response.status}`;
+      const errorBody = data as { error?: { message?: string; code?: string; details?: unknown }; detail?: { error?: { message?: string } } } | null;
+      const message =
+        errorBody?.error?.message ||
+        errorBody?.detail?.error?.message ||
+        `Request failed: ${response.status}`;
       logger.error("useApi", `${method} ${path}`, {
         status_code: response.status,
-        error_code: data?.error?.code,
-        error_details: data?.error?.details,
+        error_code: errorBody?.error?.code,
+        error_details: errorBody?.error?.details,
         response_body: JSON.stringify(data).slice(0, 500),
       });
       throw new Error(message);
