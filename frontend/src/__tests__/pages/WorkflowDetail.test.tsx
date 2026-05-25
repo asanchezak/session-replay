@@ -74,7 +74,7 @@ describe("WorkflowDetailPage", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Run With Goal" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Run As Recorded" }));
 
-    expect(openSpy).toHaveBeenCalledWith("/runs/pending", "session-replay-run", "noopener");
+    expect(openSpy).toHaveBeenCalledWith("/runs/pending", "session-replay-run");
     expect(postMessageSpy).toHaveBeenCalledWith(
       { type: "DASHBOARD_RUN_WORKFLOW", workflowId: "wf-1" },
       "*",
