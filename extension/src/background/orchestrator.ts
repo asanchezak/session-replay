@@ -26,7 +26,9 @@ export async function clearRunTab(runId: string): Promise<void> {
     const entries = { ...((stored[RUN_TAB_KEY] as Record<string, number>) || {}) };
     delete entries[runId];
     await chrome.storage.session.set({ [RUN_TAB_KEY]: entries });
-  } catch { }
+  } catch {
+    // Non-fatal; run lifecycle can continue using in-memory state.
+  }
 }
 
 async function restoreRunTabMap(): Promise<void> {
@@ -39,7 +41,9 @@ async function restoreRunTabMap(): Promise<void> {
     if (Object.keys(entries).length > 0) {
       log.log(`[TabLifecycle] Restored ${Object.keys(entries).length} active run-tab entries from storage`);
     }
-  } catch { }
+  } catch {
+    // Best-effort restore only.
+  }
 }
 
 // Allow content scripts to read recording state directly from storage

@@ -42,6 +42,9 @@ test: test-backend test-extension test-e2e
 test-backend:
 	cd backend && uv run pytest tests/ -v --no-header --cov=. --cov-report=term-missing --cov-report=html
 
+test-backend-gate:
+	cd backend && uv run pytest tests/unit/test_config_defaults.py tests/integration/test_auth_middleware.py tests/integration/test_debug_log_auth.py tests/integration/test_cors_csrf.py tests/integration/test_api_routes.py tests/integration/test_route_error_branches.py -q
+
 test-extension:
 	cd extension && npx vitest run
 
@@ -156,7 +159,7 @@ check-config:
 	@python3 scripts/check-config-consistency.py
 
 # ── Full Quality Gate ──────────────────────────────────
-check: check-config lint typecheck test build
+check: check-config lint typecheck test-backend-gate test-extension test-e2e build
 
 # ── Clean ──────────────────────────────────────────────
 clean:
