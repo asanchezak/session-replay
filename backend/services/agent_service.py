@@ -47,6 +47,7 @@ from services.agent_models import (
 )
 from services.agent_tool_dispatcher import translate_tool_calls
 from services.ai_outcome_service import AIOutcomeService
+from services.agent_decision_queries import list_agent_decisions
 from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
 from services.healing_service import HealingService
@@ -2924,23 +2925,7 @@ function doType(el) {
         return {"accepted": True, "pending_action": action}
 
     async def get_decisions(self, run_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        uid = to_uuid(run_id)
-        result = await self.session.execute(
-            select(EventLog)
-            .where(EventLog.run_id == uid)
-            .where(EventLog.event_type == "agent_decision")
-            .order_by(EventLog.sequence_number.desc())
-            .limit(limit)
-        )
-        return [
-            {
-                "id": str(e.id),
-                "payload": e.payload,
-                "hash": e.hash,
-                "created_at": e.created_at.isoformat(),
-            }
-            for e in result.scalars().all()
-        ]
+        return await list_agent_decisions(self.session, run_id, limit)
 
     def _build_command(self, step: dict[str, Any]) -> AgentCommand:
         action_type = step.get("action_type", "click")
