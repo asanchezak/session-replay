@@ -177,3 +177,22 @@ async def test_workflow_update_status_invalid_and_transition_error(api_client, m
     )
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "INVALID_TRANSITION"
+
+
+@pytest.mark.asyncio
+async def test_workflow_replace_steps_validation_error(api_client):
+    create = await api_client.post(
+        "/v1/workflows",
+        headers=HEADERS,
+        json={"name": "replace-steps-contract"},
+    )
+    assert create.status_code == 200
+    workflow_id = create.json()["id"]
+
+    invalid = await api_client.put(
+        f"/v1/workflows/{workflow_id}/steps",
+        headers=HEADERS,
+        json=[{"intent": "missing required action_type"}],
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
