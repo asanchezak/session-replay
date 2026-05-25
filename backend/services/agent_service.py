@@ -47,6 +47,7 @@ from services.agent_models import (
 )
 from services.agent_tool_dispatcher import translate_tool_calls
 from services.ai_outcome_service import AIOutcomeService
+from services.agent_action_state import set_pending_action
 from services.agent_decision_queries import list_agent_decisions
 from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService
@@ -76,7 +77,6 @@ _run_step_recovery_cycles: dict[tuple[str, int], int] = {}
 _run_unusable_output_waits: dict[tuple[str, int], int] = {}
 _run_script_count: dict[str, int] = {}
 _run_script_failure_counts: dict[tuple[str, int, str], int] = {}
-_pending_actions: dict[str, str] = {}
 TERMINAL_RUN_STATUSES = {
     RunStatus.FAILED.value,
     RunStatus.COMPLETED.value,
@@ -2921,8 +2921,7 @@ function doType(el) {
         return None
 
     async def push_action(self, run_id: str, action: str) -> dict[str, Any]:
-        _pending_actions[run_id] = action
-        return {"accepted": True, "pending_action": action}
+        return set_pending_action(run_id, action)
 
     async def get_decisions(self, run_id: str, limit: int = 100) -> list[dict[str, Any]]:
         return await list_agent_decisions(self.session, run_id, limit)

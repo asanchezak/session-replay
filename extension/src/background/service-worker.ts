@@ -5,6 +5,7 @@ import { stepHealer } from "./healer";
 import { stepExecutor } from "./executor";
 import { registerServiceWorkerListeners } from "./message-router";
 import { commandExecutor } from "./command-executor";
+import { waitForTabLoad, waitForTabLoadBestEffort } from "./tab-load";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
 import type { BackgroundToContentMessage, DetectChallengesMessage, ChallengesDetectedResponse } from "../shared/messaging";
@@ -28,61 +29,6 @@ function sendOverlay(
     ? { type: "SHOW_OVERLAY", ...payload }
     : { type: "HIDE_OVERLAY" };
   chrome.tabs.sendMessage(tabId, msg).catch(() => {});
-}
-
-async function waitForTabLoad(tabId: number, timeoutMs: number = 15000): Promise<void> {
-  // Check if tab is already complete (avoids race with onUpdated)
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab.status === "complete") {
-      return;
-    }
-  } catch {
-    // Tab may be gone
-  }
-
-  return new Promise((resolve, reject) => {
-    function cleanup(): void {
-      chrome.tabs.onUpdated.removeListener(listener);
-      clearTimeout(timeout);
-    }
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error("Page load timed out"));
-    }, timeoutMs);
-    const listener = (_tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-      if (_tabId === tabId && changeInfo.status === "complete") {
-        cleanup();
-        resolve();
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-  });
-}
-
-async function waitForTabLoadBestEffort(
-  tabId: number,
-  contextLabel: string,
-  timeoutMs: number = 15000,
-): Promise<void> {
-  try {
-    await waitForTabLoad(tabId, timeoutMs);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      log.log(
-        `[Agent] ${contextLabel}: load wait timed out; continuing ` +
-        `(status=${tab.status}, url=${tab.url || ""})`,
-      );
-      // Give the page a brief settle window even if Chrome never emitted
-      // a definitive "complete" transition in time.
-      await new Promise((r) => setTimeout(r, 1500));
-      return;
-    } catch {
-      throw new Error(`Page load timed out (${contextLabel}): ${message}`);
-    }
-  }
 }
 
 async function reportStepFailure(runId: string, stepIndex: number, error: string, actionType?: string): Promise<void> {

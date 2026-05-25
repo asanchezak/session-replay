@@ -131,24 +131,24 @@ dev-frontend:
 
 # ── Smoke / Regression / Security / Chaos ─────────────
 test-smoke:
-	cd backend && uv run pytest tests/ -v --no-header -m "smoke" --no-header 2>/dev/null || true
-	cd extension && npx vitest run tests/test_capture.test.ts tests/test_replay_selectors.test.ts --reporter=verbose 2>/dev/null || true
+	cd backend && uv run pytest tests/ -v --no-header -m "smoke" --no-header
+	cd extension && npx vitest run tests/test_capture.test.ts tests/test_replay_selectors.test.ts --reporter=verbose
 
 test-security:
 	cd backend && uv run pytest tests/ -v -m "security"
-	cd extension && npx vitest run tests/test_security.test.ts 2>/dev/null || true
+	cd extension && npx vitest run tests/test_security.test.ts
 
 test-chaos:
 	cd extension && npx playwright test e2e/chaos.spec.ts
 
 test-performance:
 	cd backend && uv run pytest tests/ -v -m "performance"
-	cd extension && npx vitest run tests/test_performance.test.ts 2>/dev/null || true
+	cd extension && npx vitest run tests/test_performance.test.ts
 
 test-all:
 	cd backend && uv run pytest tests/ -v --no-header --cov=. --cov-report=term-missing
 	cd extension && npx vitest run
-	cd frontend && npx vitest run 2>/dev/null || true
+	cd frontend && npx vitest run
 
 # ── Config Consistency ─────────────────────────────────
 check-config:

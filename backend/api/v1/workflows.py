@@ -85,6 +85,13 @@ def _not_found(msg: str):
     )
 
 
+def _error(code: str, message: str, status: int, details: dict[str, Any] | None = None) -> JSONResponse:
+    payload: dict[str, Any] = {"error": {"code": code, "message": message}}
+    if details is not None:
+        payload["error"]["details"] = details
+    return JSONResponse(status_code=status, content=payload)
+
+
 class RecordEventInput(BaseModel):
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -121,14 +128,10 @@ async def record_workflow(
             if status == "hit":
                 return cached
             if status == "conflict":
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "error": {
-                            "code": "CONFLICT",
-                            "message": "Idempotency-Key already used for a different payload",
-                        }
-                    },
+                return _error(
+                    "CONFLICT",
+                    "Idempotency-Key already used for a different payload",
+                    status=409,
                 )
         response = await _do_record_workflow(req, db)
         if idempotency_key and not isinstance(response, JSONResponse):
@@ -576,17 +579,10 @@ async def update_workflow_status(
     if req.status == "draft":
         req.status = "active"
     if req.status not in valid_statuses:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "VALIDATION_ERROR",
-                    "message": (
-                        f"Invalid status '{req.status}'. "
-                        f"Must be one of: {', '.join(sorted(valid_statuses))}"
-                    ),
-                }
-            },
+        return _error(
+            "VALIDATION_ERROR",
+            f"Invalid status '{req.status}'. Must be one of: {', '.join(sorted(valid_statuses))}",
+            status=422,
         )
     svc = WorkflowService(db)
     try:
@@ -599,10 +595,7 @@ async def update_workflow_status(
     try:
         workflow = await svc.update_status(workflow_id, req.status)
     except StateTransitionError as e:
-        return JSONResponse(
-            status_code=409,
-            content={"error": {"code": "INVALID_TRANSITION", "message": str(e)}},
-        )
+        return _error("INVALID_TRANSITION", str(e), status=409)
 
     return {"id": str(workflow.id), "status": workflow.status, "workflow_type": workflow.workflow_type}
 
@@ -619,10 +612,7 @@ async def promote_workflow(
     except NotFoundError:
         return _not_found("Workflow not found")
     except StateTransitionError as e:
-        return JSONResponse(
-            status_code=409,
-            content={"error": {"code": "INVALID_TRANSITION", "message": str(e)}},
-        )
+        return _error("INVALID_TRANSITION", str(e), status=409)
     await db.commit()
     return {"id": str(workflow.id), "status": workflow.status, "workflow_type": workflow.workflow_type}
 
@@ -773,32 +763,17 @@ async def run_workflow(
     try:
         workflow = await wf_svc.get(workflow_id)
     except NotFoundError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}},
-        )
+        return _error("NOT_FOUND", "Workflow not found", status=404)
 
     steps = await wf_svc.get_steps(workflow_id)
     if len(steps) < 1:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "code": "EMPTY_WORKFLOW",
-                    "message": "Workflow has no steps",
-                }
-            },
-        )
+        return _error("EMPTY_WORKFLOW", "Workflow has no steps", status=400)
 
     if workflow.status != "active":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": {
-                    "code": "INVALID_STATUS",
-                    "message": f"Workflow status is '{workflow.status}', must be 'active'",
-                }
-            },
+        return _error(
+            "INVALID_STATUS",
+            f"Workflow status is '{workflow.status}', must be 'active'",
+            status=409,
         )
 
     svc = ExecutionService(db)
@@ -806,10 +781,7 @@ async def run_workflow(
         run = await svc.create_run(workflow_id=workflow_id)
         run = await svc.transition(str(run.id), RunStatus.RUNNING)
     except NotFoundError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}},
-        )
+        return _error("NOT_FOUND", "Workflow not found", status=404)
 
     return {
         "id": str(run.id),
@@ -841,14 +813,18 @@ async def run_workflow_with_parameters(
     try:
         workflow = await wf_svc.get(workflow_id)
     except NotFoundError:
-        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+        return _error("NOT_FOUND", "Workflow not found", status=404)
 
     steps = await wf_svc.get_steps(workflow_id)
     if len(steps) < 1:
-        return JSONResponse(status_code=400, content={"error": {"code": "EMPTY_WORKFLOW", "message": "Workflow has no steps"}})
+        return _error("EMPTY_WORKFLOW", "Workflow has no steps", status=400)
 
     if workflow.status != "active":
-        return JSONResponse(status_code=409, content={"error": {"code": "INVALID_STATUS", "message": f"Workflow status is '{workflow.status}', must be 'active'"}})
+        return _error(
+            "INVALID_STATUS",
+            f"Workflow status is '{workflow.status}', must be 'active'",
+            status=409,
+        )
 
     template_svc = TemplateService(db)
     plan_params = dict(req.runtime_params)
@@ -856,17 +832,13 @@ async def run_workflow_with_parameters(
         plan_params["__execution_goal__"] = req.execution_goal
     execution_plan = await template_svc.build_execution_plan(workflow_id, plan_params)
     if execution_plan.get("mode") == "confirmation_required":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": {
-                    "code": "GOAL_REQUIRED",
-                    "message": execution_plan.get("reason", "Execution goal required"),
-                    "details": {
-                        "ambiguity_notes": execution_plan.get("ambiguity_notes", []),
-                        "questions": execution_plan.get("questions", []),
-                    },
-                }
+        return _error(
+            "GOAL_REQUIRED",
+            str(execution_plan.get("reason", "Execution goal required")),
+            status=409,
+            details={
+                "ambiguity_notes": execution_plan.get("ambiguity_notes", []),
+                "questions": execution_plan.get("questions", []),
             },
         )
 
@@ -879,7 +851,7 @@ async def run_workflow_with_parameters(
         )
         run = await svc.transition(str(run.id), RunStatus.RUNNING)
     except NotFoundError:
-        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+        return _error("NOT_FOUND", "Workflow not found", status=404)
 
     return {
         "id": str(run.id),
@@ -906,7 +878,7 @@ async def analyze_workflow_blueprint(
     try:
         workflow = await wf_svc.get(workflow_id)
     except NotFoundError:
-        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workflow not found"}})
+        return _error("NOT_FOUND", "Workflow not found", status=404)
 
     steps = await wf_svc.get_steps(workflow_id)
 
