@@ -473,7 +473,7 @@ class HealResultRequest(BaseModel):
     step_index: int
     success: bool
     error: str | None = None
-    new_selectors: list[dict] | None = None
+    new_selectors: list[dict[str, Any]] | None = None
 
 
 class StepResultRequest(BaseModel):
@@ -702,9 +702,9 @@ class ExtractionResultRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     step_index: int
-    data: list[dict] = []
-    output_schema: dict | None = None
-    legacy_schema: dict | None = Field(default=None, alias="schema")
+    data: list[dict[str, Any]] = Field(default_factory=list)
+    output_schema: dict[str, Any] | None = None
+    legacy_schema: dict[str, Any] | None = Field(default=None, alias="schema")
     url: str | None = None
 
 

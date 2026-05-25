@@ -68,6 +68,16 @@ class UpdateStepRequest(BaseModel):
     selector_chain: list[SelectorSet]
 
 
+class ReplaceStepRequest(BaseModel):
+    action_type: str
+    intent: str | None = None
+    selector_chain: list[dict[str, Any]] | None = None
+    value: str | None = None
+    methods: list[dict[str, Any]] | None = None
+    success_condition: dict[str, Any] | None = None
+    checkpoint: bool = False
+
+
 def _not_found(msg: str):
     return JSONResponse(
         status_code=404,
@@ -399,7 +409,7 @@ async def get_workflow(
 
     # Include semantic analysis data if available
     analysis_data = None
-    connector_bindings: list[dict] = []
+    connector_bindings: list[dict[str, Any]] = []
     try:
         analysis_svc = SemanticAnalysisService(db)
         connector_svc = WorkflowConnectorService(db)
@@ -489,7 +499,7 @@ async def get_workflow(
 @router.put("/{workflow_id}/steps")
 async def replace_steps(
     workflow_id: str,
-    steps: list[dict[str, Any]],
+    steps: list[ReplaceStepRequest],
     db: AsyncSession = Depends(get_db),
 ):
     svc = WorkflowService(db)
@@ -498,7 +508,10 @@ async def replace_steps(
     except NotFoundError:
         return _not_found("Workflow not found")
 
-    new_steps = await svc.replace_steps(workflow_id, steps)
+    new_steps = await svc.replace_steps(
+        workflow_id,
+        [step.model_dump() for step in steps],
+    )
     return {
         "step_count": len(new_steps),
         "steps": [
