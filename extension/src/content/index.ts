@@ -291,14 +291,15 @@ export function hideReplayPanel(): void {
   shadowRoot = null;
 }
 
-// ── Full-page blocking overlay ────────────────────────────────────
+// ── Full-page status overlay (non-blocking) ──────────────────────
 
 const OVERLAY_STYLES = `
-  :host { all: initial; position: fixed; inset: 0; z-index: 2147483646; pointer-events: all; }
+  :host { all: initial; position: fixed; inset: 0; z-index: 2147483646; pointer-events: none; }
   .sr-overlay-backdrop {
     position: absolute; inset: 0;
     background: rgba(0, 0, 0, 0.55);
     display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
   }
   .sr-overlay-card {
     background: #1A1D27; color: #E8EAED;
@@ -306,6 +307,7 @@ const OVERLAY_STYLES = `
     font-size: 13px; padding: 16px 20px; border-radius: 12px;
     border: 1px solid #2D3148; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
     min-width: 280px; max-width: 380px;
+    pointer-events: none;
   }
   .sr-overlay-header {
     display: flex; align-items: center; gap: 8px;
