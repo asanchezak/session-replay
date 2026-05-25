@@ -71,10 +71,11 @@ export class StepExecutor {
     stepIndex: number,
   ): Promise<ExtractedData | null> {
     try {
-      const response = await chrome.tabs.sendMessage(tabId, {
-        type: "EXTRACT_DATA",
-        outputSchema,
-      });
+      const response = await chrome.tabs.sendMessage(
+        tabId,
+        { type: "EXTRACT_DATA", outputSchema },
+        { frameId: 0 },
+      );
       const result = response as {
         type: string;
         data: Record<string, unknown>[];

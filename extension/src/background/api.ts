@@ -89,7 +89,16 @@ export class ApiClient {
   async getWorkflow(workflowId: string) {
     return this.request<{
       id: string; name: string; status: string; target_url?: string;
-      steps: Array<{ step_index: number; action_type: string; selector_chain?: Array<{ type: string; value: string }>; value?: string; intent?: string }>;
+      steps: Array<{
+        step_index: number;
+        action_type: string;
+        selector_chain?: Array<{ type: string; value: string }>;
+        value?: string;
+        intent?: string;
+        methods?: Array<Record<string, unknown>> | null;
+        dom_context?: Record<string, unknown> | null;
+        success_condition?: Record<string, unknown> | null;
+      }>;
     }>("GET", `/workflows/${workflowId}`);
   }
 
@@ -127,7 +136,19 @@ export class ApiClient {
   }
 
   async completeRun(runId: string) {
-    return this.request("POST", `/runs/${runId}/complete`);
+    try {
+      return await this.request("POST", `/runs/${runId}/complete`);
+    } catch (err) {
+      // The backend can transition the run to 'completed' itself (e.g. goal
+      // predicate satisfied) before the extension calls /complete. Treat the
+      // resulting 409 'Cannot transition from completed to completed' as a
+      // benign no-op so the agent loop doesn't crash with "stopped unexpectedly".
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("409") && msg.includes("'completed' to 'completed'")) {
+        return { id: runId, status: "completed" } as unknown;
+      }
+      throw err;
+    }
   }
 
   async recordEvent(event: ActionEvent): Promise<RecordEventResponse> {
@@ -263,6 +284,57 @@ export class ApiClient {
     }>("POST", `/workflows/${workflowId}/analyze`, undefined, extraHeaders);
   }
 
+  async analyzePageFields(
+    workflowId: string,
+    stepIndex: number,
+    req: {
+      page_url: string;
+      page_title?: string;
+      visible_text: string;
+      dom_snippet?: string;
+    },
+  ) {
+    const { aiApiKey } = await getConfig();
+    const extraHeaders: Record<string, string> = {};
+    if (aiApiKey) extraHeaders["X-AI-API-Key"] = aiApiKey;
+    return this.request<{
+      workflow_id: string;
+      step_index: number;
+      page_url: string;
+      page_title?: string;
+      suggested_fields: Array<{ key: string; label: string; description?: string; shape?: { kind: string; item_keys: string[] | null } }>;
+    }>("POST", `/workflows/${workflowId}/steps/${stepIndex}/analyze-page`, req, extraHeaders);
+  }
+
+  async analyzePageSuggestions(req: {
+    page_url: string;
+    page_title?: string;
+    visible_text: string;
+    dom_snippet?: string;
+    page_snapshots?: Array<{
+      section_name: string;
+      page_url: string;
+      page_title?: string;
+      visible_text: string;
+      dom_snippet?: string;
+      captured_at?: string;
+    }>;
+  }) {
+    const { aiApiKey } = await getConfig();
+    const extraHeaders: Record<string, string> = {};
+    if (aiApiKey) extraHeaders["X-AI-API-Key"] = aiApiKey;
+    return this.request<{
+      page_url: string;
+      page_title?: string;
+      suggested_fields: Array<{
+        key: string;
+        label: string;
+        description?: string;
+        shape?: { kind: "scalar" | "string_list" | "record_list" | "unknown"; item_keys: string[] | null };
+      }>;
+    }>("POST", `/workflows/analyze-page-suggestions`, req, extraHeaders);
+  }
+
   async runWithParams(
     workflowId: string,
     params: Record<string, unknown>,
@@ -329,7 +401,7 @@ export class ApiClient {
 
   async aiExtract(pageContent: string, extractionSchema: Record<string, unknown>) {
     return this.request<{ data: Record<string, unknown> }>(
-      "POST", `/ai/extract`,
+      "POST", `/extract`,
       { page_content: pageContent, extraction_schema: extractionSchema },
     );
   }

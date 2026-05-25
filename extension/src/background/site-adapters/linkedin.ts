@@ -1,5 +1,37 @@
 import type { SiteAdapterHarnessResult } from "./types";
 
+export type SiteSnapshotTarget = {
+  sectionName: string;
+  pageUrl: string;
+};
+
+const LINKEDIN_DETAIL_SECTIONS = [
+  "experience",
+  "education",
+  "skills",
+  "certifications",
+  "projects",
+  "languages",
+] as const;
+
+export function getLinkedInProfileSnapshotTargets(url: string): SiteSnapshotTarget[] {
+  try {
+    const parsed = new URL(url);
+    if (!/linkedin\.com$/i.test(parsed.hostname) && !/\.linkedin\.com$/i.test(parsed.hostname)) {
+      return [];
+    }
+    const match = parsed.pathname.match(/^\/in\/([^/]+)\/?$/i);
+    if (!match) return [];
+    const basePath = `/in/${match[1]}/`;
+    return LINKEDIN_DETAIL_SECTIONS.map((sectionName) => ({
+      sectionName,
+      pageUrl: new URL(`${basePath}details/${sectionName}/`, parsed.origin).toString(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export function LINKEDIN_SITE_HARNESS(args: Record<string, unknown>): SiteAdapterHarnessResult {
   const operation = String(args?.operation || "").trim();
   const scope = String(args?.scope || "any").trim();

@@ -86,4 +86,34 @@ async def extract_data(req: ExtractRequest):
     response = await provider.generate(
         prompt, system="You are a data extraction assistant."
     )
-    return {"data": response.content}
+    # The prompt drives the model to return one JSON object whose values are
+    # per-field shaped (scalar / string_list / record_list). Parse it but do
+    # NOT collapse arrays — the structured nested shape is the whole point.
+    raw = (response.content or "").strip()
+    if raw.startswith("```"):
+        # Strip accidental markdown code fences; the prompt forbids them but
+        # some models still wrap output, especially when the page content
+        # contains backticks.
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    parsed: dict[str, object] = {}
+    try:
+        decoded = json.loads(raw)
+        if isinstance(decoded, list):
+            # Legacy fallback: if the model returned a top-level array, treat
+            # it as the value of the first requested field if there is one.
+            field_keys = list(
+                (req.extraction_schema.get("properties") or {}).keys()
+                if isinstance(req.extraction_schema.get("properties"), dict)
+                else req.extraction_schema.keys()
+            )
+            decoded = {field_keys[0]: decoded} if field_keys else {}
+        if isinstance(decoded, dict):
+            # Strip top-level nulls only; never recurse into records.
+            parsed = {k: v for k, v in decoded.items() if v is not None}
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("AI extract returned non-JSON content: %r", raw[:200])
+    return {"data": parsed}

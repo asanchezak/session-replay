@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any, Literal
 
@@ -7,6 +8,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai.client import get_ai_provider
+from ai.prompts import (
+    PAGE_FIELD_ANALYSIS_SYSTEM,
+    build_page_field_analysis_prompt,
+)
 from core.config import settings
 from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
@@ -76,6 +81,67 @@ class ReplaceStepRequest(BaseModel):
     methods: list[dict[str, Any]] | None = None
     success_condition: dict[str, Any] | None = None
     checkpoint: bool = False
+
+
+class AnalyzePageStepRequest(BaseModel):
+    page_url: str
+    page_title: str | None = None
+    visible_text: str = ""
+    dom_snippet: str | None = None
+    page_snapshots: list[dict[str, Any]] | None = None
+
+
+PROFILE_SECTION_SUGGESTIONS: list[tuple[tuple[str, ...], str, str, str]] = [
+    (("about",), "about", "About", "Profile summary section"),
+    (("experience",), "experience", "Experience", "Professional experience section"),
+    (("education",), "education", "Education", "Education history section"),
+    (("skills", "top skills"), "skills", "Skills", "Skills section"),
+    (
+        ("certifications", "licenses & certifications", "licences & certifications"),
+        "certifications",
+        "Certifications",
+        "Licenses and certifications section",
+    ),
+    (("projects",), "projects", "Projects", "Projects section"),
+    (("languages",), "languages", "Languages", "Languages section"),
+]
+
+
+def _infer_visible_profile_sections(visible_text: str) -> list[dict[str, str]]:
+    haystack = f" {visible_text.lower()} "
+    suggestions: list[dict[str, str]] = []
+    for needles, key, label, description in PROFILE_SECTION_SUGGESTIONS:
+        if any(f" {needle.lower()} " in haystack for needle in needles):
+            suggestions.append({
+                "key": key,
+                "label": label,
+                "description": description,
+            })
+    return suggestions
+
+
+def _merge_page_snapshot_content(
+    visible_text: str,
+    dom_snippet: str | None,
+    page_snapshots: list[dict[str, Any]] | None,
+) -> tuple[str, str | None]:
+    if not page_snapshots:
+        return visible_text, dom_snippet
+    visible_parts: list[str] = []
+    dom_parts: list[str] = []
+    for entry in page_snapshots:
+        if not isinstance(entry, dict):
+            continue
+        section_name = str(entry.get("section_name") or "page").strip() or "page"
+        entry_text = str(entry.get("visible_text") or "").strip()
+        entry_dom = str(entry.get("dom_snippet") or "").strip()
+        if entry_text:
+            visible_parts.append(f"## Section: {section_name}\n{entry_text[:12_000]}")
+        if entry_dom:
+            dom_parts.append(f"## Section: {section_name}\n{entry_dom[:12_000]}")
+    merged_visible = "\n\n".join(visible_parts) if visible_parts else visible_text
+    merged_dom = "\n\n".join(dom_parts) if dom_parts else dom_snippet
+    return merged_visible, merged_dom
 
 
 def _not_found(msg: str):
@@ -204,14 +270,23 @@ async def _do_record_workflow(
 
         methods = payload.get("methods")
         if methods and isinstance(methods, list):
-            methods = [
-                {
-                    "action_type": m["action_type"],
-                    "selector_chain": m.get("selector_chain", []),
-                    "value": m.get("value"),
-                }
-                for m in methods if isinstance(m, dict)
-            ]
+            normalized_methods: list[dict[str, Any]] = []
+            for m in methods:
+                if not isinstance(m, dict):
+                    continue
+                if "action_type" in m:
+                    normalized_methods.append({
+                        "action_type": m["action_type"],
+                        "selector_chain": m.get("selector_chain", []),
+                        "value": m.get("value"),
+                    })
+                else:
+                    # Preserve non-action-method entries verbatim (e.g.
+                    # extract-step shape metadata: {kind:"extract_shapes",
+                    # shapes:[...]}). These are read by the extension at
+                    # run-time and the dashboard's edit-fields modal.
+                    normalized_methods.append(m)
+            methods = normalized_methods
 
         success_condition = payload.get("success_condition")
         if not isinstance(success_condition, dict):
@@ -491,11 +566,130 @@ async def get_workflow(
                 "value": s.value,
                 "methods": s.methods,
                 "success_condition": s.success_condition,
+                "dom_context": s.dom_context,
             }
             for s in steps
         ],
         "analysis": analysis_data,
         "connector_bindings": connector_bindings,
+    }
+
+
+async def _compute_field_suggestions(
+    req: AnalyzePageStepRequest,
+    ai_api_key: str | None,
+) -> list[dict[str, object]] | JSONResponse:
+    """Shared field-suggestion engine used by both the live-recording
+    endpoint and the legacy per-step analyze-page route. Returns either
+    a list of suggested-field dicts or a JSONResponse describing an
+    error condition the caller should propagate as-is.
+    """
+    from ai.extraction_shapes import get_field_shape, shape_to_dict
+
+    merged_visible_text, merged_dom_snippet = _merge_page_snapshot_content(
+        req.visible_text,
+        req.dom_snippet,
+        req.page_snapshots,
+    )
+
+    if not merged_visible_text.strip() and not (merged_dom_snippet or "").strip():
+        return _error("EMPTY_PAGE_CONTEXT", "Page analysis requires captured page content", status=400)
+
+    effective_key = ai_api_key or settings.ai_api_key
+    if not effective_key or settings.ai_provider == "mock":
+        return _error("AI_UNAVAILABLE", "AI page analysis is not configured", status=503)
+
+    provider = get_ai_provider(effective_key)
+    prompt = build_page_field_analysis_prompt(
+        page_url=req.page_url,
+        page_title=req.page_title,
+        visible_text=merged_visible_text,
+        dom_snippet=merged_dom_snippet,
+    )
+
+    try:
+        response = await provider.generate(prompt, system=PAGE_FIELD_ANALYSIS_SYSTEM)
+        result = json.loads(response.content)
+    except Exception as exc:
+        logger.warning("Page field analysis failed for url=%s: %s", req.page_url, exc)
+        return _error("ANALYSIS_FAILED", "AI page analysis failed", status=502)
+
+    raw_fields = result.get("suggested_fields", [])
+    inferred_fields = _infer_visible_profile_sections(merged_visible_text)
+    suggested_fields: list[dict[str, object]] = []
+    seen_keys: set[str] = set()
+    for raw in [*inferred_fields, *raw_fields]:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip().lower()
+        label = str(raw.get("label") or "").strip()
+        description = str(raw.get("description") or "").strip()
+        if not key or not label or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        shape = shape_to_dict(get_field_shape(key))
+        suggested_fields.append({
+            "key": key,
+            "label": label,
+            "description": description,
+            "shape": shape,
+        })
+    return suggested_fields
+
+
+@router.post("/analyze-page-suggestions")
+async def analyze_page_suggestions(
+    req: AnalyzePageStepRequest,
+    ai_api_key: str | None = Header(None, alias="X-AI-API-Key"),
+):
+    """Context-free field suggestions for the side-panel recording flow.
+
+    Takes a page snapshot (URL, title, visible_text, dom_snippet) and
+    returns ``suggested_fields`` with per-field ``shape`` hints. No
+    workflow context required — used during recording before any step
+    exists, and from the dashboard's "Edit fields" modal with a saved
+    snapshot.
+    """
+    result = await _compute_field_suggestions(req, ai_api_key)
+    if isinstance(result, JSONResponse):
+        return result
+    return {
+        "page_url": req.page_url,
+        "page_title": req.page_title,
+        "suggested_fields": result,
+    }
+
+
+@router.post("/{workflow_id}/steps/{step_index}/analyze-page")
+async def analyze_page_step(
+    workflow_id: str,
+    step_index: int,
+    req: AnalyzePageStepRequest,
+    db: AsyncSession = Depends(get_db),
+    ai_api_key: str | None = Header(None, alias="X-AI-API-Key"),
+):
+    svc = WorkflowService(db)
+    try:
+        await svc.get(workflow_id)
+    except NotFoundError:
+        return _not_found("Workflow not found")
+
+    steps = await svc.get_steps(workflow_id)
+    step = next((candidate for candidate in steps if candidate.step_index == step_index), None)
+    if step is None:
+        return _error("NOT_FOUND", "Workflow step not found", status=404)
+    if step.action_type != "navigate":
+        return _error("INVALID_STEP", "Only navigate steps can be analyzed", status=400)
+
+    result = await _compute_field_suggestions(req, ai_api_key)
+    if isinstance(result, JSONResponse):
+        return result
+    return {
+        "workflow_id": workflow_id,
+        "step_index": step_index,
+        "page_url": req.page_url,
+        "page_title": req.page_title,
+        "suggested_fields": result,
     }
 
 
@@ -647,10 +841,13 @@ async def update_workflow(
 
 
 @router.delete("")
-async def delete_all_workflows(db: AsyncSession = Depends(get_db)):
-    logger.info("Deleting all workflows")
+async def delete_all_workflows(
+    type: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    logger.info("Deleting workflows type=%s", type)
     svc = WorkflowService(db)
-    deleted = await svc.delete_all()
+    deleted = await svc.delete_all(workflow_type=type)
     logger.info("delete_all_workflows complete: %s", deleted)
     return {"deleted": deleted}
 

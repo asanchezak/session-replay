@@ -88,6 +88,16 @@ export interface CapturePageContextMessage {
   protocol_version?: number;
 }
 
+export interface PrepareForCaptureMessage {
+  type: "PREPARE_FOR_CAPTURE";
+  protocol_version?: number;
+}
+
+export interface PrepareForCaptureResponse {
+  type: "PREPARE_FOR_CAPTURE_RESULT";
+  ok: boolean;
+}
+
 export interface PageContextResponse {
   type: "PAGE_CONTEXT_RESULT";
   url: string;
@@ -124,6 +134,7 @@ export type ExtensionMessage =
   | DetectChallengesMessage
   | ExtractDataMessage
   | CapturePageContextMessage
+  | PrepareForCaptureMessage
   | ExecuteAgentCommandMessage;
 
 export type ExtensionResponse =
@@ -133,4 +144,5 @@ export type ExtensionResponse =
   | ChallengesDetectedResponse
   | ExtractDataResponse
   | PageContextResponse
+  | PrepareForCaptureResponse
   | AgentCommandResultResponse;

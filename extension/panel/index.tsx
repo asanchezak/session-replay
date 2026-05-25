@@ -100,6 +100,196 @@ function IdleView() {
   );
 }
 
+type SuggestedField = {
+  key: string;
+  label: string;
+  description?: string;
+  shape?: { kind: "scalar" | "string_list" | "record_list" | "unknown"; item_keys: string[] | null };
+};
+
+type AnalyzeState =
+  | { type: "idle" }
+  | { type: "loading" }
+  | { type: "suggested"; result: { page_url: string; page_title?: string; visible_text: string; dom_snippet: string; page_snapshots: Array<{ section_name: string; page_url: string; page_title?: string; visible_text: string; dom_snippet: string; captured_at: string }>; suggested_fields: SuggestedField[] } }
+  | { type: "error"; code: string; message: string }
+  | { type: "applied"; count: number };
+
+function ShapeBadge({ kind }: { kind?: string }) {
+  if (kind === "record_list") {
+    return (
+      <span style={{
+        background: `${colors.accent}33`, color: colors.accent,
+        fontSize: 9, fontWeight: 600, padding: "1px 6px",
+        borderRadius: 3, textTransform: "uppercase", letterSpacing: 0.5,
+      }}>multiple</span>
+    );
+  }
+  if (kind === "string_list") {
+    return (
+      <span style={{
+        background: "#2A2E3D", color: colors.muted,
+        fontSize: 9, fontWeight: 600, padding: "1px 6px",
+        borderRadius: 3, textTransform: "uppercase", letterSpacing: 0.5,
+      }}>list</span>
+    );
+  }
+  return null;
+}
+
+function AnalyzePageSection() {
+  const [analyze, setAnalyze] = useState<AnalyzeState>({ type: "idle" });
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+
+  const handleAnalyze = async () => {
+    setAnalyze({ type: "loading" });
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const response = await chrome.runtime.sendMessage({
+        type: "ANALYZE_LIVE_PAGE",
+        tabId: tab?.id,
+      }) as {
+        type: string;
+        analysis?: AnalyzeState extends infer A ? A extends { result: infer R } ? R : never : never;
+        error?: string;
+        code?: string;
+      };
+      if (response?.type === "ANALYZE_LIVE_PAGE_RESULT" && response.analysis) {
+        setAnalyze({ type: "suggested", result: response.analysis });
+        setSelectedKeys(response.analysis.suggested_fields.map((f) => f.key));
+      } else {
+        setAnalyze({
+          type: "error",
+          code: response?.code || "ANALYSIS_FAILED",
+          message: response?.error || "Page analysis failed.",
+        });
+      }
+    } catch (err) {
+      setAnalyze({ type: "error", code: "ANALYSIS_FAILED", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const handleApply = async () => {
+    if (analyze.type !== "suggested") return;
+    const picks = analyze.result.suggested_fields.filter((f) => selectedKeys.includes(f.key));
+    if (picks.length === 0) return;
+    const fields = picks.map((f) => f.label).join(", ");
+    const shapes = picks.map((f) => ({
+      key: f.key,
+      label: f.label,
+      kind: f.shape?.kind || "unknown",
+      item_keys: f.shape?.item_keys || null,
+    }));
+    await chrome.runtime.sendMessage({
+      type: "ADD_EXTRACT_STEP",
+      fields,
+      shapes,
+      pageUrl: analyze.result.page_url,
+      pageTitle: analyze.result.page_title || "",
+      pageSnapshot: {
+        page_url: analyze.result.page_url,
+        page_title: analyze.result.page_title || "",
+        visible_text: analyze.result.visible_text,
+        dom_snippet: analyze.result.dom_snippet,
+        captured_at: new Date().toISOString(),
+      },
+      pageSnapshots: analyze.result.page_snapshots,
+      timestamp: new Date().toISOString(),
+    });
+    setAnalyze({ type: "applied", count: picks.length });
+    setSelectedKeys([]);
+  };
+
+  return (
+    <Section>
+      <div style={{ fontSize: 12, fontWeight: 600, color: colors.text, marginBottom: 8 }}>
+        Analyze this page
+      </div>
+      {analyze.type === "idle" && (
+        <>
+          <p style={{ color: colors.muted, fontSize: 11, margin: "0 0 8px" }}>
+            Mark which fields to extract from the page you're currently on. The page is captured now and saved with the step so you can edit fields later without revisiting.
+          </p>
+          <button style={btn()} onClick={handleAnalyze}>Analyze this page</button>
+        </>
+      )}
+      {analyze.type === "loading" && (
+        <p style={{ color: colors.muted, fontSize: 12, margin: 0 }}>Analyzing the active tab…</p>
+      )}
+      {analyze.type === "suggested" && (
+        <>
+          <p style={{ color: colors.muted, fontSize: 11, margin: "0 0 8px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {analyze.result.page_title || analyze.result.page_url}
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 240, overflowY: "auto", marginBottom: 8 }}>
+            {analyze.result.suggested_fields.map((field) => {
+              const checked = selectedKeys.includes(field.key);
+              return (
+                <label key={field.key} style={{
+                  display: "flex", alignItems: "flex-start", gap: 8,
+                  padding: 8, border: `1px solid ${colors.border}`,
+                  borderRadius: 6, cursor: "pointer", background: "#15182040",
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      setSelectedKeys((prev) =>
+                        e.target.checked
+                          ? [...prev, field.key]
+                          : prev.filter((k) => k !== field.key),
+                      );
+                    }}
+                    style={{ marginTop: 2 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: colors.text }}>
+                      <span style={{ fontWeight: 500 }}>{field.label}</span>
+                      <ShapeBadge kind={field.shape?.kind} />
+                    </div>
+                    {field.description && (
+                      <div style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>{field.description}</div>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+            {analyze.result.suggested_fields.length === 0 && (
+              <p style={{ color: colors.muted, fontSize: 12 }}>No fields suggested for this page.</p>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              style={ghostBtn()}
+              onClick={() => { setAnalyze({ type: "idle" }); setSelectedKeys([]); }}
+            >Cancel</button>
+            <button
+              style={btn({ opacity: selectedKeys.length === 0 ? 0.5 : 1 })}
+              disabled={selectedKeys.length === 0}
+              onClick={handleApply}
+            >Apply ({selectedKeys.length})</button>
+          </div>
+        </>
+      )}
+      {analyze.type === "error" && (
+        <>
+          <p style={{ color: colors.red, fontSize: 12, margin: "0 0 8px" }}>{analyze.message}</p>
+          <button style={ghostBtn(colors.blue)} onClick={handleAnalyze}>Try again</button>
+        </>
+      )}
+      {analyze.type === "applied" && (
+        <>
+          <p style={{ color: colors.green, fontSize: 12, margin: "0 0 8px" }}>
+            ✓ {analyze.count} field{analyze.count === 1 ? "" : "s"} added to this recording.
+          </p>
+          <button style={ghostBtn(colors.blue)} onClick={() => setAnalyze({ type: "idle" })}>
+            Analyze another page
+          </button>
+        </>
+      )}
+    </Section>
+  );
+}
+
 function RecordingView({ stepCount }: { stepCount: number }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -111,6 +301,7 @@ function RecordingView({ stepCount }: { stepCount: number }) {
           </span>
         </div>
       </Section>
+      <AnalyzePageSection />
       <button style={btn({ background: "#242836", border: `1px solid ${colors.border}` })}
         onClick={() => send({ type: "STOP_RECORDING" })}>
         ■ Stop Recording

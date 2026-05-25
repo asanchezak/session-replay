@@ -23,8 +23,10 @@ interface Step {
   intent?: string;
   selector_chain?: Array<{ type: string; value: string }>;
   value?: string;
+  methods?: Array<Record<string, unknown>> | null;
   success_condition?: { type?: string; value?: string } | null;
 }
+
 
 interface AnalysisPhase {
   phase_index: number;
@@ -115,6 +117,8 @@ export default function WorkflowDetailPage() {
   const [nameInput, setNameInput] = useState("");
   const [promoting, setPromoting] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  // Edit-fields modal state: which extract step is being edited (by step_index).
+  const [editingExtractStep, setEditingExtractStep] = useState<Step | null>(null);
   const [bindingDrafts, setBindingDrafts] = useState<Record<string, ConnectorBindingDraft>>({});
   const [bindingPreview, setBindingPreview] = useState<Record<string, BindingPreview>>({});
   const [bindingLoading, setBindingLoading] = useState<Record<string, boolean>>({});
@@ -333,6 +337,28 @@ export default function WorkflowDetailPage() {
     setRunning(false);
   };
 
+  const applyEditedExtractStep = async (
+    targetStepIndex: number,
+    nextValue: string,
+    nextShapes: Array<{ key: string; label: string; kind: string; item_keys: string[] | null }>,
+  ) => {
+    if (!workflowId || !data) return;
+    const nextSteps = data.steps.map((step) => ({
+      action_type: step.action_type,
+      intent: step.intent ?? null,
+      selector_chain: step.selector_chain ?? null,
+      value: step.step_index === targetStepIndex ? nextValue : (step.value ?? null),
+      methods:
+        step.step_index === targetStepIndex
+          ? ([{ kind: "extract_shapes", shapes: nextShapes }] as Array<Record<string, unknown>>)
+          : (step.methods ?? null),
+      success_condition: step.success_condition ?? null,
+      checkpoint: false,
+    }));
+    await request("PUT", `/workflows/${workflowId}/steps`, nextSteps);
+    await fetchData("GET", `/workflows/${workflowId}`);
+  };
+
   const handleRun = async () => {
     if (!workflowId) return;
     setRunError(null);
@@ -534,6 +560,19 @@ export default function WorkflowDetailPage() {
   const activeBindingPreviews = Object.values(bindingPreview).filter(
     (p) => (analysis?.parameters || []).some((param) => param.key === p.parameter_key),
   );
+
+  const renderEditExtractButton = (step: Step) => {
+    if (step.action_type !== "extract") return null;
+    return (
+      <button
+        type="button"
+        onClick={() => setEditingExtractStep(step)}
+        className="rounded-md border border-border px-2 py-0.5 text-[11px] text-text-secondary hover:text-text-primary hover:border-accent"
+      >
+        Edit fields
+      </button>
+    );
+  };
 
   return (
     <div>
@@ -1034,6 +1073,7 @@ export default function WorkflowDetailPage() {
                   )}
                   {step.value && step.action_type !== "extract" && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
                   {step.intent && <span className="text-text-secondary text-xs italic">{step.intent}</span>}
+                  {renderEditExtractButton(step)}
                 </div>
               ))}
             </div>
@@ -1081,6 +1121,7 @@ export default function WorkflowDetailPage() {
                   )}
                   {step.value && step.action_type !== "extract" && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
                   {step.intent && <span className="text-text-secondary text-xs italic">{step.intent}</span>}
+                  {renderEditExtractButton(step)}
                 </div>
               ))}
             </div>
@@ -1141,6 +1182,307 @@ export default function WorkflowDetailPage() {
           skipLabel="Run As Recorded"
         />
       )}
+
+      {editingExtractStep && (
+        <EditExtractFieldsModal
+          step={editingExtractStep}
+          onClose={() => setEditingExtractStep(null)}
+          onSave={async (nextValue, nextShapes) => {
+            await applyEditedExtractStep(editingExtractStep.step_index, nextValue, nextShapes);
+            setEditingExtractStep(null);
+          }}
+          apiBase={(import.meta.env.VITE_API_BASE as string | undefined) || ""}
+          apiKey={(import.meta.env.VITE_API_KEY as string | undefined) || ""}
+        />
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Edit extract fields modal
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface EditableShape {
+  key: string;
+  label: string;
+  kind: "scalar" | "string_list" | "record_list" | "unknown";
+  item_keys: string[] | null;
+}
+
+interface ExtractStepView {
+  step_index: number;
+  value?: string;
+  methods?: Array<Record<string, unknown>> | null;
+  dom_context?: Record<string, unknown> | null;
+}
+
+function readShapesFromStep(step: ExtractStepView): EditableShape[] {
+  const labels = (step.value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const methodsArray = Array.isArray(step.methods) ? step.methods : [];
+  const shapeEntry = methodsArray.find(
+    (m) => m && typeof m === "object" && (m as Record<string, unknown>).kind === "extract_shapes",
+  ) as { shapes?: EditableShape[] } | undefined;
+  const stored = Array.isArray(shapeEntry?.shapes) ? shapeEntry!.shapes! : [];
+  if (stored.length > 0) return stored;
+  // Legacy steps with no shape metadata: synthesize unknown-shape entries from labels.
+  return labels.map((label) => ({
+    key: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""),
+    label,
+    kind: "unknown",
+    item_keys: null,
+  }));
+}
+
+function EditExtractFieldsModal({
+  step,
+  onClose,
+  onSave,
+  apiBase,
+  apiKey,
+}: {
+  step: ExtractStepView;
+  onClose: () => void;
+  onSave: (value: string, shapes: EditableShape[]) => Promise<void>;
+  apiBase: string;
+  apiKey: string;
+}) {
+  const [shapes, setShapes] = useState<EditableShape[]>(() => readShapesFromStep(step));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [newKind, setNewKind] = useState<EditableShape["kind"]>("scalar");
+
+  const snapshots = (step.dom_context && (step.dom_context as Record<string, unknown>)["page_snapshots"]) as
+    | Array<{
+        section_name?: string;
+        page_url?: string;
+        page_title?: string;
+        visible_text?: string;
+        dom_snippet?: string;
+        captured_at?: string;
+      }>
+    | undefined;
+  const legacySnapshot = (step.dom_context && (step.dom_context as Record<string, unknown>)["page_snapshot"]) as
+    | {
+        page_url?: string;
+        page_title?: string;
+        visible_text?: string;
+        dom_snippet?: string;
+        captured_at?: string;
+      }
+    | undefined;
+  const snapshot = (Array.isArray(snapshots) && snapshots.length > 0 ? snapshots[0] : legacySnapshot);
+  const hasSnapshot = Boolean(
+    snapshot && (snapshot.visible_text || snapshot.dom_snippet),
+  );
+
+  const pageSnapshots = Array.isArray(snapshots) && snapshots.length > 0 ? snapshots : (snapshot ? [snapshot] : []);
+
+  const removeAt = (idx: number) => setShapes((prev) => prev.filter((_, i) => i !== idx));
+  const addManual = () => {
+    if (!newLabel.trim()) return;
+    const key = newLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    if (shapes.some((s) => s.key === key)) {
+      setError(`A field named "${newLabel}" already exists.`);
+      return;
+    }
+    setShapes((prev) => [...prev, { key, label: newLabel.trim(), kind: newKind, item_keys: null }]);
+    setNewLabel("");
+    setNewKind("scalar");
+    setError(null);
+  };
+
+  const handleResuggest = async () => {
+    if (!snapshot) return;
+    setSuggesting(true);
+    setError(null);
+    try {
+      const base = apiBase || `${window.location.origin.replace(/:\d+$/, ":8081")}/v1`;
+      const resp = await fetch(`${base}/workflows/analyze-page-suggestions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "X-API-Key": apiKey } : {}),
+        },
+        body: JSON.stringify({
+          page_url: snapshot.page_url || "",
+          page_title: snapshot.page_title || "",
+          visible_text: snapshot.visible_text || "",
+          dom_snippet: snapshot.dom_snippet || "",
+          page_snapshots: pageSnapshots,
+        }),
+      });
+      if (!resp.ok) {
+        setError(`Re-analyze failed (${resp.status})`);
+        return;
+      }
+      const body = await resp.json() as {
+        suggested_fields: Array<{
+          key: string;
+          label: string;
+          shape?: { kind: EditableShape["kind"]; item_keys: string[] | null };
+        }>;
+      };
+      const have = new Set(shapes.map((s) => s.key));
+      const additions: EditableShape[] = (body.suggested_fields || [])
+        .filter((f) => !have.has(f.key))
+        .map((f) => ({
+          key: f.key,
+          label: f.label,
+          kind: f.shape?.kind || "unknown",
+          item_keys: f.shape?.item_keys || null,
+        }));
+      if (additions.length === 0) {
+        setError("No new fields suggested. The current list already covers what the saved page contains.");
+      } else {
+        setShapes((prev) => [...prev, ...additions]);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Re-analyze failed.");
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const value = shapes.map((s) => s.label).join(", ");
+      await onSave(value, shapes);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-2xl rounded-xl border border-border bg-bg-card p-6 shadow-xl">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary">Edit extraction fields</h2>
+            <p className="mt-1 text-xs text-text-secondary">
+              Step {step.step_index + 1}
+              {snapshot?.page_url && <> · {snapshot.page_title || snapshot.page_url}</>}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-sm text-text-secondary hover:text-text-primary"
+          >
+            Close
+          </button>
+        </div>
+
+        {error && (
+          <Banner type="error" title="Heads up">
+            <p>{error}</p>
+          </Banner>
+        )}
+
+        <div className="space-y-3 mt-3">
+          {shapes.length === 0 ? (
+            <p className="text-sm text-text-secondary">No fields yet. Add some below.</p>
+          ) : (
+            <ul className="divide-y divide-border rounded-lg border border-border">
+              {shapes.map((s, idx) => (
+                <li key={`${s.key}-${idx}`} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-text-primary">{s.label}</span>
+                    {s.kind === "record_list" && (
+                      <span className="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent">multiple</span>
+                    )}
+                    {s.kind === "string_list" && (
+                      <span className="rounded bg-bg-elevated px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">list</span>
+                    )}
+                    {s.kind === "unknown" && (
+                      <span className="rounded bg-bg-elevated px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">auto</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeAt(idx)}
+                    className="text-xs text-text-secondary hover:text-error"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="rounded-lg border border-border bg-bg-elevated p-3 space-y-2">
+            <p className="text-xs text-text-secondary">Add a field manually</p>
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={newLabel}
+                onChange={(e) => setNewLabel(e.target.value)}
+                placeholder="e.g. Languages"
+                className="flex-1 min-w-[160px] rounded border border-border bg-bg-card px-2 py-1 text-sm text-text-primary"
+              />
+              <select
+                value={newKind}
+                onChange={(e) => setNewKind(e.target.value as EditableShape["kind"])}
+                className="rounded border border-border bg-bg-card px-2 py-1 text-sm text-text-primary"
+              >
+                <option value="scalar">Text</option>
+                <option value="string_list">List of strings</option>
+                <option value="record_list">List of records</option>
+                <option value="unknown">Auto (let AI choose)</option>
+              </select>
+              <button
+                type="button"
+                onClick={addManual}
+                className="rounded border border-border px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:border-accent"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          {hasSnapshot ? (
+            <button
+              type="button"
+              onClick={handleResuggest}
+              disabled={suggesting}
+              className="w-full rounded border border-border px-3 py-2 text-sm text-text-secondary hover:text-text-primary hover:border-accent disabled:opacity-50"
+            >
+              {suggesting ? "Re-analyzing saved page…" : "Re-suggest from saved page"}
+            </button>
+          ) : (
+            <p className="text-xs text-text-secondary italic">
+              No saved page snapshot for this step — re-suggest unavailable. Add fields manually, or
+              re-record the workflow with the Analyze-this-page panel during recording.
+            </p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-3 pt-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-2 text-sm text-text-secondary hover:text-text-primary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="rounded-md bg-accent px-3 py-2 text-sm text-white hover:bg-accent-hover disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save fields"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

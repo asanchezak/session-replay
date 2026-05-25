@@ -1,3 +1,5 @@
+import json
+
 SELECTOR_HEAL_SYSTEM = """You are a DOM analysis assistant. Given:
 1. A snippet of the current page DOM around where the target element should be
 2. The accessibility tree snippet for the same region
@@ -26,11 +28,36 @@ Classify as one of:
 
 Return JSON: {"classification": str, "confidence": float, "reason": str}"""
 
-EXTRACT_SYSTEM = """You are a data extraction assistant. Given page content and a schema, extract structured data.
+EXTRACT_SYSTEM = """You are a data extraction assistant. Given page content and a per-field shape, extract structured data.
 
-Return a JSON array of objects matching the requested schema.
-If no data is found, return an empty array.
-Only return valid JSON."""
+Each field tells you whether it should be:
+- a single string ("scalar")
+- an array of strings ("string_list")
+- an array of objects with named keys ("record_list")
+- your choice between those three ("unknown") — pick the most natural shape for the data on the page
+
+Return ONLY a valid JSON object whose keys exactly match the requested fields.
+Use null for any field that cannot be found on the page.
+Do not include markdown, code fences, or commentary."""
+
+PAGE_FIELD_ANALYSIS_SYSTEM = """You analyze a single page and suggest the most useful fields a workflow could extract from it.
+
+Return ONLY valid JSON in this shape:
+{
+  "suggested_fields": [
+    {"key": "about", "label": "About", "description": "Profile summary section"}
+  ]
+}
+
+Rules:
+- Suggest only fields that are clearly present on the page.
+- Prefer top-level business fields or sections, not low-value chrome like navigation, footer, or account controls.
+- For profile or resume-style pages, prioritize visible section headings such as About, Experience, Education, Skills, Certifications, Projects, and Languages over generic metadata.
+- Keep keys short, stable, and snake_case.
+- Keep labels short and user-facing.
+- Do not include duplicates.
+- If nothing useful is present, return {"suggested_fields": []}.
+"""
 
 
 def build_heal_prompt(
@@ -61,19 +88,132 @@ def build_classify_prompt(page_text: str, visible_elements: list[str]) -> str:
     )
 
 
-def build_extract_prompt(page_content: str, extraction_schema: dict) -> str:
-    fields = list(extraction_schema.keys())
-    field_list = ", ".join(f'"{f}"' for f in fields)
-    return (
-        f"Extract the following fields from the page content below and return a single JSON object.\n"
-        f"Fields: {field_list}\n\n"
-        f"Rules:\n"
-        f"- Return ONLY a valid JSON object, no explanation or markdown.\n"
-        f"- Keys must exactly match the field names listed above.\n"
-        f"- Use null for any field that cannot be found on the page.\n"
-        f"- Values must be plain strings (no nested objects).\n\n"
-        f"## Page content:\n{page_content[:5000]}"
+def _build_extract_page_content(
+    page_content: str | list[dict[str, str | None]],
+    per_section_limit: int = 12_000,
+) -> str:
+    if isinstance(page_content, str):
+        return page_content
+    parts: list[str] = []
+    for entry in page_content:
+        if not isinstance(entry, dict):
+            continue
+        section_name = str(entry.get("section_name") or entry.get("name") or "page")
+        text = str(entry.get("text") or entry.get("visible_text") or entry.get("dom_snippet") or "").strip()
+        if not text:
+            continue
+        parts.append(f"## Section: {section_name}\n{text[:per_section_limit]}")
+    return "\n\n".join(parts)
+
+
+def build_extract_prompt(page_content: str | list[dict[str, str | None]], extraction_schema: dict) -> str:
+    """Build an extraction prompt that drives a per-field shape.
+
+    The incoming ``extraction_schema`` may take two forms:
+
+    1. A JSON-schema-ish wrapper ``{"properties": {field_key: {...}}}``.
+       This is what the extension sends today. Per-field shape hints can be
+       attached via ``properties[field_key]["shape"] = {"kind": "...",
+       "item_keys": [...]}``; when absent we fall back to the registry in
+       :mod:`ai.extraction_shapes`.
+    2. A flat ``{field_key: spec}`` mapping (legacy callers).
+
+    The output prompt instructs the model field-by-field. ``record_list``
+    fields lock in the exact item keys; ``unknown`` lets the model choose.
+    """
+    from ai.extraction_shapes import (  # local import to avoid cycle on cold start
+        FieldShape,
+        get_field_shape,
     )
+
+    if (
+        isinstance(extraction_schema.get("properties"), dict)
+        and extraction_schema["properties"]
+    ):
+        properties = extraction_schema["properties"]
+    else:
+        properties = extraction_schema
+
+    if not isinstance(properties, dict):
+        properties = {}
+
+    field_keys = [str(k) for k in properties.keys()]
+
+    field_lines: list[str] = []
+    for key in field_keys:
+        spec = properties.get(key)
+        shape: FieldShape | None = None
+        if isinstance(spec, dict) and isinstance(spec.get("shape"), dict):
+            kind_hint = spec["shape"].get("kind")
+            keys_hint = spec["shape"].get("item_keys")
+            if isinstance(kind_hint, str) and kind_hint in {
+                "scalar",
+                "string_list",
+                "record_list",
+                "unknown",
+            }:
+                shape = FieldShape(
+                    kind=kind_hint,  # type: ignore[arg-type]
+                    item_keys=tuple(keys_hint) if isinstance(keys_hint, list) else None,
+                )
+        if shape is None:
+            shape = get_field_shape(key)
+
+        if shape.kind == "scalar":
+            field_lines.append(
+                f'- "{key}": a single string. Use null if not present.'
+            )
+        elif shape.kind == "string_list":
+            field_lines.append(
+                f'- "{key}": a JSON array of strings (e.g. ["item one", "item two"]). '
+                f"Use [] if not present."
+            )
+        elif shape.kind == "record_list":
+            keys_str = ", ".join(shape.item_keys or ())
+            field_lines.append(
+                f'- "{key}": a JSON array of objects. Each object should have these keys '
+                f"(any may be null if missing): {keys_str}. Use [] if not present."
+            )
+        else:  # unknown
+            field_lines.append(
+                f'- "{key}": pick the most natural shape for this data — a single string, '
+                f"an array of strings, or an array of objects with named keys. "
+                f"Use null (or [] for an array) if not present."
+            )
+
+    field_block = "\n".join(field_lines) if field_lines else "(no fields requested)"
+
+    assembled_page_content = _build_extract_page_content(page_content)
+
+    return (
+        "Extract the following fields from the page content and return a single JSON object.\n"
+        "Each field has a required output shape — follow it exactly.\n\n"
+        f"Fields and shapes:\n{field_block}\n\n"
+        f"Expected schema:\n{json.dumps(extraction_schema, ensure_ascii=True)[:4000]}\n\n"
+        "Rules:\n"
+        "- Return ONLY a valid JSON object whose top-level keys exactly match the field names above.\n"
+        "- Do NOT wrap the response in markdown, code fences, or commentary.\n"
+        "- Inside record_list entries, prefer concise plain strings for each sub-field.\n\n"
+        f"## Page content:\n{assembled_page_content[:80_000]}"
+    )
+
+
+def build_page_field_analysis_prompt(
+    page_url: str,
+    page_title: str | None,
+    visible_text: str,
+    dom_snippet: str | None = None,
+) -> str:
+    parts = [f"## Page URL:\n{page_url}"]
+    if page_title:
+        parts.append(f"\n## Page title:\n{page_title[:300]}")
+    parts.append(f"\n## Visible text:\n{visible_text[:6000]}")
+    if dom_snippet:
+        parts.append(f"\n## DOM snippet:\n{dom_snippet[:3000]}")
+    parts.append(
+        "\nSuggest the highest-value fields or sections a user would want to extract from this page."
+    )
+    return "".join(parts)
 
 
 SEMANTIC_ANALYSIS_SYSTEM = """You are a workflow intelligence analyst. Your job is to understand the USER'S GOAL — why they performed these browser actions.

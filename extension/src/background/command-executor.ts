@@ -1695,9 +1695,13 @@ export class CommandExecutor {
 
   async captureContext(tabId: number): Promise<PageContext> {
     try {
-      const response = await chrome.tabs.sendMessage(tabId, {
-        type: "CAPTURE_PAGE_CONTEXT",
-      } as CapturePageContextMessage);
+      // Target the top frame explicitly so iframes (LinkedIn tracking pixels,
+      // ads, etc.) can't race ahead and return empty content.
+      const response = await chrome.tabs.sendMessage(
+        tabId,
+        { type: "CAPTURE_PAGE_CONTEXT" } as CapturePageContextMessage,
+        { frameId: 0 },
+      );
       const result = response as PageContextResponse;
       const ctx: PageContext = {
         url: result.url,

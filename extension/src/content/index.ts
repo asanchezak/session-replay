@@ -104,33 +104,71 @@ function sendDebugLog(level: string, msg: string): void {
 window.addEventListener("message", (event: MessageEvent) => {
   if (event.source !== window) return;
   const data = event.data as { type?: string; [key: string]: unknown } | undefined;
-  if (!data || data.type !== "DASHBOARD_RUN_WORKFLOW") return;
-  const workflowId = data.workflowId as string | undefined;
-  const goal = typeof data.goal === "string" ? data.goal : undefined;
-  const params = data.params && typeof data.params === "object"
-    ? data.params as Record<string, unknown>
-    : undefined;
-  if (!workflowId) return;
-  sendDebugLog("log", `Dashboard triggered run for workflow ${workflowId}`);
-  chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, goal, params })
-    .then((response) => {
-      const resp = response as { type: string; run?: { id: string }; error?: string };
-      if (resp.type === "RUN_STARTED" && resp.run?.id) {
+  if (!data) return;
+  if (data.type === "DASHBOARD_RUN_WORKFLOW") {
+    const workflowId = data.workflowId as string | undefined;
+    const goal = typeof data.goal === "string" ? data.goal : undefined;
+    const params = data.params && typeof data.params === "object"
+      ? data.params as Record<string, unknown>
+      : undefined;
+    if (!workflowId) return;
+    sendDebugLog("log", `Dashboard triggered run for workflow ${workflowId}`);
+    chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, goal, params })
+      .then((response) => {
+        const resp = response as { type: string; run?: { id: string }; error?: string };
+        if (resp.type === "RUN_STARTED" && resp.run?.id) {
+          window.postMessage(
+            { type: "DASHBOARD_RUN_STARTED", runId: resp.run.id },
+            "*",
+          );
+        } else if (resp.type === "RUN_FAILED") {
+          window.postMessage(
+            {
+              type: "DASHBOARD_RUN_FAILED",
+              error: resp.error || "Failed to start workflow run",
+            },
+            "*",
+          );
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  if (data.type === "DASHBOARD_ANALYZE_PAGE") {
+    const workflowId = data.workflowId as string | undefined;
+    const stepIndex = typeof data.stepIndex === "number" ? data.stepIndex : undefined;
+    const pageUrl = typeof data.pageUrl === "string" ? data.pageUrl : undefined;
+    if (!workflowId || stepIndex === undefined || !pageUrl) return;
+    sendDebugLog("log", `Dashboard triggered page analysis for workflow ${workflowId} step ${stepIndex}`);
+    chrome.runtime.sendMessage({ type: "ANALYZE_PAGE_STEP", workflowId, stepIndex, pageUrl })
+      .then((response) => {
+        const resp = response as {
+          type: string;
+          analysis?: Record<string, unknown>;
+          error?: string;
+        };
+        if (resp.type === "ANALYZE_PAGE_STEP_RESULT" && resp.analysis) {
+          window.postMessage(
+            { type: "DASHBOARD_PAGE_ANALYSIS_READY", analysis: resp.analysis },
+            "*",
+          );
+        } else {
+          window.postMessage(
+            {
+              type: "DASHBOARD_PAGE_ANALYSIS_FAILED",
+              error: resp.error || "Failed to analyze page",
+            },
+            "*",
+          );
+        }
+      })
+      .catch(() => {
         window.postMessage(
-          { type: "DASHBOARD_RUN_STARTED", runId: resp.run.id },
+          { type: "DASHBOARD_PAGE_ANALYSIS_FAILED", error: "Failed to analyze page" },
           "*",
         );
-      } else if (resp.type === "RUN_FAILED") {
-        window.postMessage(
-          {
-            type: "DASHBOARD_RUN_FAILED",
-            error: resp.error || "Failed to start workflow run",
-          },
-          "*",
-        );
-      }
-    })
-    .catch(() => {});
+      });
+  }
 });
 
 sendDebugLog("log", "Content script loaded");
@@ -331,6 +369,26 @@ const OVERLAY_STYLES = `
 let overlayHost: HTMLDivElement | null = null;
 let overlayShadow: ShadowRoot | null = null;
 
+async function prepareForCapture(): Promise<void> {
+  const deadline = Date.now() + 8_000;
+  let stableTicks = 0;
+  let lastScrollY = -1;
+  while (Date.now() < deadline) {
+    const viewport = Math.max(window.innerHeight || 0, 600);
+    window.scrollBy({ top: Math.max(Math.floor(viewport * 0.9), 400), behavior: "auto" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const currentScrollY = Math.round(window.scrollY || window.pageYOffset || 0);
+    if (currentScrollY === lastScrollY) {
+      stableTicks += 1;
+      if (stableTicks >= 2) break;
+    } else {
+      stableTicks = 0;
+      lastScrollY = currentScrollY;
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 400));
+}
+
 export function showRunningOverlay(step: number, total: number, actionType: string, workflowName: string): void {
   if (!overlayHost || !overlayHost.isConnected) {
     overlayHost = document.createElement("div");
@@ -441,6 +499,13 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ type: "CHALLENGES_DETECTED", challenges: detectChallenges() });
         break;
       case "EXTRACT_DATA": {
+        // Only the top frame may answer. Otherwise iframes (e.g. LinkedIn
+        // tracking pixels at /tscp-serving/...) race the main page and the
+        // first responder wins, yielding garbage like {page_title: "Image By
+        // Linkedin", url: "<pixel URL>"} instead of the real profile data.
+        if (window.top !== window) {
+          return false;
+        }
         const schema = (msg as any).outputSchema || null;
         const { data, missing_fields } = extractStructuredDataWithMissing(schema);
         sendResponse({
@@ -452,8 +517,19 @@ chrome.runtime.onMessage.addListener(
         break;
       }
       case "CAPTURE_PAGE_CONTEXT":
+        if (window.top !== window) {
+          return false;
+        }
         sendResponse({ type: "PAGE_CONTEXT_RESULT", ...capturePageContext() });
         break;
+      case "PREPARE_FOR_CAPTURE":
+        if (window.top !== window) {
+          return false;
+        }
+        prepareForCapture()
+          .then(() => sendResponse({ type: "PREPARE_FOR_CAPTURE_RESULT", ok: true }))
+          .catch(() => sendResponse({ type: "PREPARE_FOR_CAPTURE_RESULT", ok: false }));
+        return true;
       case "EXECUTE_AGENT_COMMAND": {
         const cmd = (msg as any).command as {
           action: string;
@@ -628,6 +704,7 @@ document.addEventListener("mousedown", () => {
 // call stopPropagation() — critical for navigation links in SPA frameworks.
 document.addEventListener("click", (e: MouseEvent) => {
   if (!recordingEnabled) return;
+  if (Date.now() < _suppressSelectionClicksUntil) return;
   const target = e.target as HTMLElement | null;
   if (target?.id === "sr-extract-host") return;
   const snapshot = preClickInputSnapshot;
@@ -677,6 +754,12 @@ let _extractHost: HTMLDivElement | null = null;
 let _extractShadow: ShadowRoot | null = null;
 let _extractTimer: ReturnType<typeof setTimeout> | null = null;
 let _selectionDebounce: ReturnType<typeof setTimeout> | null = null;
+let _suppressSelectionClicksUntil = 0;
+let _lastExtractSelection: {
+  selectedText: string;
+  containerText: string;
+  containerSelector: string;
+} | null = null;
 
 function _clearExtractTimer(): void {
   if (_extractTimer) { clearTimeout(_extractTimer); _extractTimer = null; }
@@ -720,9 +803,14 @@ function _showExtractButton(rect: DOMRect): void {
     btn.className = "sr-extract-btn";
     btn.textContent = "⊕ Extract These Fields";
     btn.title = "Select column headers or field labels to extract structured data";
-    btn.addEventListener("click", (e) => {
+    btn.addEventListener("mousedown", (e) => {
+      // Fire extraction before focus/selection can change.
+      e.preventDefault();
       e.stopPropagation();
       _handleExtractClick();
+    });
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
     });
     _extractShadow.appendChild(btn);
 
@@ -758,24 +846,40 @@ function _hideExtractButton(): void {
 }
 
 function _handleExtractClick(): void {
+  _suppressSelectionClicksUntil = Date.now() + 1200;
   const sel = window.getSelection();
-  if (!sel || sel.isCollapsed) return;
-  const selectedText = sel.toString().trim();
-  if (!selectedText) return;
+  const selectedText = (!sel || sel.isCollapsed) ? "" : sel.toString().trim();
+  const selectedFromSnapshot = _lastExtractSelection?.selectedText || "";
+  const effectiveSelectedText = selectedText || selectedFromSnapshot;
+  if (!effectiveSelectedText) {
+    sendDebugLog("log", "[extract] click ignored: no selected text");
+    return;
+  }
 
-  const range = sel.getRangeAt(0);
-  const containerText = _getContainerText(range.startContainer);
-  const containerSelector = _getContainerSelector(range.startContainer.parentElement || range.startContainer);
+  let containerText = _lastExtractSelection?.containerText || "";
+  let containerSelector = _lastExtractSelection?.containerSelector || "";
+
+  if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    containerText = _getContainerText(range.startContainer);
+    containerSelector = _getContainerSelector(
+      range.startContainer.parentElement || range.startContainer,
+    );
+  }
 
   chrome.runtime.sendMessage({
     type: "SELECTION_INTENT",
-    selected_text: selectedText,
+    selected_text: effectiveSelectedText,
     container_text: containerText,
     page_url: window.location.href,
     page_title: document.title,
     container_selector: containerSelector,
     timestamp: new Date().toISOString(),
-  }).catch(() => {});
+  }).then(() => {
+    sendDebugLog("log", `[extract] selection intent sent (${effectiveSelectedText.length} chars)`);
+  }).catch((err) => {
+    sendDebugLog("error", `[extract] failed to send selection intent: ${String(err)}`);
+  });
 
   // Brief feedback
   if (_extractShadow) {
@@ -793,6 +897,7 @@ function _checkSelectionAndShow(): void {
 
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+    _lastExtractSelection = null;
     _hideExtractButton();
     return;
   }
@@ -810,6 +915,13 @@ function _checkSelectionAndShow(): void {
   try {
     if (sel.rangeCount === 0) return;
     const range = sel.getRangeAt(sel.rangeCount - 1);
+    _lastExtractSelection = {
+      selectedText: sel.toString().trim(),
+      containerText: _getContainerText(range.startContainer),
+      containerSelector: _getContainerSelector(
+        range.startContainer.parentElement || range.startContainer,
+      ),
+    };
     rect = range.getBoundingClientRect();
   } catch {
     const anchor = sel.anchorNode;
@@ -835,6 +947,10 @@ document.addEventListener("selectionchange", () => {
 // Supplementary: mouseup gives precise positioning for mouse-driven selections
 document.addEventListener("mouseup", () => {
   if (!recordingEnabled) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.toString().trim()) {
+    _suppressSelectionClicksUntil = Date.now() + 1200;
+  }
   _hideExtractButton();
   setTimeout(() => {
     if (!recordingEnabled) return;
@@ -847,6 +963,7 @@ document.addEventListener("mousedown", (e: MouseEvent) => {
   if (!_extractHost) return;
   const path = e.composedPath();
   if (path.includes(_extractHost)) return;
+  _suppressSelectionClicksUntil = 0;
   _hideExtractButton();
 }, true);
 

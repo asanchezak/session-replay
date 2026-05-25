@@ -174,6 +174,9 @@ export interface CaptureResult {
   timestamp: string;
 }
 
+const MAX_VISIBLE_TEXT_LENGTH = 60_000;
+const MAX_DOM_SNIPPET_LENGTH = 120_000;
+
 type ElementLike = {
   tagName?: string;
   nodeName?: string;
@@ -725,7 +728,7 @@ function captureVisibleText(): string {
   const body = document.body;
   if (!body) return "";
   const text = body.innerText || "";
-  return text.slice(0, 2048);
+  return text.slice(0, MAX_VISIBLE_TEXT_LENGTH);
 }
 
 function captureVisibleElements(): Array<Record<string, unknown>> {
@@ -823,7 +826,7 @@ export function capturePageContext(): PageContextResult {
   const bodyEl = document.body;
   let dom_snippet = "";
   if (bodyEl) {
-    dom_snippet = redactPII(sanitizeNode(bodyEl)).slice(0, 8192);
+    dom_snippet = redactPII(sanitizeNode(bodyEl)).slice(0, MAX_DOM_SNIPPET_LENGTH);
   }
 
   const accessibility_tree = captureAccessibilityTree();

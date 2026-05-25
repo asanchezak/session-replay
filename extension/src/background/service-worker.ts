@@ -6,6 +6,7 @@ import { stepExecutor } from "./executor";
 import { registerServiceWorkerListeners } from "./message-router";
 import { commandExecutor } from "./command-executor";
 import { waitForTabLoad, waitForTabLoadBestEffort } from "./tab-load";
+import { getPageSnapshotTargets } from "./site-adapters/registry";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
 import type { BackgroundToContentMessage, DetectChallengesMessage, ChallengesDetectedResponse } from "../shared/messaging";
@@ -85,6 +86,624 @@ async function detectChallengesOnTab(tabId: number): Promise<ChallengeDetection[
   }
 }
 
+class AnalyzeError extends Error {
+  constructor(public code: string, message: string) {
+    super(message);
+  }
+}
+
+const RESTRICTED_URL_RE = /^(chrome|chrome-extension|chrome-search|chrome-untrusted|devtools|edge|about|view-source|file):/i;
+
+function classifyTabForCapture(url: string | undefined): AnalyzeError | null {
+  if (!url) return new AnalyzeError("NO_TAB", "No active tab to analyze.");
+  if (RESTRICTED_URL_RE.test(url)) {
+    return new AnalyzeError(
+      "URL_BLOCKED",
+      "This page is blocked by the browser. Open a regular http(s) page first.",
+    );
+  }
+  return null;
+}
+
+type SavedPageSnapshot = {
+  section_name: string;
+  page_url: string;
+  page_title?: string;
+  visible_text: string;
+  dom_snippet: string;
+  captured_at: string;
+};
+
+const PRIORITY_SECTION_TEXT_LIMIT = 16_000;
+const MAIN_SECTION_TEXT_LIMIT = 8_000;
+const DEFAULT_SECTION_TEXT_LIMIT = 8_000;
+
+function normalizeLinkedInSnapshotText(snapshot: SavedPageSnapshot): string {
+  let text = (snapshot.visible_text || snapshot.dom_snippet || "").trim();
+  if (!text) return "";
+
+  const footerMarkers = [
+    "\nQuestions?\n",
+    "\nAbout\n\nAccessibility\n",
+    "\nAbout\nAccessibility\n",
+    "\nLinkedIn Corporation",
+    "\nSelect language\n",
+  ];
+  const footerIndices = footerMarkers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b);
+  if (footerIndices.length > 0) {
+    text = text.slice(0, footerIndices[0]).trim();
+  }
+
+  if (snapshot.section_name === "main_profile") {
+    const aboutMarker = "\nAbout\n";
+    const aboutIndex = text.indexOf(aboutMarker);
+    if (aboutIndex >= 0) {
+      text = text.slice(aboutIndex + 1);
+      const aboutEndIndices = ["\nTop skills\n", "\nActivity\n", "\nExperience\n", "\nEducation\n"]
+        .map((marker) => text.indexOf(marker))
+        .filter((index) => index > 0)
+        .sort((a, b) => a - b);
+      if (aboutEndIndices.length > 0) {
+        text = text.slice(0, aboutEndIndices[0]).trim();
+      }
+    }
+    return text.trim();
+  }
+
+  const sectionLabels: Record<string, string> = {
+    experience: "Experience",
+    education: "Education",
+    skills: "Skills",
+    certifications: "Certifications",
+    projects: "Projects",
+    languages: "Languages",
+  };
+  const label = sectionLabels[snapshot.section_name] || "";
+  if (label) {
+    const marker = `\n${label}\n`;
+    const markerIndex = text.indexOf(marker);
+    if (markerIndex >= 0) {
+      text = text.slice(markerIndex + 1).trim();
+    } else {
+      const fallbackIndex = text.lastIndexOf(label);
+      if (fallbackIndex >= 0) {
+        text = text.slice(fallbackIndex).trim();
+      }
+    }
+  }
+  return text.trim();
+}
+
+function buildSnapshotSectionText(snapshot: SavedPageSnapshot, limit: number): string {
+  const text = normalizeLinkedInSnapshotText(snapshot);
+  if (!text) return "";
+  return `## Section: ${snapshot.section_name}\nURL: ${snapshot.page_url}\n${text.slice(0, limit)}`;
+}
+
+function buildSnapshotPageContent(
+  snapshots: SavedPageSnapshot[],
+  preferredSections: string[] = [],
+): string {
+  const preferred = preferredSections.map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const preferredSnapshots: SavedPageSnapshot[] = [];
+  const remainingSnapshots: SavedPageSnapshot[] = [];
+  const seen = new Set<SavedPageSnapshot>();
+
+  for (const sectionName of preferred) {
+    const match = snapshots.find((snapshot) => snapshot.section_name.toLowerCase() === sectionName);
+    if (match && !seen.has(match)) {
+      preferredSnapshots.push(match);
+      seen.add(match);
+    }
+  }
+
+  const mainSnapshot = snapshots.find((snapshot) => snapshot.section_name === "main_profile");
+  if (mainSnapshot) {
+    seen.add(mainSnapshot);
+  }
+
+  for (const snapshot of snapshots) {
+    if (!seen.has(snapshot) && snapshot.section_name !== "main_profile") {
+      remainingSnapshots.push(snapshot);
+      seen.add(snapshot);
+    }
+  }
+
+  const parts: string[] = [];
+  for (const snapshot of preferredSnapshots) {
+    const sectionText = buildSnapshotSectionText(snapshot, PRIORITY_SECTION_TEXT_LIMIT);
+    if (sectionText) parts.push(sectionText);
+  }
+  if (mainSnapshot) {
+    const sectionText = buildSnapshotSectionText(mainSnapshot, MAIN_SECTION_TEXT_LIMIT);
+    if (sectionText) parts.push(sectionText);
+  }
+  for (const snapshot of remainingSnapshots) {
+    const sectionText = buildSnapshotSectionText(snapshot, DEFAULT_SECTION_TEXT_LIMIT);
+    if (sectionText) parts.push(sectionText);
+  }
+  return parts.join("\n\n");
+}
+
+function readSavedPageSnapshots(step: {
+  dom_context?: Record<string, unknown> | null;
+}): SavedPageSnapshot[] {
+  const domContext = step.dom_context;
+  if (!domContext || typeof domContext !== "object") return [];
+  const plural = domContext.page_snapshots;
+  if (Array.isArray(plural)) {
+    return plural.filter((entry): entry is SavedPageSnapshot => (
+      !!entry
+      && typeof entry === "object"
+      && typeof (entry as SavedPageSnapshot).section_name === "string"
+      && typeof (entry as SavedPageSnapshot).page_url === "string"
+    ));
+  }
+  const singular = domContext.page_snapshot;
+  if (singular && typeof singular === "object") {
+    const entry = singular as Record<string, unknown>;
+    return [{
+      section_name: "main_profile",
+      page_url: String(entry.page_url || ""),
+      page_title: typeof entry.page_title === "string" ? entry.page_title : undefined,
+      visible_text: String(entry.visible_text || ""),
+      dom_snippet: String(entry.dom_snippet || ""),
+      captured_at: typeof entry.captured_at === "string" ? entry.captured_at : new Date().toISOString(),
+    }];
+  }
+  return [];
+}
+
+function maybeUseRecordedSnapshotContent(
+  liveContent: string,
+  currentUrl: string,
+  step: { dom_context?: Record<string, unknown> | null },
+  preferredSections: string[],
+): string {
+  const storedSnapshots = readSavedPageSnapshots(step);
+  if (storedSnapshots.length === 0) return liveContent;
+  const storedMainUrl = storedSnapshots[0]?.page_url || "";
+  if (!storedMainUrl || storedMainUrl !== currentUrl) return liveContent;
+  const storedContent = buildSnapshotPageContent(storedSnapshots, preferredSections);
+  return storedContent || liveContent;
+}
+
+function chooseExtractionSnapshots(
+  currentUrl: string,
+  liveSnapshots: SavedPageSnapshot[],
+  step: { dom_context?: Record<string, unknown> | null },
+): SavedPageSnapshot[] {
+  const storedSnapshots = readSavedPageSnapshots(step);
+  const storedMainUrl = storedSnapshots[0]?.page_url || "";
+  if (storedSnapshots.length > 0 && storedMainUrl === currentUrl) {
+    return storedSnapshots;
+  }
+  return liveSnapshots;
+}
+
+function selectSnapshotsForField(
+  fieldKey: string,
+  snapshots: SavedPageSnapshot[],
+): SavedPageSnapshot[] {
+  const normalizedField = fieldKey.trim().toLowerCase();
+  const exact = snapshots.filter((snapshot) => snapshot.section_name.toLowerCase() === normalizedField);
+  if (exact.length > 0) return exact;
+
+  const aliases: Record<string, string[]> = {
+    about: ["main_profile"],
+    experience: ["experience"],
+    education: ["education"],
+    skills: ["skills"],
+    certifications: ["certifications"],
+    languages: ["languages"],
+    projects: ["projects"],
+  };
+  const matchNames = new Set(aliases[normalizedField] || []);
+  const matched = snapshots.filter((snapshot) => matchNames.has(snapshot.section_name.toLowerCase()));
+  if (matched.length > 0) return matched;
+
+  const main = snapshots.find((snapshot) => snapshot.section_name === "main_profile");
+  return main ? [main] : snapshots.slice(0, 1);
+}
+
+async function prepareTabForCapture(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "PREPARE_FOR_CAPTURE" });
+  } catch {
+    // Best-effort only; capture still proceeds if the content script cannot scroll.
+  }
+}
+
+async function fetchSupplementalSnapshots(
+  tabId: number,
+  pageUrl: string,
+): Promise<SavedPageSnapshot[]> {
+  const targets = getPageSnapshotTargets(pageUrl);
+  if (targets.length === 0) return [];
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [targets],
+      func: async (snapshotTargets: Array<{ sectionName: string; pageUrl: string }>) => {
+        const normalizeText = (value: string): string => value.replace(/\s+/g, " ").trim();
+        const normalizeDom = (doc: Document): string => {
+          const cloned = doc.body?.cloneNode(true) as HTMLElement | null;
+          if (!cloned) return "";
+          cloned.querySelectorAll("script, style, noscript").forEach((node) => node.remove());
+          return cloned.innerHTML;
+        };
+        const out: Array<{
+          section_name: string;
+          page_url: string;
+          page_title?: string;
+          visible_text: string;
+          dom_snippet: string;
+          captured_at: string;
+        }> = [];
+        for (const target of snapshotTargets) {
+          try {
+            const response = await fetch(target.pageUrl, { credentials: "include" });
+            if (!response.ok) continue;
+            const html = await response.text();
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            const visibleText = normalizeText(doc.body?.innerText || "");
+            const domSnippet = normalizeDom(doc);
+            if (!visibleText && !domSnippet) continue;
+            out.push({
+              section_name: target.sectionName,
+              page_url: target.pageUrl,
+              page_title: doc.title || undefined,
+              visible_text: visibleText.slice(0, 60_000),
+              dom_snippet: domSnippet.slice(0, 120_000),
+              captured_at: new Date().toISOString(),
+            });
+          } catch {
+            // Skip individual section failures.
+          }
+        }
+        return out;
+      },
+    });
+    return (results[0]?.result as SavedPageSnapshot[] | undefined) || [];
+  } catch (err) {
+    log.warn("Supplemental snapshot fetch failed", err);
+    return [];
+  }
+}
+
+function looksLikeClientShellSnapshot(snapshot: SavedPageSnapshot): boolean {
+  const text = `${snapshot.visible_text || ""}\n${snapshot.dom_snippet || ""}`.toLowerCase();
+  if (!text) return true;
+  return (
+    text.includes("(function cdnmonitor()") ||
+    text.includes("localizedconfigassetpaths") ||
+    text.includes("proto.sdui") ||
+    text.includes("lixseed") ||
+    text.includes("importmap") ||
+    text.includes("bundlecdnurl")
+  );
+}
+
+async function captureSnapshotFromIframe(
+  tabId: number,
+  targetUrl: string,
+  sectionName: string,
+): Promise<SavedPageSnapshot | null> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [targetUrl, sectionName],
+      func: async (iframeUrl: string, iframeSectionName: string) => {
+        const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        const existing = document.getElementById("__sr_linkedin_snapshot_iframe");
+        if (existing) existing.remove();
+
+        const iframe = document.createElement("iframe");
+        iframe.id = "__sr_linkedin_snapshot_iframe";
+        iframe.src = iframeUrl;
+        iframe.setAttribute("aria-hidden", "true");
+        iframe.style.position = "fixed";
+        iframe.style.left = "-10000px";
+        iframe.style.top = "0";
+        iframe.style.width = "1280px";
+        iframe.style.height = "1600px";
+        iframe.style.opacity = "0";
+        iframe.style.pointerEvents = "none";
+        document.body.appendChild(iframe);
+
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = window.setTimeout(() => reject(new Error("iframe_load_timeout")), 20_000);
+            iframe.onload = () => {
+              window.clearTimeout(timeout);
+              resolve();
+            };
+            iframe.onerror = () => {
+              window.clearTimeout(timeout);
+              reject(new Error("iframe_load_failed"));
+            };
+          });
+          await sleep(4_000);
+          const doc = iframe.contentDocument;
+          const win = iframe.contentWindow;
+          if (!doc || !win) return null;
+
+          let stableTicks = 0;
+          let lastScrollY = -1;
+          const deadline = Date.now() + 8_000;
+          while (Date.now() < deadline) {
+            const viewport = Math.max(win.innerHeight || 0, 600);
+            win.scrollBy(0, Math.max(Math.floor(viewport * 0.9), 400));
+            await sleep(300);
+            const currentScrollY = Math.round(win.scrollY || 0);
+            if (currentScrollY === lastScrollY) {
+              stableTicks += 1;
+              if (stableTicks >= 2) break;
+            } else {
+              stableTicks = 0;
+              lastScrollY = currentScrollY;
+            }
+          }
+          await sleep(800);
+
+          const visibleText = (doc.body?.innerText || "").slice(0, 60_000);
+          const domSnippet = (doc.body?.innerHTML || "").slice(0, 120_000);
+          if (!visibleText && !domSnippet) return null;
+          return {
+            section_name: iframeSectionName,
+            page_url: win.location.href || iframeUrl,
+            page_title: doc.title || undefined,
+            visible_text: visibleText,
+            dom_snippet: domSnippet,
+            captured_at: new Date().toISOString(),
+          };
+        } finally {
+          iframe.remove();
+        }
+      },
+    });
+    return (results[0]?.result as SavedPageSnapshot | null | undefined) || null;
+  } catch (err) {
+    log.warn("Iframe detail snapshot failed", err);
+    return null;
+  }
+}
+
+async function resolveSupplementalSnapshots(
+  tabId: number,
+  pageUrl: string,
+): Promise<SavedPageSnapshot[]> {
+  const fetched = await fetchSupplementalSnapshots(tabId, pageUrl);
+  const targets = getPageSnapshotTargets(pageUrl);
+  const bySection = new Map(fetched.map((snapshot) => [snapshot.section_name, snapshot]));
+  const resolved: SavedPageSnapshot[] = [];
+
+  for (const target of targets) {
+    const existing = bySection.get(target.sectionName);
+    if (existing && !looksLikeClientShellSnapshot(existing)) {
+      resolved.push(existing);
+      continue;
+    }
+    const rendered = await captureSnapshotFromIframe(tabId, target.pageUrl, target.sectionName);
+    if (rendered && !looksLikeClientShellSnapshot(rendered)) {
+      resolved.push(rendered);
+      continue;
+    }
+    if (existing) {
+      resolved.push(existing);
+    }
+  }
+
+  return resolved;
+}
+
+async function captureExpandedPageData(tabId: number, tabInfo: chrome.tabs.Tab): Promise<{
+  captured: { visible_text: string; dom_snippet: string; title: string; url: string };
+  pageSnapshots: SavedPageSnapshot[];
+  buildPageContent: (preferredSections?: string[]) => string;
+}> {
+  await prepareTabForCapture(tabId);
+
+  let captured: { visible_text: string; dom_snippet: string; title: string; url: string } | null = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ctx = await commandExecutor.captureContext(tabId);
+    if (ctx.visible_text || ctx.dom_snippet) {
+      captured = {
+        visible_text: ctx.visible_text,
+        dom_snippet: ctx.dom_snippet || "",
+        title: ctx.title || tabInfo.title || "",
+        url: ctx.url || tabInfo.url || "",
+      };
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
+
+  if (!captured) {
+    throw new AnalyzeError("EMPTY_PAGE", "Could not read page content.");
+  }
+
+  const pageSnapshots: SavedPageSnapshot[] = [{
+    section_name: "main_profile",
+    page_url: captured.url,
+    page_title: captured.title || undefined,
+    visible_text: captured.visible_text,
+    dom_snippet: captured.dom_snippet,
+    captured_at: new Date().toISOString(),
+  }];
+  pageSnapshots.push(...await resolveSupplementalSnapshots(tabId, captured.url));
+
+  return {
+    captured,
+    pageSnapshots,
+    buildPageContent: (preferredSections: string[] = []) => buildSnapshotPageContent(pageSnapshots, preferredSections),
+  };
+}
+
+async function analyzeLivePage(tabId?: number): Promise<{
+  page_url: string;
+  page_title?: string;
+  visible_text: string;
+  dom_snippet: string;
+  page_snapshots: SavedPageSnapshot[];
+  suggested_fields: Array<{
+    key: string;
+    label: string;
+    description?: string;
+    shape?: { kind: "scalar" | "string_list" | "record_list" | "unknown"; item_keys: string[] | null };
+  }>;
+}> {
+  let resolvedTabId = tabId;
+  if (!resolvedTabId) {
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    resolvedTabId = active?.id;
+  }
+  if (!resolvedTabId) throw new AnalyzeError("NO_TAB", "No active tab to analyze.");
+
+  let tabInfo: chrome.tabs.Tab | undefined;
+  try {
+    tabInfo = await chrome.tabs.get(resolvedTabId);
+  } catch {
+    throw new AnalyzeError("NO_TAB", "Active tab was closed.");
+  }
+
+  const urlError = classifyTabForCapture(tabInfo.url);
+  if (urlError) throw urlError;
+
+  // Wait for load if Chrome reports the tab is still loading.
+  if (tabInfo.status !== "complete") {
+    try {
+      await waitForTabLoad(resolvedTabId, 15000);
+    } catch {
+      // best-effort
+    }
+  }
+
+  let expanded: Awaited<ReturnType<typeof captureExpandedPageData>> | null = null;
+  try {
+    expanded = await captureExpandedPageData(resolvedTabId, tabInfo);
+  } catch (err) {
+    try {
+      const latest = await chrome.tabs.get(resolvedTabId);
+      if (latest.status === "loading") {
+        throw new AnalyzeError(
+          "TIMEOUT",
+          "The page hasn't finished loading. Wait for it to settle and try again.",
+        );
+      }
+      throw err;
+    } catch (nested) {
+      if (nested instanceof AnalyzeError) throw nested;
+      throw new AnalyzeError(
+        "EMPTY_PAGE",
+        "The page rendered but has no readable content yet. If it's an auth wall, log in and retry.",
+      );
+    }
+  }
+  const { captured, pageSnapshots } = expanded;
+
+  const response = await apiClient.analyzePageSuggestions({
+    page_url: captured.url,
+    page_title: captured.title,
+    visible_text: captured.visible_text,
+    dom_snippet: captured.dom_snippet,
+    page_snapshots: pageSnapshots,
+  });
+
+  return {
+    page_url: captured.url,
+    page_title: captured.title,
+    visible_text: captured.visible_text,
+    dom_snippet: captured.dom_snippet,
+    page_snapshots: pageSnapshots,
+    suggested_fields: response.suggested_fields,
+  };
+}
+
+async function analyzePageStep(
+  workflowId: string,
+  stepIndex: number,
+  pageUrl: string,
+  tabId?: number,
+): Promise<{
+  workflow_id: string;
+  step_index: number;
+  page_url: string;
+  page_title?: string;
+  suggested_fields: Array<{ key: string; label: string; description?: string }>;
+}> {
+  // Strategy: try every reasonable way to get page content before failing.
+  //   1. Use a matching open tab if one exists.
+  //   2. Otherwise open the page URL in a new tab.
+  //   3. Either way, wait for load, then retry capture a few times — the
+  //      content script may not have attached yet on a freshly-loaded tab.
+  let targetTabId = tabId;
+  let openedNewTab = false;
+
+  if (!targetTabId) {
+    const tabs = await chrome.tabs.query({});
+    targetTabId = tabs.find((tab) => (tab.url || "").includes(pageUrl))?.id;
+  }
+
+  if (!targetTabId) {
+    const created = await chrome.tabs.create({ url: pageUrl, active: false });
+    targetTabId = created.id;
+    openedNewTab = true;
+  }
+
+  if (!targetTabId) {
+    throw new Error("Could not open or find a tab for the recorded page URL");
+  }
+
+  if (openedNewTab) {
+    try {
+      await waitForTabLoad(targetTabId, 20000);
+    } catch {
+      // Best-effort: even if load times out, the DOM may still be usable.
+    }
+  }
+
+  const captureWithRetry = async (): Promise<{
+    visible_text: string;
+    dom_snippet: string;
+    title: string;
+  } | null> => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const ctx = await commandExecutor.captureContext(targetTabId!);
+      if (ctx.visible_text || ctx.dom_snippet) {
+        return {
+          visible_text: ctx.visible_text,
+          dom_snippet: ctx.dom_snippet || "",
+          title: ctx.title || "",
+        };
+      }
+      // Wait a beat for content script to attach / page to settle.
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    return null;
+  };
+
+  const captured = await captureWithRetry();
+  if (!captured) {
+    throw new Error(
+      "Could not capture page content. Make sure the page is open and fully loaded, "
+        + "and that you're logged in if it requires authentication.",
+    );
+  }
+
+  return apiClient.analyzePageFields(workflowId, stepIndex, {
+    page_url: pageUrl,
+    page_title: captured.title || undefined,
+    visible_text: captured.visible_text,
+    dom_snippet: captured.dom_snippet || undefined,
+  });
+}
+
 function parseExtractFields(value: string): string[] {
   return value
     .split(",")
@@ -92,64 +711,194 @@ function parseExtractFields(value: string): string[] {
     .filter(Boolean);
 }
 
-function buildExtractSchema(fields: string[]): Record<string, unknown> {
-  const properties: Record<string, { type: string }> = {};
+function normalizeFieldKey(label: string): string {
+  return label
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+interface FieldShapeHint {
+  key: string;
+  label?: string;
+  kind?: "scalar" | "string_list" | "record_list" | "unknown";
+  item_keys?: string[] | null;
+}
+
+function buildExtractSchema(
+  fields: string[],
+  shapes: FieldShapeHint[] = [],
+): Record<string, unknown> {
+  const shapeByKey = new Map<string, FieldShapeHint>();
+  for (const s of shapes) shapeByKey.set(normalizeFieldKey(s.key || s.label || ""), s);
+
+  const properties: Record<string, Record<string, unknown>> = {};
   for (const f of fields) {
-    const key = f.toLowerCase().replace(/[^a-z0-9]/g, "_");
-    properties[key] = { type: "string" };
+    const key = normalizeFieldKey(f);
+    const shape = shapeByKey.get(key);
+    properties[key] = {
+      type: "string",
+      ...(shape
+        ? {
+            shape: {
+              kind: shape.kind ?? "unknown",
+              item_keys: shape.item_keys ?? null,
+            },
+          }
+        : {}),
+    };
   }
-  return { items: { properties } };
+  return { items: { properties }, properties };
+}
+
+function readShapesFromStep(
+  step: { methods?: unknown },
+): FieldShapeHint[] {
+  if (!Array.isArray(step.methods)) return [];
+  for (const entry of step.methods) {
+    if (
+      entry
+      && typeof entry === "object"
+      && (entry as Record<string, unknown>).kind === "extract_shapes"
+      && Array.isArray((entry as Record<string, unknown>).shapes)
+    ) {
+      return (entry as { shapes: FieldShapeHint[] }).shapes;
+    }
+  }
+  return [];
 }
 
 async function executeExtractStep(
   runId: string,
   stepIndex: number,
-  step: { action_type: string; value?: string; intent?: string },
+  step: {
+    action_type: string;
+    value?: string;
+    intent?: string;
+    dom_context?: Record<string, unknown> | null;
+    methods?: unknown;
+  },
   targetTabId: number,
 ): Promise<void> {
-  const fields = parseExtractFields(step.value || "");
-  if (fields.length === 0) {
-    log.log(`[Extract] Step ${stepIndex}: no fields specified, skipping`);
+  const stepValue = String(step.value || "").trim();
+  const looksLikeSelectedParagraph =
+    stepValue.length >= 80 &&
+    /\s/.test(stepValue) &&
+    /[.,;:]/.test(stepValue);
+
+  if (looksLikeSelectedParagraph) {
+    const directData = [{ selected_text: stepValue }];
+    const directSchema = { properties: { selected_text: { type: "string" } } };
+    await apiClient.reportExtraction(runId, stepIndex, directData, directSchema);
+    log.log(`[Extract] Step ${stepIndex}: recorded direct selected_text (${stepValue.length} chars)`);
     await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
     return;
   }
 
-  const schema = buildExtractSchema(fields);
-  log.log(`[Extract] Step ${stepIndex}: fields=${fields.join(",")}`);
+  const selectedText = String((step.dom_context && step.dom_context["selected_text"]) || "").trim();
+  const fields = parseExtractFields(step.value || "");
+  if (fields.length === 0) {
+    if (selectedText) {
+      const fallbackData = [{ selected_text: selectedText }];
+      const fallbackSchema = { properties: { selected_text: { type: "string" } } };
+      await apiClient.reportExtraction(runId, stepIndex, fallbackData, fallbackSchema);
+      log.log(`[Extract] Step ${stepIndex}: recorded selected text fallback (${selectedText.length} chars)`);
+    } else {
+      log.log(`[Extract] Step ${stepIndex}: no fields specified, skipping`);
+    }
+    await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
+    return;
+  }
 
-  const extraction = await stepExecutor.extractData(
-    targetTabId,
-    schema,
-    stepIndex,
-  );
+  const shapes = readShapesFromStep(step);
+  const schema = buildExtractSchema(fields, shapes);
+  log.log(`[Extract] Step ${stepIndex}: fields=${fields.join(",")} shapes=${shapes.length}`);
 
-  let data = extraction?.data || [];
-  const missingFields = extraction?.missing_fields || [];
+  // For shape-aware extracts (Analyze Page → Apply) the heuristic DOM scraper
+  // can't produce nested records, so we go AI-first. For legacy comma-list
+  // extracts without shapes we still try the heuristic first and fall back.
+  const aiFirst = shapes.length > 0;
 
-  // AI fallback: if heuristic extraction missed some fields, ask the AI
-  if (missingFields.length > 0 && data.length > 0) {
-    log.log(
-      `[Extract] Step ${stepIndex}: ${missingFields.length} field(s) missing (${missingFields.join(", ")}), trying AI`,
-    );
+  let data: Record<string, unknown>[] = [];
+  let usedSchema: Record<string, unknown> = schema;
+
+  if (aiFirst) {
     try {
-      let pageText: string | null = null;
-      try {
-        const ctx = await commandExecutor.captureContext(targetTabId);
-        pageText = ctx.visible_text || ctx.dom_snippet || "";
-      } catch {
-        // context capture is best-effort
+      const tabInfo = await chrome.tabs.get(targetTabId);
+      const { captured, pageSnapshots, buildPageContent } = await captureExpandedPageData(targetTabId, tabInfo);
+      const chosenSnapshots = chooseExtractionSnapshots(captured.url, pageSnapshots, step);
+      const aiData: Record<string, unknown> = {};
+      for (const field of fields) {
+        const fieldKey = normalizeFieldKey(field);
+        const fieldSchema = buildExtractSchema([field], shapes.filter((shape) => normalizeFieldKey(shape.key || shape.label || "") === fieldKey));
+        const fieldContent = buildSnapshotPageContent(selectSnapshotsForField(field, chosenSnapshots), [field]);
+        const fallbackContent = maybeUseRecordedSnapshotContent(
+          buildPageContent([field]),
+          captured.url,
+          step,
+          [field],
+        );
+        const pageText = fieldContent || fallbackContent || captured.visible_text || captured.dom_snippet || "";
+        if (!pageText) continue;
+        const aiResult = await apiClient.aiExtract(pageText, fieldSchema);
+        const fieldData = aiResult.data as Record<string, unknown>;
+        if (fieldData && typeof fieldData === "object" && !Array.isArray(fieldData) && fieldKey in fieldData) {
+          aiData[fieldKey] = fieldData[fieldKey];
+        }
       }
+      if (Object.keys(aiData).length > 0) {
+        data = [{
+          page_title: captured.title || "",
+          url: captured.url || "",
+          ...aiData,
+        }];
+        log.log(`[Extract] Step ${stepIndex}: AI extracted ${Object.keys(aiData).length} field(s)`);
+      }
+    } catch (err) {
+      log.error(`[Extract] Step ${stepIndex}: AI-first extract failed:`, err);
+    }
+  } else {
+    const extraction = await stepExecutor.extractData(
+      targetTabId,
+      schema,
+      stepIndex,
+    );
+    data = extraction?.data || [];
+    usedSchema = (extraction?.schema as Record<string, unknown> | null) || schema;
+    const missingFields = extraction?.missing_fields || [];
 
-      if (pageText) {
-        const missingSchema: Record<string, unknown> = {
-          properties: Object.fromEntries(
-            missingFields.map((f) => [f, { type: "string" }]),
-          ),
-        };
-        const aiResult = await apiClient.aiExtract(pageText, missingSchema);
-        const aiData = aiResult.data as Record<string, unknown>;
+    if (missingFields.length > 0 && data.length > 0) {
+      log.log(
+        `[Extract] Step ${stepIndex}: ${missingFields.length} field(s) missing (${missingFields.join(", ")}), trying AI`,
+      );
+      try {
+        const tabInfo = await chrome.tabs.get(targetTabId);
+        const { captured, pageSnapshots, buildPageContent } = await captureExpandedPageData(targetTabId, tabInfo);
+        const chosenSnapshots = chooseExtractionSnapshots(captured.url, pageSnapshots, step);
+        const aiData: Record<string, unknown> = {};
+        for (const field of missingFields) {
+          const fieldKey = normalizeFieldKey(field);
+          const fieldContent = buildSnapshotPageContent(selectSnapshotsForField(field, chosenSnapshots), [field]);
+          const fallbackContent = maybeUseRecordedSnapshotContent(
+            buildPageContent([field]),
+            captured.url,
+            step,
+            [field],
+          );
+          const pageText = fieldContent || fallbackContent || captured.visible_text || captured.dom_snippet || "";
+          if (!pageText) continue;
+          const missingSchema: Record<string, unknown> = {
+            properties: { [fieldKey]: { type: "string" } },
+          };
+          const aiResult = await apiClient.aiExtract(pageText, missingSchema);
+          const fieldResult = aiResult.data as Record<string, unknown>;
+          if (fieldResult && typeof fieldResult === "object" && !Array.isArray(fieldResult) && fieldKey in fieldResult) {
+            aiData[fieldKey] = fieldResult[fieldKey];
+          }
+        }
         if (aiData && typeof aiData === "object" && !Array.isArray(aiData)) {
-          // Merge AI results into the first record
           for (const [key, val] of Object.entries(aiData)) {
             if (val != null && !(key in data[0])) {
               data[0][key] = val;
@@ -157,9 +906,9 @@ async function executeExtractStep(
           }
           log.log(`[Extract] Step ${stepIndex}: AI filled ${Object.keys(aiData).length} field(s)`);
         }
+      } catch (err) {
+        log.error(`[Extract] Step ${stepIndex}: AI fallback failed:`, err);
       }
-    } catch (err) {
-      log.error(`[Extract] Step ${stepIndex}: AI fallback failed:`, err);
     }
   }
 
@@ -168,11 +917,18 @@ async function executeExtractStep(
       runId,
       stepIndex,
       data,
-      extraction?.schema || schema,
+      usedSchema,
     );
     log.log(`[Extract] Step ${stepIndex}: recorded ${data.length} record(s)`);
   } else {
-    log.log(`[Extract] Step ${stepIndex}: no data extracted`);
+    if (selectedText) {
+      const fallbackData = [{ selected_text: selectedText }];
+      const fallbackSchema = { properties: { selected_text: { type: "string" } } };
+      await apiClient.reportExtraction(runId, stepIndex, fallbackData, fallbackSchema);
+      log.log(`[Extract] Step ${stepIndex}: no structured data; used selected text fallback`);
+    } else {
+      log.log(`[Extract] Step ${stepIndex}: no data extracted`);
+    }
   }
 
   await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
@@ -642,7 +1398,7 @@ async function executeAgentRun(
 
     // Extract steps are deterministic — execute them inline without an AI poll.
     const currentStep = steps[currentStepIndex] as
-      | { action_type?: string; value?: string; intent?: string }
+      | { action_type?: string; value?: string; intent?: string; methods?: unknown; dom_context?: Record<string, unknown> | null }
       | undefined;
     if (currentStep && currentStep.action_type === "extract") {
       log.log(`[Agent] Extract step ${currentStepIndex}: executing inline`);
@@ -653,6 +1409,8 @@ async function executeAgentRun(
           action_type: "extract",
           value: currentStep.value,
           intent: currentStep.intent,
+          methods: currentStep.methods,
+          dom_context: currentStep.dom_context ?? null,
         },
         targetTabId,
       );
@@ -1073,6 +1831,8 @@ registerServiceWorkerListeners({
   sendOverlay,
   executeAgentRun,
   executeStepOnTab,
+  analyzePageStep,
+  analyzeLivePage,
 });
 
 if (typeof self !== "undefined") {

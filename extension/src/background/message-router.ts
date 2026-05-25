@@ -28,6 +28,38 @@ type RouterDeps = {
     step: BackgroundToContentMessage["step"],
     tabId?: number,
   ) => Promise<{ success: boolean; [key: string]: unknown }>;
+  analyzePageStep: (
+    workflowId: string,
+    stepIndex: number,
+    pageUrl: string,
+    tabId?: number,
+  ) => Promise<{
+    workflow_id: string;
+    step_index: number;
+    page_url: string;
+    page_title?: string;
+    suggested_fields: Array<{ key: string; label: string; description?: string }>;
+  }>;
+  analyzeLivePage: (tabId?: number) => Promise<{
+    page_url: string;
+    page_title?: string;
+    visible_text: string;
+    dom_snippet: string;
+    page_snapshots: Array<{
+      section_name: string;
+      page_url: string;
+      page_title?: string;
+      visible_text: string;
+      dom_snippet: string;
+      captured_at: string;
+    }>;
+    suggested_fields: Array<{
+      key: string;
+      label: string;
+      description?: string;
+      shape?: { kind: "scalar" | "string_list" | "record_list" | "unknown"; item_keys: string[] | null };
+    }>;
+  }>;
 };
 
 export function registerServiceWorkerListeners(deps: RouterDeps): void {
@@ -99,6 +131,38 @@ export function registerServiceWorkerListeners(deps: RouterDeps): void {
           });
           return true;
         }
+        case "ANALYZE_PAGE_STEP": {
+          const msg = message as unknown as {
+            workflowId: string;
+            stepIndex: number;
+            pageUrl: string;
+            tabId?: number;
+          };
+          deps.analyzePageStep(msg.workflowId, msg.stepIndex, msg.pageUrl, msg.tabId)
+            .then((analysis) => {
+              sendResponse({ type: "ANALYZE_PAGE_STEP_RESULT", analysis });
+            })
+            .catch((err: unknown) => {
+              log.error("Failed to analyze page step:", err);
+              sendResponse({ type: "ANALYZE_PAGE_STEP_FAILED", error: String(err) });
+            });
+          return true;
+        }
+        case "ANALYZE_LIVE_PAGE": {
+          const msg = message as unknown as { tabId?: number };
+          const tabId = msg.tabId ?? sender.tab?.id;
+          deps.analyzeLivePage(tabId)
+            .then((analysis) => sendResponse({ type: "ANALYZE_LIVE_PAGE_RESULT", analysis }))
+            .catch((err: unknown) => {
+              log.error("Failed to analyze live page:", err);
+              sendResponse({
+                type: "ANALYZE_LIVE_PAGE_FAILED",
+                error: err instanceof Error ? err.message : String(err),
+                code: (err && typeof err === "object" && "code" in err) ? (err as { code: string }).code : "ANALYSIS_FAILED",
+              });
+            });
+          return true;
+        }
         case "RECORD_EVENT": {
           const msg = message as ContentToBackgroundMessage;
           orchestrator
@@ -126,21 +190,55 @@ export function registerServiceWorkerListeners(deps: RouterDeps): void {
         case "STOP_RECORDING":
           orchestrator
             .stopRecording()
-            .then(() => {
-              sendResponse({ type: "RECORDING_STOPPED" });
+            .then((workflow) => {
+              sendResponse({ type: "RECORDING_STOPPED", workflow: workflow || null });
             })
             .catch((err) => {
               log.error("Failed to stop recording:", err);
-              sendResponse({ type: "RECORDING_STOPPED" });
+              sendResponse({ type: "RECORDING_STOPPED", workflow: null });
             });
           return true;
         case "ADD_EXTRACT_STEP": {
-          const payload = message as unknown as { fields: string; pageUrl?: string; pageTitle?: string; timestamp?: string };
+          const payload = message as unknown as {
+            fields: string;
+            pageUrl?: string;
+            pageTitle?: string;
+            timestamp?: string;
+            shapes?: Array<{ key: string; label?: string; kind: string; item_keys: string[] | null }>;
+            pageSnapshot?: {
+              page_url?: string;
+              page_title?: string;
+              visible_text?: string;
+              dom_snippet?: string;
+              captured_at?: string;
+            };
+            pageSnapshots?: Array<{
+              section_name: string;
+              page_url?: string;
+              page_title?: string;
+              visible_text?: string;
+              dom_snippet?: string;
+              captured_at?: string;
+            }>;
+          };
+          const eventPayload: Record<string, unknown> = { value: payload.fields };
+          if (payload.shapes && payload.shapes.length > 0) {
+            eventPayload.methods = [{ kind: "extract_shapes", shapes: payload.shapes }];
+          }
+          if (payload.pageSnapshot || (payload.pageSnapshots && payload.pageSnapshots.length > 0)) {
+            const pageSnapshot = payload.pageSnapshot || payload.pageSnapshots?.[0];
+            eventPayload.dom_context = {
+              ...(pageSnapshot ? { page_snapshot: pageSnapshot } : {}),
+              ...(payload.pageSnapshots && payload.pageSnapshots.length > 0
+                ? { page_snapshots: payload.pageSnapshots }
+                : {}),
+            };
+          }
           const event = {
             event_type: "extract" as const,
-            payload: { value: payload.fields },
-            page_url: payload.pageUrl || "",
-            page_title: payload.pageTitle || "",
+            payload: eventPayload,
+            page_url: payload.pageUrl || payload.pageSnapshot?.page_url || payload.pageSnapshots?.[0]?.page_url || "",
+            page_title: payload.pageTitle || payload.pageSnapshot?.page_title || payload.pageSnapshots?.[0]?.page_title || "",
             timestamp: payload.timestamp || new Date().toISOString(),
           };
           orchestrator
