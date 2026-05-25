@@ -208,6 +208,122 @@ async def test_build_execution_plan_parameterized(db_session: AsyncSession, monk
 
 
 @pytest.mark.asyncio
+async def test_execution_plan_preserves_dom_context_snapshots(db_session: AsyncSession, monkeypatch):
+    """Recorded page_snapshots on the extract step must survive template
+    substitution so the extension can extract per-section data on replay."""
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+
+    wf = Workflow(name="Snapshot Preservation", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    wf_id = str(wf.id)
+
+    page_snapshots = [
+        {"section_name": "main_profile", "page_url": "https://x/", "visible_text": "main"},
+        {"section_name": "skills", "page_url": "https://x/details/skills/", "visible_text": "Python\nGo"},
+    ]
+    db_session.add_all([
+        WorkflowStep(
+            workflow_id=wf_id,
+            step_index=0,
+            action_type="navigate",
+            value="https://x/",
+            intent="Open",
+        ),
+        WorkflowStep(
+            workflow_id=wf_id,
+            step_index=1,
+            action_type="extract",
+            value="About, Skills",
+            intent="Pull profile",
+            methods=[{"kind": "extract_shapes", "shapes": []}],
+            dom_context={"page_snapshots": page_snapshots},
+        ),
+    ])
+    await db_session.flush()
+
+    analysis_svc = SemanticAnalysisService(db_session)
+    await analysis_svc.analyze_workflow(wf_id)
+    await analysis_svc.update_analysis(wf_id, {"replay_strategy": "parameterized"})
+
+    svc = TemplateService(db_session)
+    template = await svc.generate_template(wf_id)
+    extract_step = next(s for s in template["steps"] if s["action_type"] == "extract")
+    assert extract_step["dom_context"] == {"page_snapshots": page_snapshots}
+
+    plan = await svc.build_execution_plan(wf_id, {"target": "https://y/"})
+    plan_extract = next(s for s in plan["steps"] if s["action_type"] == "extract")
+    assert plan_extract.get("dom_context", {}).get("page_snapshots") == page_snapshots
+
+
+@pytest.mark.asyncio
+async def test_build_execution_plan_backfills_legacy_template(db_session: AsyncSession, monkeypatch):
+    """Templates generated before dom_context was preserved should be patched
+    at runtime so existing workflows keep extracting per-section data."""
+    monkeypatch.setattr("core.config.settings.ai_api_key", "")
+    monkeypatch.setattr("core.config.settings.ai_provider", "openai")
+
+    wf = Workflow(name="Legacy Template Backfill", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    wf_id = str(wf.id)
+
+    page_snapshots = [
+        {"section_name": "main_profile", "page_url": "https://x/", "visible_text": "main"},
+    ]
+    db_session.add_all([
+        WorkflowStep(
+            workflow_id=wf_id,
+            step_index=0,
+            action_type="navigate",
+            value="https://x/",
+            intent="Open",
+        ),
+        WorkflowStep(
+            workflow_id=wf_id,
+            step_index=1,
+            action_type="extract",
+            value="About",
+            intent="Pull profile",
+            methods=[{"kind": "extract_shapes", "shapes": []}],
+            dom_context={"page_snapshots": page_snapshots},
+        ),
+    ])
+    await db_session.flush()
+
+    analysis_svc = SemanticAnalysisService(db_session)
+    await analysis_svc.analyze_workflow(wf_id)
+    await analysis_svc.update_analysis(wf_id, {"replay_strategy": "parameterized"})
+
+    svc = TemplateService(db_session)
+    await svc.generate_template(wf_id)
+
+    # Simulate a template persisted before the dom_context fix: strip it from
+    # the stored template_data, then verify build_execution_plan backfills it.
+    from sqlalchemy import select
+
+    from core.models.analysis import WorkflowTemplate
+
+    result = await db_session.execute(
+        select(WorkflowTemplate).where(WorkflowTemplate.workflow_id == wf_id, WorkflowTemplate.is_active)
+    )
+    stored = result.scalar_one()
+    stripped = dict(stored.template_data)
+    stripped["steps"] = [
+        {k: v for k, v in s.items() if k != "dom_context"} for s in stripped["steps"]
+    ]
+    stored.template_data = stripped
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(stored, "template_data")
+    await db_session.flush()
+
+    plan = await svc.build_execution_plan(wf_id, {"target": "https://y/"})
+    plan_extract = next(s for s in plan["steps"] if s["action_type"] == "extract")
+    assert plan_extract.get("dom_context", {}).get("page_snapshots") == page_snapshots
+
+
+@pytest.mark.asyncio
 async def test_no_analysis_fallback_to_literal(db_session: AsyncSession):
     wf = Workflow(name="No Analysis WF", status="active")
     db_session.add(wf)

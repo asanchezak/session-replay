@@ -66,6 +66,7 @@ class TemplateService:
                     "methods": s.methods,
                     "success_condition": s.success_condition,
                     "checkpoint": s.checkpoint,
+                    "dom_context": s.dom_context,
                 }
                 for s in steps
             ],
@@ -266,6 +267,8 @@ class TemplateService:
         else:
             template_data = template.template_data
 
+        await self._backfill_dom_context(workflow_id, template_data)
+
         raw_notes = analysis.ambiguity_notes or []
         ambiguity_notes = raw_notes if isinstance(raw_notes, list) else [raw_notes]
         if (
@@ -374,3 +377,20 @@ class TemplateService:
             .order_by(WorkflowStep.step_index)
         )
         return list(result.scalars().all())
+
+    async def _backfill_dom_context(self, workflow_id: str, template_data: dict) -> None:
+        steps = template_data.get("steps") or []
+        if not isinstance(steps, list) or not steps:
+            return
+        if all(isinstance(s, dict) and s.get("dom_context") for s in steps):
+            return
+        workflow_steps = await self._get_steps(workflow_id)
+        dom_by_index = {s.step_index: s.dom_context for s in workflow_steps if s.dom_context}
+        if not dom_by_index:
+            return
+        for step in steps:
+            if not isinstance(step, dict) or step.get("dom_context"):
+                continue
+            idx = step.get("step_index")
+            if isinstance(idx, int) and idx in dom_by_index:
+                step["dom_context"] = deepcopy(dom_by_index[idx])
