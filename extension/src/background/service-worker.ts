@@ -1,18 +1,13 @@
 import { orchestrator, runTabMap, setRunTab, clearRunTab } from "./orchestrator";
-import { apiClient, DEV_DEFAULTS } from "./api";
+import { apiClient } from "./api";
 import { createLogger } from "../shared/logger";
 import { stepHealer } from "./healer";
 import { stepExecutor } from "./executor";
-import { API_BASE_URL, DASHBOARD_ORIGIN } from "../shared/constants";
+import { registerServiceWorkerListeners } from "./message-router";
 import { commandExecutor } from "./command-executor";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
-import type {
-  ContentToBackgroundMessage,
-  BackgroundToContentMessage,
-  DetectChallengesMessage,
-  ChallengesDetectedResponse,
-} from "../shared/messaging";
+import type { BackgroundToContentMessage, DetectChallengesMessage, ChallengesDetectedResponse } from "../shared/messaging";
 import type { AgentDecision, AgentCommand, PageContext } from "../shared/types";
 
 const log = createLogger("service-worker");
@@ -34,207 +29,6 @@ function sendOverlay(
     : { type: "HIDE_OVERLAY" };
   chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 }
-
-chrome.runtime.onInstalled.addListener(() => {
-  log.log("Session Replay extension installed");
-  chrome.storage.session.get(["apiBaseUrl", "apiKey"]).then((stored) => {
-    if (!stored.apiBaseUrl || !stored.apiKey) {
-      chrome.storage.session.set({
-        apiBaseUrl: DEV_DEFAULTS.apiBase,
-        apiKey: DEV_DEFAULTS.apiKey,
-      });
-      log.log("Seeded default API config into session storage");
-    }
-  });
-});
-
-chrome.runtime.onMessage.addListener(
-  (
-    message:
-      | ContentToBackgroundMessage
-      | { type: string; [key: string]: unknown },
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response: unknown) => void,
-  ) => {
-    if (
-      "protocol_version" in message &&
-      message.protocol_version !== undefined &&
-      message.protocol_version !== 1
-    ) {
-      sendResponse({ type: "ERROR", code: "UNSUPPORTED_PROTOCOL_VERSION", received: message.protocol_version });
-      return;
-    }
-
-    switch (message.type) {
-      case "DEBUG_LOG": {
-        const m = message as unknown as { level: string; message: string; source?: string };
-        log.log(`[${m.source || "content"}] ${m.message}`);
-        sendResponse({ type: "DEBUG_LOG_ACK" });
-        break;
-      }
-      case "FETCH_WORKFLOWS": {
-        apiClient.listWorkflows().then((workflows) => {
-          sendResponse({ type: "WORKFLOWS", workflows });
-        }).catch((err) => {
-          sendResponse({ type: "WORKFLOWS_ERROR", error: err instanceof Error ? err.message : String(err) });
-        });
-        return true;
-      }
-      case "RUN_WORKFLOW": {
-        const msg = message as unknown as {
-          workflowId: string;
-          tabId?: number;
-          goal?: string;
-          params?: Record<string, unknown>;
-        };
-        const tabId = msg.tabId ?? sender.tab?.id;
-        // Respond as soon as the run is created so dashboards / bridges don't
-        // wait for the whole workflow loop to finish. Loop errors after the
-        // initial create are observable via the run record itself.
-        let responded = false;
-        executeAgentRun(msg.workflowId, tabId, msg.goal, msg.params, (runHandle) => {
-          if (!responded) {
-            responded = true;
-            sendResponse({ type: "RUN_STARTED", run: runHandle });
-          }
-        }).catch((err: unknown) => {
-          log.error("Failed to run workflow:", err);
-          if (!responded) {
-            responded = true;
-            sendResponse({ type: "RUN_FAILED", error: String(err) });
-          }
-        });
-        return true;
-      }
-      case "RECORD_EVENT": {
-        const msg = message as ContentToBackgroundMessage;
-        orchestrator
-          .pushEvent(msg.event)
-          .then(() => {
-            sendResponse({ type: "EVENT_RECORDED", id: "buffered", hash: "" });
-          })
-          .catch((err) => {
-            log.error("Failed to record event:", err);
-            sendResponse({ type: "EVENT_RECORDED", id: "", hash: "" });
-          });
-        return true;
-      }
-
-      case "START_RECORDING":
-        orchestrator.startRecording()
-          .then(() => sendResponse({ type: "RECORDING_STARTED" }))
-          .catch((err: unknown) => sendResponse({ type: "ERROR", message: String(err) }));
-        return true;
-
-      case "SET_RECORDING_GOAL": {
-        const goal = (message as Record<string, unknown>).goal as string || "";
-        orchestrator.setRecordingGoal(goal);
-        sendResponse({ type: "GOAL_SET" });
-        break;
-      }
-
-      case "STOP_RECORDING":
-        orchestrator
-          .stopRecording()
-          .then(() => {
-            sendResponse({ type: "RECORDING_STOPPED" });
-          })
-          .catch((err) => {
-            log.error("Failed to stop recording:", err);
-            sendResponse({ type: "RECORDING_STOPPED" });
-          });
-        return true;
-
-      case "ADD_EXTRACT_STEP": {
-        const payload = message as unknown as { fields: string; pageUrl?: string; pageTitle?: string; timestamp?: string };
-        const event = {
-          event_type: "extract" as const,
-          payload: { value: payload.fields },
-          page_url: payload.pageUrl || "",
-          page_title: payload.pageTitle || "",
-          timestamp: payload.timestamp || new Date().toISOString(),
-        };
-        orchestrator
-          .pushEvent(event)
-          .then(() => sendResponse({ type: "EVENT_RECORDED", id: "extract", hash: "" }))
-          .catch((err: unknown) => sendResponse({ type: "ERROR", message: String(err) }));
-        return true;
-      }
-
-      case "SELECTION_INTENT": {
-        const payload = message as unknown as {
-          selected_text: string;
-          container_text: string;
-          page_url?: string;
-          page_title?: string;
-          container_selector?: string;
-          timestamp?: string;
-        };
-        const event = {
-          event_type: "extract" as const,
-          payload: {
-            value: payload.selected_text,
-            dom_context: {
-              selected_text: payload.selected_text,
-              container_text: payload.container_text,
-              page_url: payload.page_url || "",
-              container_selector: payload.container_selector || "",
-            },
-          },
-          page_url: payload.page_url || "",
-          page_title: payload.page_title || "",
-          timestamp: payload.timestamp || new Date().toISOString(),
-        };
-        orchestrator
-          .pushEvent(event)
-          .then(() => sendResponse({ type: "EVENT_RECORDED", id: "selection_intent", hash: "" }))
-          .catch((err: unknown) => sendResponse({ type: "ERROR", message: String(err) }));
-        return true;
-      }
-
-      case "RESUME_RUN":
-        sendResponse({ type: "RUN_RESUMED" });
-        break;
-
-      case "CANCEL_RUN": {
-        const runId = (message as any).runId as string | undefined;
-        if (runId) {
-          canceledRuns.add(runId);
-          const tabId = runTabMap.get(runId);
-          apiClient.cancelRun(runId).catch(() => {});
-          if (tabId) sendOverlay(tabId, null);
-          orchestrator.notifyIdle();
-        }
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "GET_STATE":
-        sendResponse({ type: "STATE", state: orchestrator.getState() });
-        break;
-
-      case "EXECUTE_STEP": {
-        const msg = message as unknown as BackgroundToContentMessage;
-        executeStepOnTab(msg.step, sender.tab?.id)
-          .then((result) => {
-            sendResponse({ type: "STEP_RESULT", ...result });
-          })
-          .catch((err) => {
-            sendResponse({
-              type: "STEP_RESULT",
-              success: false,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          });
-        return true;
-      }
-
-      default:
-        sendResponse({ type: "ERROR", code: "UNKNOWN_MESSAGE", received: message.type });
-        break;
-    }
-  },
-);
 
 async function waitForTabLoad(tabId: number, timeoutMs: number = 15000): Promise<void> {
   // Check if tab is already complete (avoids race with onUpdated)
@@ -1328,106 +1122,13 @@ async function executeAgentRun(
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }
 
-chrome.runtime.onMessageExternal.addListener(
-  (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void) => {
-    const msg = message as {
-      type: string;
-      workflowId?: string;
-      tabId?: number;
-      goal?: string;
-      params?: Record<string, unknown>;
-    };
-    if (msg.type === "RUN_WORKFLOW" && msg.workflowId) {
-      log.log(`[External] RUN_WORKFLOW for ${msg.workflowId}`);
-      // Respond as soon as the run is created (via the onStart callback) so
-      // dashboards / e2e helpers don't have to wait for the whole workflow to
-      // finish. Surface failures via RUN_FAILED only when the run *creation*
-      // itself fails — later loop errors are observable via the run record.
-      let responded = false;
-      executeAgentRun(msg.workflowId, msg.tabId, msg.goal, msg.params, (runHandle) => {
-        if (!responded) {
-          responded = true;
-          sendResponse({ type: "RUN_STARTED", run: runHandle });
-        }
-      }).catch((err) => {
-        if (!responded) {
-          responded = true;
-          sendResponse({ type: "RUN_FAILED", error: String(err) });
-        } else {
-          log.error("[External] RUN_WORKFLOW loop failed after start:", err);
-        }
-      });
-      return true;
-    }
-    sendResponse({ type: "ERROR", code: "UNKNOWN_MESSAGE" });
-  },
-);
-
-chrome.alarms.create("keepAlive", { periodInMinutes: 4 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "keepAlive") {
-    Promise.allSettled([
-      fetch(`${API_BASE_URL}/health`, { signal: AbortSignal.timeout(3000) }),
-      fetch(DASHBOARD_ORIGIN, { method: "HEAD", signal: AbortSignal.timeout(3000) }),
-    ]).then(([be, dash]) => {
-      chrome.storage.session.set({
-        connStatus: {
-          backend: be.status === "fulfilled" && be.value.ok ? "up" : "down",
-          dashboard: dash.status === "fulfilled" ? "up" : "down",
-          checkedAt: Date.now(),
-        },
-      });
-    });
-  }
+registerServiceWorkerListeners({
+  canceledRuns,
+  sendOverlay,
+  executeAgentRun,
+  executeStepOnTab,
 });
 
-// Fallback navigate event capture: when a tab completes loading during an
-// active recording session, synthesize a "navigate" event so page transitions
-// are represented in the workflow even if the content-script click message
-// was lost mid-navigation.
-const _recentNavigateUrls = new Map<number, string>();
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status !== "complete") return;
-  if (!orchestrator.isRecording) return;
-  const url = tab.url || "";
-  if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url === "about:blank") return;
-  // Deduplicate: skip if this exact URL was already recorded for this tab.
-  if (_recentNavigateUrls.get(tabId) === url) return;
-  _recentNavigateUrls.set(tabId, url);
-  orchestrator.pushEvent({
-    event_type: "navigate",
-    payload: {
-      target: {},
-      intent: `Navigate to ${url}`,
-      value: url,
-    },
-    page_url: url,
-    page_title: tab.title || "",
-    timestamp: new Date().toISOString(),
-  }).catch(() => {});
-});
-
-// Tab lifecycle monitoring: when the target tab of an active run is closed,
-// notify the backend so the run is marked tab_closed (not resumable).
-chrome.tabs.onRemoved.addListener((tabId: number) => {
-  for (const [runId, trackedTabId] of runTabMap.entries()) {
-    if (trackedTabId === tabId) {
-      log.log(`[TabLifecycle] Tab ${tabId} closed for run ${runId} — notifying backend`);
-      apiClient.reportTabClosed(runId).catch((err) => {
-        log.error(`[TabLifecycle] Failed to report tab closed for run ${runId}:`, err);
-      });
-      clearRunTab(runId);
-    }
-  }
-});
-
-chrome.action.onClicked.addListener((tab) => {
-  if (tab.id) {
-    chrome.sidePanel?.open?.({ tabId: tab.id }).catch(() => {});
-  }
-});
-
-// Expose for e2e testing
 if (typeof self !== "undefined") {
   const g = self as unknown as Record<string, unknown>;
   g.__executeWorkflowRun = executeWorkflowRun;
