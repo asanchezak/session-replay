@@ -7,7 +7,7 @@ import {
 } from "./capture";
 import { captureDomSnippet } from "./dom";
 import { executeStep, type StepToExecute, type StepResult } from "./replay";
-import { extractStructuredData } from "./extraction";
+import { extractStructuredData, extractStructuredDataWithMissing } from "./extraction";
 import type {
   ContentToBackgroundMessage,
   BackgroundToContentMessage,
@@ -187,6 +187,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     const state = changes[STORAGE_KEY].newValue;
     recordingEnabled = state?.isRecording ?? false;
     eventCount = state?.events?.length ?? 0;
+    if (!recordingEnabled) _hideExtractButton();
     sendDebugLog("log", `Storage: recording ${recordingEnabled ? "enabled" : "disabled"} (${eventCount} events)`);
   }
 });
@@ -420,6 +421,7 @@ chrome.runtime.onMessage.addListener(
       case "SET_RECORDING":
         recordingEnabled = (msg as any).enabled ?? false;
         eventCount = 0;
+        if (!recordingEnabled) _hideExtractButton();
         sendDebugLog("log", `Recording ${recordingEnabled ? "enabled" : "disabled"}`);
         sendResponse({ success: true });
         break;
@@ -438,10 +440,11 @@ chrome.runtime.onMessage.addListener(
         break;
       case "EXTRACT_DATA": {
         const schema = (msg as any).outputSchema || null;
-        const data = extractStructuredData(schema);
+        const { data, missing_fields } = extractStructuredDataWithMissing(schema);
         sendResponse({
           type: "EXTRACT_DATA_RESULT",
           data,
+          missing_fields,
           url: window.location.href,
         });
         break;
@@ -623,6 +626,8 @@ document.addEventListener("mousedown", () => {
 // call stopPropagation() — critical for navigation links in SPA frameworks.
 document.addEventListener("click", (e: MouseEvent) => {
   if (!recordingEnabled) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.id === "sr-extract-host") return;
   const snapshot = preClickInputSnapshot;
   preClickInputSnapshot = null;
   sendToBackground(captureClick(e));
@@ -643,6 +648,209 @@ document.addEventListener("click", (e: MouseEvent) => {
     });
   }, 300);
 }, true);  // ← capture phase
+
+// ── Selection-based extract button during recording ──────────────
+
+const EXTRACT_BUTTON_STYLES = `
+  :host { all: initial; position: fixed; z-index: 2147483645; }
+  .sr-extract-btn {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px; border-radius: 8px;
+    background: #6C5CE7; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px; font-weight: 500;
+    border: none; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .sr-extract-btn:hover { background: #7C6EF7; }
+  .sr-extract-hint {
+    font-size: 10px; color: rgba(255,255,255,0.65);
+    margin-top: 4px; text-align: center;
+  }
+`;
+
+let _extractHost: HTMLDivElement | null = null;
+let _extractShadow: ShadowRoot | null = null;
+let _extractTimer: ReturnType<typeof setTimeout> | null = null;
+let _selectionDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function _clearExtractTimer(): void {
+  if (_extractTimer) { clearTimeout(_extractTimer); _extractTimer = null; }
+}
+
+function _getContainerText(target: Node): string {
+  const container = (target as Element).closest?.(
+    "article, section, main, [role='main'], .profile, .card, .pv-profile-card, .entity-result__item",
+  ) as HTMLElement | null;
+  const source = container || document.body;
+  return (source.textContent || "").trim().slice(0, 5000);
+}
+
+function _getContainerSelector(target: Node): string {
+  if (target instanceof Element) {
+    const id = target.id;
+    if (id) return `#${CSS.escape(id)}`;
+    const cls = (target as HTMLElement).className;
+    if (typeof cls === "string" && cls.trim()) {
+      return `${target.tagName.toLowerCase()}.${cls.trim().split(/\s+/).slice(0, 2).join(".")}`;
+    }
+    return target.tagName.toLowerCase();
+  }
+  return "";
+}
+
+function _showExtractButton(rect: DOMRect): void {
+  _clearExtractTimer();
+
+  if (!_extractHost || !_extractHost.isConnected) {
+    _extractHost = document.createElement("div");
+    _extractHost.id = "sr-extract-host";
+    document.body.appendChild(_extractHost);
+    _extractShadow = _extractHost.attachShadow({ mode: "closed" });
+
+    const style = document.createElement("style");
+    style.textContent = EXTRACT_BUTTON_STYLES;
+    _extractShadow.appendChild(style);
+
+    const btn = document.createElement("button");
+    btn.className = "sr-extract-btn";
+    btn.textContent = "⊕ Extract These Fields";
+    btn.title = "Select column headers or field labels to extract structured data";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _handleExtractClick();
+    });
+    _extractShadow.appendChild(btn);
+
+    const hint = document.createElement("div");
+    hint.className = "sr-extract-hint";
+    hint.textContent = "AI will infer the fields to extract";
+    _extractShadow.appendChild(hint);
+  }
+
+  const btnW = 180;
+  const btnH = 56;
+  let top = rect.bottom + 8;
+  let left = rect.right;
+
+  if (left + btnW > window.innerWidth - 8) left = window.innerWidth - btnW - 8;
+  if (top + btnH > window.innerHeight - 8) top = rect.top - btnH - 8;
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
+
+  _extractHost.style.top = `${top}px`;
+  _extractHost.style.left = `${left}px`;
+
+  _extractTimer = setTimeout(_hideExtractButton, 8000);
+}
+
+function _hideExtractButton(): void {
+  _clearExtractTimer();
+  if (_extractHost && _extractHost.parentNode) {
+    _extractHost.parentNode.removeChild(_extractHost);
+  }
+  _extractHost = null;
+  _extractShadow = null;
+}
+
+function _handleExtractClick(): void {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const selectedText = sel.toString().trim();
+  if (!selectedText) return;
+
+  const range = sel.getRangeAt(0);
+  const containerText = _getContainerText(range.startContainer);
+  const containerSelector = _getContainerSelector(range.startContainer.parentElement || range.startContainer);
+
+  chrome.runtime.sendMessage({
+    type: "SELECTION_INTENT",
+    selected_text: selectedText,
+    container_text: containerText,
+    page_url: window.location.href,
+    page_title: document.title,
+    container_selector: containerSelector,
+    timestamp: new Date().toISOString(),
+  }).catch(() => {});
+
+  // Brief feedback
+  if (_extractShadow) {
+    const btn = _extractShadow.querySelector(".sr-extract-btn");
+    if (btn) {
+      btn.textContent = "✓ Extraction Marked";
+      (btn as HTMLElement).style.background = "#00B894";
+    }
+  }
+  setTimeout(_hideExtractButton, 1200);
+}
+
+function _checkSelectionAndShow(): void {
+  if (!recordingEnabled) { _hideExtractButton(); return; }
+
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+    _hideExtractButton();
+    return;
+  }
+
+  const activeEl = document.activeElement;
+  if (
+    activeEl instanceof HTMLInputElement ||
+    activeEl instanceof HTMLTextAreaElement ||
+    (activeEl instanceof HTMLElement && activeEl.isContentEditable)
+  ) {
+    return;
+  }
+
+  let rect: DOMRect | null = null;
+  try {
+    if (sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(sel.rangeCount - 1);
+    rect = range.getBoundingClientRect();
+  } catch {
+    const anchor = sel.anchorNode;
+    if (anchor && anchor.parentElement) {
+      rect = anchor.parentElement.getBoundingClientRect();
+    }
+  }
+  if (!rect || isNaN(rect.top) || (rect.width === 0 && rect.height === 0)) return;
+
+  _showExtractButton(rect);
+}
+
+// Primary: selectionchange catches keyboard selection (Shift+Arrow, Ctrl+A)
+document.addEventListener("selectionchange", () => {
+  if (!recordingEnabled) return;
+  if (_selectionDebounce) clearTimeout(_selectionDebounce);
+  _selectionDebounce = setTimeout(() => {
+    _selectionDebounce = null;
+    _checkSelectionAndShow();
+  }, 150);
+});
+
+// Supplementary: mouseup gives precise positioning for mouse-driven selections
+document.addEventListener("mouseup", () => {
+  if (!recordingEnabled) return;
+  _hideExtractButton();
+  setTimeout(() => {
+    if (!recordingEnabled) return;
+    _checkSelectionAndShow();
+  }, 10);
+}, true);
+
+// Hide button on click-away (but not when clicking the button itself)
+document.addEventListener("mousedown", (e: MouseEvent) => {
+  if (!_extractHost) return;
+  const path = e.composedPath();
+  if (path.includes(_extractHost)) return;
+  _hideExtractButton();
+}, true);
+
+// Clean up button on page unload
+window.addEventListener("pagehide", () => _hideExtractButton());
+window.addEventListener("beforeunload", () => _hideExtractButton());
 
 // Capture phase for change too — catches events that child handlers stop.
 document.addEventListener("change", (e: Event) => {

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint
-from sqlalchemy import JSON
+from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.models.workflow import Workflow
 from services.agent_models import (
     SAFETY_LIMITS,
@@ -17,13 +18,12 @@ from services.agent_models import (
 )
 from services.agent_service import (
     AgentService,
-    _run_adapt_count,
     _run_active_step,
+    _run_adapt_count,
     _run_restart_count,
     _run_step_recovery_started_at,
 )
 from services.execution_service import ExecutionService
-from core.config import settings
 
 
 @pytest.fixture(autouse=True)
@@ -204,6 +204,7 @@ async def test_result_success_resets_recovery_window_state(db_session: AsyncSess
 @pytest.mark.asyncio
 async def test_result_success_with_via_method_index_audit(db_session: AsyncSession):
     from sqlalchemy import select
+
     from core.models.event import EventLog
 
     svc = ExecutionService(db_session)
@@ -238,6 +239,7 @@ async def test_result_success_with_via_method_index_audit(db_session: AsyncSessi
 @pytest.mark.asyncio
 async def test_result_success_omits_via_method_index_when_not_provided(db_session: AsyncSession):
     from sqlalchemy import select
+
     from core.models.event import EventLog
 
     svc = ExecutionService(db_session)

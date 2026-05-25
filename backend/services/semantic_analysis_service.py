@@ -8,7 +8,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai.client import get_ai_provider
-from ai.prompts import build_semantic_analysis_prompt, SEMANTIC_ANALYSIS_SYSTEM
+from ai.prompts import (
+    SELECTION_INFERENCE_SYSTEM,
+    SEMANTIC_ANALYSIS_SYSTEM,
+    build_selection_inference_prompt,
+    build_semantic_analysis_prompt,
+)
 from core.config import settings
 from core.models.analysis import (
     OutputSpecification,
@@ -99,6 +104,10 @@ class SemanticAnalysisService:
 
         # Persist everything
         analysis = await self._persist_analysis(workflow_id, ai_result, steps)
+
+        # Post-analysis: infer extraction fields from selection_intent events
+        await self._infer_extract_fields(workflow_id, steps, api_key=effective_key)
+
         await self.audit.append(AppendEvent(
             event_type="analysis_completed",
             payload={
@@ -795,6 +804,75 @@ class SemanticAnalysisService:
                 "confidence": 0.5,
             }
         return {"type": "unknown", "confidence": 0.0}
+
+    async def _infer_extract_fields(
+        self,
+        workflow_id: str,
+        steps: list[WorkflowStep],
+        api_key: str | None = None,
+    ) -> None:
+        """For extract steps that have dom_context (from selection_intent events),
+        use AI to infer the field names from the selected text + page content."""
+        extract_steps_with_context = [
+            s for s in steps
+            if s.action_type == "extract"
+            and s.dom_context
+            and isinstance(s.dom_context, dict)
+            and s.dom_context.get("selected_text")
+            and s.dom_context.get("container_text")
+        ]
+        if not extract_steps_with_context:
+            return
+
+        effective_key = api_key or settings.ai_api_key
+        if not effective_key or settings.ai_provider == "mock":
+            logger.info(
+                "Skipping extract field inference for workflow_id=%s: AI not available",
+                workflow_id,
+            )
+            return
+
+        provider = get_ai_provider()
+        for step in extract_steps_with_context:
+            ctx = step.dom_context
+            selected_text = str(ctx.get("selected_text", "") or "")
+            container_text = str(ctx.get("container_text", "") or "")
+            page_url = str(ctx.get("page_url", "") or "")
+
+            prompt = build_selection_inference_prompt(
+                selected_text=selected_text,
+                container_text=container_text,
+                page_url=page_url,
+            )
+
+            try:
+                response = await provider.generate(
+                    prompt,
+                    system=SELECTION_INFERENCE_SYSTEM,
+                )
+                result = json.loads(response.content)
+                fields = result.get("fields", [])
+                if fields and isinstance(fields, list):
+                    field_str = ", ".join(str(f) for f in fields)
+                    step.value = field_str
+                    logger.info(
+                        "Inferred extract fields for step %d: %s → %s",
+                        step.step_index,
+                        field_str,
+                        result.get("description", ""),
+                    )
+                else:
+                    logger.info(
+                        "No fields inferred for extract step %d (selected: %s...)",
+                        step.step_index,
+                        selected_text[:60],
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Failed to infer extract fields for step %d: %s",
+                    step.step_index,
+                    exc,
+                )
 
     async def _get_workflow(self, workflow_id: str) -> Workflow:
         result = await self.session.execute(select(Workflow).where(Workflow.id == uuid.UUID(workflow_id)))

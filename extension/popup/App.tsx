@@ -301,7 +301,10 @@ function App() {
         />
       )}
       {state.type === "recording" && (
-        <RecordingView stepCount={state.step_count} onStop={handleStopRecording} />
+        <RecordingView
+          stepCount={state.step_count}
+          onStop={handleStopRecording}
+        />
       )}
       {state.type === "running" && (
         <RunningView

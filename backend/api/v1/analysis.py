@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
-from services.workflow_connector_service import WorkflowConnectorService
 from services.semantic_analysis_service import SemanticAnalysisService
+from services.workflow_connector_service import WorkflowConnectorService
 
 logger = logging.getLogger(__name__)
 

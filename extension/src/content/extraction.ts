@@ -1,14 +1,22 @@
 export function extractStructuredData(
   outputSchema: Record<string, unknown> | null,
 ): Record<string, unknown>[] {
+  const { data } = extractStructuredDataWithMissing(outputSchema);
+  return data;
+}
+
+export function extractStructuredDataWithMissing(
+  outputSchema: Record<string, unknown> | null,
+): { data: Record<string, unknown>[]; missing_fields: string[] } {
   const results: Record<string, unknown>[] = [];
+  const missingFields: string[] = [];
 
   if (!outputSchema) {
     const text = extractTextContent(document.body);
     if (text.length > 0) {
       results.push({ text });
     }
-    return results;
+    return { data: results, missing_fields: missingFields };
   }
 
   const schemaItems = outputSchema?.items as Record<string, unknown> | undefined;
@@ -16,7 +24,7 @@ export function extractStructuredData(
 
   if (Object.keys(properties).length === 0) {
     results.push({ page_text: extractTextContent(document.body) });
-    return results;
+    return { data: results, missing_fields: missingFields };
   }
 
   const propertyKeys = Object.keys(properties);
@@ -27,7 +35,15 @@ export function extractStructuredData(
     results.push({ page_title: document.title, url: window.location.href });
   }
 
-  return results;
+  // Track fields that were not found in any result
+  for (const key of propertyKeys) {
+    const found = results.some((r) => key in r);
+    if (!found) {
+      missingFields.push(key);
+    }
+  }
+
+  return { data: results, missing_fields: missingFields };
 }
 
 function extractTextContent(element: Element, maxLength: number = 5000): string {

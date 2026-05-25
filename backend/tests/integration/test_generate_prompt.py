@@ -42,9 +42,9 @@ async def test_no_ai_key_uses_heuristic(api_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_with_ai_key_calls_provider(api_client, monkeypatch):
-    from core.config import settings
-    from ai.client import AIResponse
     import api.v1.workflows as wf_module
+    from ai.client import AIResponse
+    from core.config import settings
 
     class _OkProvider:
         async def generate(self, prompt, system=None, max_tokens=1024) -> AIResponse:
@@ -65,10 +65,9 @@ async def test_with_ai_key_calls_provider(api_client, monkeypatch):
 @pytest.mark.asyncio
 async def test_with_ai_key_handles_provider_error(api_client, monkeypatch):
     """When the provider fails the endpoint must fall back to the heuristic, not 500."""
-    from core.config import settings
-
-    from ai.client import AIProvider, AIResponse
     import api.v1.workflows as wf_module
+    from ai.client import AIProvider, AIResponse
+    from core.config import settings
 
     class _ErrorProvider(AIProvider):
         async def generate(self, prompt, system=None, max_tokens=1024) -> AIResponse:

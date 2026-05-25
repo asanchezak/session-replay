@@ -1,20 +1,19 @@
 """Unit tests for the WorkflowSimplifier 5-pass pipeline."""
 import json
+
 import pytest
 
 from services.workflow_simplifier import (
     WorkflowSimplifier,
     _build_simplification_prompt,
     _clean_url,
+    _is_ephemeral_selector,
     _pass1_clean_urls,
     _pass2_filter_selectors,
     _pass3_collapse,
     _pass3b_mark_checkpoints,
-    _is_ephemeral_selector,
     _step_signature,
-    _synthesize_intent,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pass 1 — URL cleaning
@@ -364,8 +363,9 @@ async def test_simplify_empty_list_returns_empty():
 async def test_simplify_single_step_passes_through(monkeypatch):
     class _IdentityProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):
-            from ai.client import AIResponse
             import json as _json
+
+            from ai.client import AIResponse
             return AIResponse(content=_json.dumps([
                 {"action_type": "navigate", "value": "https://example.com", "intent": "Open page", "selector_chain": [], "checkpoint": False},
             ]))
@@ -985,9 +985,10 @@ async def test_pass4_cannot_remove_start_test_click_before_results_click(monkeyp
 async def test_simplifier_full_pipeline_speedtest(monkeypatch):
     class IdentityProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):
-            from ai.client import AIResponse
             # Return whatever steps are in the prompt as-is (parse from prompt)
             import re
+
+            from ai.client import AIResponse
             m = re.search(r"Recorded steps.*?:\n(\[.*?\])\n\n", prompt, re.DOTALL)
             if m:
                 return AIResponse(content=m.group(1))

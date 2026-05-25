@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 # Workstream E: the decision verb on the wire. Ten string literals; the
 # extension dispatcher in service-worker.ts switches on these strings
 # literally — they must stay in sync.

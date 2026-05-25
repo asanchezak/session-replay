@@ -9,12 +9,10 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from core.models.connector import ConnectorConfig
 from core.models.webhook import WebhookTrigger
-from core.models.workflow import Workflow
 from services.connector_forum_service import ConnectorForumService
 from services.execution_service import ExecutionService
-from services.workflow_connector_service import _short_description
 from services.template_service import TemplateService
-from services.workflow_connector_service import WorkflowConnectorService
+from services.workflow_connector_service import WorkflowConnectorService, _short_description
 
 EVENT_KIND_NEW_JOB_POSITION = "new_job_position"
 SUPPORTED_EVENT_KINDS = {EVENT_KIND_NEW_JOB_POSITION}

@@ -16,10 +16,14 @@ from api.v1.runs import (
     HealResultRequest,
     HealStepRequest,
     StepResultRequest,
+    advance_step_run,
+    cancel_run,
+    checkpoint_run,
     clear_heal_overrides,
     complete_run,
     create_run,
     delete_all_runs,
+    fail_run,
     get_next_step,
     get_run,
     get_run_events,
@@ -33,13 +37,9 @@ from api.v1.runs import (
     report_extraction,
     report_step_result,
     resume_run,
-    cancel_run,
-    fail_run,
-    checkpoint_run,
-    advance_step_run,
 )
 from core.config import settings
-from core.exceptions import NotFoundError, StateTransitionError
+from core.exceptions import StateTransitionError
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
 from services.execution_service import ExecutionService

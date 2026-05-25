@@ -12,7 +12,6 @@ import copy
 
 import pytest
 
-
 respx = pytest.importorskip("respx")
 import httpx  # noqa: E402
 

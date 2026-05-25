@@ -8,7 +8,7 @@ import { OutputSchemaPreview } from "../components/OutputSchemaPreview";
 import { RunParameterModal } from "../components/RunParameterModal";
 import Banner from "../components/Banner";
 import { useApi, useApiData } from "../hooks/useApi";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database } from "lucide-react";
 
 interface Step {
   step_index: number;
@@ -1087,7 +1087,18 @@ export default function WorkflowDetailPage() {
                   className="flex items-center gap-3 py-2 px-3 rounded-md text-sm text-text-primary hover:bg-bg-elevated transition-colors"
                 >
                   <span className="text-text-gray text-xs w-5">{step.step_index}.</span>
-                  <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  {step.action_type === "extract" ? (
+                    <span className="text-accent text-xs uppercase font-medium flex items-center gap-1">
+                      <Database size={11} /> Extract
+                    </span>
+                  ) : (
+                    <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  )}
+                  {step.value && step.action_type === "extract" && (
+                    <span className="text-text-secondary text-xs">
+                      {step.value.split(",").map((f: string) => f.trim()).join(", ")}
+                    </span>
+                  )}
                   {(analysis?.parameters || [])
                     .filter((parameter) => parameterConsumerSteps(data, parameter).some((candidate) => candidate.step_index === step.step_index))
                     .map((parameter) => (
@@ -1098,12 +1109,12 @@ export default function WorkflowDetailPage() {
                         Uses {parameter.key}
                       </span>
                     ))}
-                  {step.selector_chain && step.selector_chain[0] && (
+                  {step.action_type !== "extract" && step.selector_chain && step.selector_chain[0] && (
                     <span className="text-text-gray text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
                       {step.selector_chain[0].value}
                     </span>
                   )}
-                  {step.value && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
+                  {step.value && step.action_type !== "extract" && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
                   {step.intent && <span className="text-text-secondary text-xs italic">{step.intent}</span>}
                 </div>
               ))}
@@ -1123,7 +1134,18 @@ export default function WorkflowDetailPage() {
                   className="flex items-center gap-3 py-2 px-3 rounded-md text-sm text-text-primary hover:bg-bg-elevated transition-colors"
                 >
                   <span className="text-text-gray text-xs w-5">{step.step_index}.</span>
-                  <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  {step.action_type === "extract" ? (
+                    <span className="text-accent text-xs uppercase font-medium flex items-center gap-1">
+                      <Database size={11} /> Extract
+                    </span>
+                  ) : (
+                    <span className="text-info text-xs uppercase font-medium">{step.action_type}</span>
+                  )}
+                  {step.value && step.action_type === "extract" && (
+                    <span className="text-text-secondary text-xs">
+                      {step.value.split(",").map((f: string) => f.trim()).join(", ")}
+                    </span>
+                  )}
                   {(analysis?.parameters || [])
                     .filter((parameter) => parameterConsumerSteps(data, parameter).some((candidate) => candidate.step_index === step.step_index))
                     .map((parameter) => (
@@ -1134,12 +1156,12 @@ export default function WorkflowDetailPage() {
                         Uses {parameter.key}
                       </span>
                     ))}
-                  {step.selector_chain && step.selector_chain[0] && (
+                  {step.action_type !== "extract" && step.selector_chain && step.selector_chain[0] && (
                     <span className="text-text-gray text-xs font-mono truncate max-w-[200px]" title={step.selector_chain[0].value}>
                       {step.selector_chain[0].value}
                     </span>
                   )}
-                  {step.value && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
+                  {step.value && step.action_type !== "extract" && <span className="text-text-secondary text-xs">"{step.value.slice(0, 50)}"</span>}
                   {step.intent && <span className="text-text-secondary text-xs italic">{step.intent}</span>}
                 </div>
               ))}

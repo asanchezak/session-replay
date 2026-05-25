@@ -510,8 +510,8 @@ async def test_e2e_checkpoint_and_recovery(api_client: AsyncClient, monkeypatch)
     assert len(checkpoint_events) == 2
 
     # Simulate recovery: record AI recovery suggestion
-    from ai.client import AIResponse
     import api.v1.ai as ai_module
+    from ai.client import AIResponse
 
     class _FakeProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):

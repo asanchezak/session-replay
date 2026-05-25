@@ -23,7 +23,6 @@ from core.models.analysis import WorkflowParameter
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.models.workflow import WorkflowStep
-from core.utils import to_uuid
 
 logger = logging.getLogger(__name__)
 

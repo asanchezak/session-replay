@@ -100,6 +100,7 @@ async def test_record_decision_failure_preserves_session_objects(db_session):
     untouched.
     """
     from unittest.mock import patch
+
     from core.models.workflow import Workflow
     from services.execution_service import ExecutionService
 

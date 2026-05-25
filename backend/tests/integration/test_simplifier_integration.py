@@ -1,11 +1,12 @@
 """Integration tests for the WorkflowSimplifier wired into record_workflow."""
 import json
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.models.workflow import Workflow, WorkflowStep
-from sqlalchemy import select
+from core.models.workflow import WorkflowStep
 
 _HEADERS = {"X-API-Key": "dev-api-key-change-in-production"}
 
@@ -31,9 +32,10 @@ async def test_record_speedtest_workflow_simplified(api_client: AsyncClient, db_
 
     class IdentityProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):
-            from ai.client import AIResponse
             # Extract the JSON array from the prompt and return it
             import re
+
+            from ai.client import AIResponse
             m = re.search(r"steps.*?:\n(\[.*?\])\n\n", prompt, re.DOTALL)
             if m:
                 try:
@@ -83,8 +85,9 @@ async def test_record_clean_workflow_not_over_simplified(api_client: AsyncClient
 
     class IdentityProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):
-            from ai.client import AIResponse
             import re
+
+            from ai.client import AIResponse
             m = re.search(r"steps.*?:\n(\[.*?\])\n\n", prompt, re.DOTALL)
             if m:
                 try:
@@ -279,8 +282,9 @@ async def test_record_speedtest_full_shape_drops_side_effect_navigate(
 
     class IdentityProvider:
         async def generate(self, prompt, system=None, max_tokens=1024):
-            from ai.client import AIResponse
             import re
+
+            from ai.client import AIResponse
             m = re.search(r"steps.*?:\n(\[.*?\])\n\n", prompt, re.DOTALL)
             if m:
                 try:

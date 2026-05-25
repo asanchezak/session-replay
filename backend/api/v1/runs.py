@@ -3,17 +3,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
 from core.exceptions import NotFoundError, StateTransitionError
-from core.state_machine import RunStatus
 from core.models.ai_decision_outcome import AIDecisionOutcome
 from core.models.ai_reasoning_chain import AIReasoningChain
 from core.models.artifact import Artifact
@@ -23,6 +22,7 @@ from core.models.page_state_snapshot import PageStateSnapshot
 from core.models.recovery_attempt_trace import RecoveryAttemptTrace
 from core.models.run import ExecutionRun
 from core.models.run_summary import RunSummary
+from core.state_machine import RunStatus
 from services.artifact_service import ArtifactService
 from services.audit import AppendEvent, AuditService
 from services.execution_service import ExecutionService

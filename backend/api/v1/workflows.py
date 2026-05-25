@@ -233,13 +233,14 @@ async def _do_record_workflow(
             value=value,
             methods=methods,
             success_condition=success_condition,
+            dom_context=payload.get("dom_context"),
         )
         step_objs.append(step)
 
     # Causal enrichment: annotate each step with timing and navigation causality
     # derived from the raw event stream.  Stored in accessibility_metadata (no
     # migration needed) so the AI can surface skip hints and timing guidance.
-    from datetime import datetime, timezone
+    from datetime import datetime
     for i, ev in enumerate(deduped_events):
         prev = deduped_events[i - 1] if i > 0 else None
         nxt = deduped_events[i + 1] if i < len(deduped_events) - 1 else None

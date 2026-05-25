@@ -1,4 +1,5 @@
 import asyncio
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -6,9 +7,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-import os
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from api.main import app
 from core.config import settings

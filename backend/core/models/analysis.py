@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin

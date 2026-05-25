@@ -14,17 +14,17 @@ import adapters  # noqa: F401
 from api.v1.agent import router as agent_router
 from api.v1.ai import router as ai_router
 from api.v1.analysis import router as analysis_router
-from api.v1.webhooks import router as webhooks_router
 from api.v1.artifacts import router as artifacts_router
 from api.v1.audit import router as audit_router
 from api.v1.client_logs import router as client_logs_router
 from api.v1.connectors import router as connectors_router
 from api.v1.debug import router as debug_router
 from api.v1.events import router as events_router
-from api.v1.interventions import router as interventions_router
 from api.v1.integrations import router as integrations_router
+from api.v1.interventions import router as interventions_router
 from api.v1.runs import router as runs_router
 from api.v1.settings import router as settings_router
+from api.v1.webhooks import router as webhooks_router
 from api.v1.workflows import router as workflows_router
 from core.config import settings
 from core.database import engine

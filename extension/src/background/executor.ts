@@ -78,6 +78,7 @@ export class StepExecutor {
       const result = response as {
         type: string;
         data: Record<string, unknown>[];
+        missing_fields?: string[];
         url: string;
         error?: string;
       };
@@ -89,6 +90,7 @@ export class StepExecutor {
           schema: outputSchema,
           url: result.url,
           timestamp: new Date().toISOString(),
+          missing_fields: result.missing_fields,
         };
       }
       return null;

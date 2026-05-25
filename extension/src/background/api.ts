@@ -326,6 +326,13 @@ export class ApiClient {
       { action },
     );
   }
+
+  async aiExtract(pageContent: string, extractionSchema: Record<string, unknown>) {
+    return this.request<{ data: Record<string, unknown> }>(
+      "POST", `/ai/extract`,
+      { page_content: pageContent, extraction_schema: extractionSchema },
+    );
+  }
 }
 
 export const apiClient = new ApiClient();

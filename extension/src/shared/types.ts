@@ -17,7 +17,8 @@ export type ActionType =
   | "hover"
   | "copy"
   | "paste"
-  | "tab_change";
+  | "tab_change"
+  | "extract";
 
 export interface MethodDef {
   action_type: ActionType;
@@ -149,6 +150,7 @@ export interface ExtractedData {
   schema: Record<string, unknown> | null;
   url: string;
   timestamp: string;
+  missing_fields?: string[];
 }
 
 export interface AgentCommandSelector {

@@ -145,6 +145,53 @@ chrome.runtime.onMessage.addListener(
           });
         return true;
 
+      case "ADD_EXTRACT_STEP": {
+        const payload = message as unknown as { fields: string; pageUrl?: string; pageTitle?: string; timestamp?: string };
+        const event = {
+          event_type: "extract" as const,
+          payload: { value: payload.fields },
+          page_url: payload.pageUrl || "",
+          page_title: payload.pageTitle || "",
+          timestamp: payload.timestamp || new Date().toISOString(),
+        };
+        orchestrator
+          .pushEvent(event)
+          .then(() => sendResponse({ type: "EVENT_RECORDED", id: "extract", hash: "" }))
+          .catch((err: unknown) => sendResponse({ type: "ERROR", message: String(err) }));
+        return true;
+      }
+
+      case "SELECTION_INTENT": {
+        const payload = message as unknown as {
+          selected_text: string;
+          container_text: string;
+          page_url?: string;
+          page_title?: string;
+          container_selector?: string;
+          timestamp?: string;
+        };
+        const event = {
+          event_type: "extract" as const,
+          payload: {
+            value: payload.selected_text,
+            dom_context: {
+              selected_text: payload.selected_text,
+              container_text: payload.container_text,
+              page_url: payload.page_url || "",
+              container_selector: payload.container_selector || "",
+            },
+          },
+          page_url: payload.page_url || "",
+          page_title: payload.page_title || "",
+          timestamp: payload.timestamp || new Date().toISOString(),
+        };
+        orchestrator
+          .pushEvent(event)
+          .then(() => sendResponse({ type: "EVENT_RECORDED", id: "selection_intent", hash: "" }))
+          .catch((err: unknown) => sendResponse({ type: "ERROR", message: String(err) }));
+        return true;
+      }
+
       case "RESUME_RUN":
         sendResponse({ type: "RUN_RESUMED" });
         break;
@@ -298,6 +345,99 @@ async function detectChallengesOnTab(tabId: number): Promise<ChallengeDetection[
   }
 }
 
+function parseExtractFields(value: string): string[] {
+  return value
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+}
+
+function buildExtractSchema(fields: string[]): Record<string, unknown> {
+  const properties: Record<string, { type: string }> = {};
+  for (const f of fields) {
+    const key = f.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    properties[key] = { type: "string" };
+  }
+  return { items: { properties } };
+}
+
+async function executeExtractStep(
+  runId: string,
+  stepIndex: number,
+  step: { action_type: string; value?: string; intent?: string },
+  targetTabId: number,
+): Promise<void> {
+  const fields = parseExtractFields(step.value || "");
+  if (fields.length === 0) {
+    log.log(`[Extract] Step ${stepIndex}: no fields specified, skipping`);
+    await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
+    return;
+  }
+
+  const schema = buildExtractSchema(fields);
+  log.log(`[Extract] Step ${stepIndex}: fields=${fields.join(",")}`);
+
+  const extraction = await stepExecutor.extractData(
+    targetTabId,
+    schema,
+    stepIndex,
+  );
+
+  let data = extraction?.data || [];
+  const missingFields = extraction?.missing_fields || [];
+
+  // AI fallback: if heuristic extraction missed some fields, ask the AI
+  if (missingFields.length > 0 && data.length > 0) {
+    log.log(
+      `[Extract] Step ${stepIndex}: ${missingFields.length} field(s) missing (${missingFields.join(", ")}), trying AI`,
+    );
+    try {
+      let pageText: string | null = null;
+      try {
+        const ctx = await commandExecutor.captureContext(targetTabId);
+        pageText = ctx.visible_text || ctx.dom_snippet || "";
+      } catch {
+        // context capture is best-effort
+      }
+
+      if (pageText) {
+        const missingSchema: Record<string, unknown> = {
+          properties: Object.fromEntries(
+            missingFields.map((f) => [f, { type: "string" }]),
+          ),
+        };
+        const aiResult = await apiClient.aiExtract(pageText, missingSchema);
+        const aiData = aiResult.data as Record<string, unknown>;
+        if (aiData && typeof aiData === "object" && !Array.isArray(aiData)) {
+          // Merge AI results into the first record
+          for (const [key, val] of Object.entries(aiData)) {
+            if (val != null && !(key in data[0])) {
+              data[0][key] = val;
+            }
+          }
+          log.log(`[Extract] Step ${stepIndex}: AI filled ${Object.keys(aiData).length} field(s)`);
+        }
+      }
+    } catch (err) {
+      log.error(`[Extract] Step ${stepIndex}: AI fallback failed:`, err);
+    }
+  }
+
+  if (data.length > 0) {
+    await apiClient.reportExtraction(
+      runId,
+      stepIndex,
+      data,
+      extraction?.schema || schema,
+    );
+    log.log(`[Extract] Step ${stepIndex}: recorded ${data.length} record(s)`);
+  } else {
+    log.log(`[Extract] Step ${stepIndex}: no data extracted`);
+  }
+
+  await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
+}
+
 async function extractAndReportRunData(
   workflowId: string,
   runId: string,
@@ -447,6 +587,14 @@ async function executeWorkflowRun(
     let navPromise: Promise<void> | null = null;
     if (actionType === "navigate") {
       navPromise = waitForTabLoad(targetTabId);
+    }
+
+    // Extract steps: parse value into a field schema, run heuristic extraction
+    // on the current page, then report results directly — no DOM manipulation.
+    if (actionType === "extract") {
+      await executeExtractStep(runId, i, step, targetTabId);
+      await new Promise((r) => setTimeout(r, stepDelay));
+      continue;
     }
 
     const stepToExecute: BackgroundToContentMessage["step"] = {
@@ -607,8 +755,10 @@ async function executeWorkflowRun(
       log.error("Failed to complete run:", err);
     }
 
-    // Attempt data extraction after successful run
-    if (targetTabId) {
+    // Attempt data extraction after successful run — skip if workflow already
+    // has per-step extract actions (they've already reported extraction events).
+    const hasExtractSteps = steps.some((s) => s.action_type === "extract");
+    if (targetTabId && !hasExtractSteps) {
       await extractAndReportRunData(workflowId, runId, targetTabId, steps.length);
     }
   }
@@ -749,6 +899,31 @@ async function executeAgentRun(
     const contextForPoll = pageContext.blocking_type === "unexpected_modal"
       ? { ...pageContext, is_blocking: false, blocking_type: null }
       : pageContext;
+
+    // Extract steps are deterministic — execute them inline without an AI poll.
+    const currentStep = steps[currentStepIndex] as
+      | { action_type?: string; value?: string; intent?: string }
+      | undefined;
+    if (currentStep && currentStep.action_type === "extract") {
+      log.log(`[Agent] Extract step ${currentStepIndex}: executing inline`);
+      await executeExtractStep(
+        runId,
+        currentStepIndex,
+        {
+          action_type: "extract",
+          value: currentStep.value,
+          intent: currentStep.intent,
+        },
+        targetTabId,
+      );
+      currentStepIndex++;
+      if (currentStepIndex >= steps.length) {
+        await apiClient.completeRun(runId);
+        finalStatus = "completed";
+        break;
+      }
+      continue;
+    }
 
     // Hybrid vision policy: capture and attach a screenshot when the AI is
     // most likely to need pixels — first poll, after a recovery decision,
@@ -1129,7 +1304,10 @@ async function executeAgentRun(
   if (targetTabId) sendOverlay(targetTabId, null);
 
   if (finalStatus === "completed") {
-    if (targetTabId) {
+    const hasExtractSteps = steps.some(
+      (s) => (s as { action_type?: string }).action_type === "extract",
+    );
+    if (targetTabId && !hasExtractSteps) {
       await extractAndReportRunData(workflowId, runId, targetTabId, currentStepIndex);
     }
     orchestrator.notifyIdle();

@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ai.agent_tools import ALL_TOOLS
 from ai.client import get_ai_provider
 from ai.prompts import (
-    AGENT_EXECUTOR_SYSTEM,
     AGENT_TOOL_USE_SYSTEM,
     build_agent_decision_prompt,
     build_classify_prompt,
@@ -1075,7 +1074,7 @@ class AgentService:
         if isinstance(step, dict) and step.get("action_type") == "navigate":
             navigate_url = self._resolve_step_navigate_url(step)
             if not navigate_url:
-                navigate_url = _extract_first_http_url((step.get("intent") or ""))
+                navigate_url = _extract_first_http_url(step.get("intent") or "")
         if (
             isinstance(step, dict)
             and step.get("action_type") == "navigate"

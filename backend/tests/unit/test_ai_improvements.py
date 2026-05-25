@@ -16,10 +16,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai.prompts import build_agent_decision_prompt
+from core.config import settings
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow, WorkflowStep
-from core.config import settings
 from services.agent_models import PageContext, PollRequest
 from services.agent_service import AgentService
 from services.audit import AppendEvent, AuditService

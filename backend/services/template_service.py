@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models.analysis import WorkflowTemplate
 from core.models.workflow import WorkflowStep
 from services.audit import AppendEvent, AuditService
-from services.workflow_connector_service import WorkflowConnectorService
 from services.semantic_analysis_service import SemanticAnalysisService
+from services.workflow_connector_service import WorkflowConnectorService
 
 logger = logging.getLogger(__name__)
 

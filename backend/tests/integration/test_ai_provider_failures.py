@@ -12,14 +12,11 @@ the SDK's chat.completions.create entry point directly instead of httpx.
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
+from openai import APIError, APITimeoutError
 
-from openai import APIError, APIStatusError, APITimeoutError
-
-from ai.client import AIResponse, AIProvider
+from ai.client import AIProvider, AIResponse
 from core.config import settings
 from core.models.run import ExecutionRun
 from services.healing_service import HealingService

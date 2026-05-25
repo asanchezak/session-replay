@@ -62,10 +62,17 @@ def build_classify_prompt(page_text: str, visible_elements: list[str]) -> str:
 
 
 def build_extract_prompt(page_content: str, extraction_schema: dict) -> str:
-    import json
+    fields = list(extraction_schema.keys())
+    field_list = ", ".join(f'"{f}"' for f in fields)
     return (
-        f"## Page content:\n{page_content[:3000]}\n"
-        f"## Expected schema:\n{json.dumps(extraction_schema, indent=2)}"
+        f"Extract the following fields from the page content below and return a single JSON object.\n"
+        f"Fields: {field_list}\n\n"
+        f"Rules:\n"
+        f"- Return ONLY a valid JSON object, no explanation or markdown.\n"
+        f"- Keys must exactly match the field names listed above.\n"
+        f"- Use null for any field that cannot be found on the page.\n"
+        f"- Values must be plain strings (no nested objects).\n\n"
+        f"## Page content:\n{page_content[:5000]}"
     )
 
 
@@ -650,3 +657,52 @@ def build_agent_decision_prompt(
         "Only PAUSE when the page truly requires a human or every bounded path is exhausted."
     )
     return "\n".join(parts)
+
+
+SELECTION_INFERENCE_SYSTEM = """You are a structured data extraction analyst. Your job is to understand what
+fields a user wants to extract from a web page based on text they selected during
+a workflow recording.
+
+The user was navigating a page and selected specific text — likely column headers,
+field labels, or content examples — to indicate what data should be scraped from
+this page when the workflow runs.
+
+Given the SELECTED TEXT and the surrounding PAGE CONTENT, infer the structured
+fields that should be extracted. Think about:
+- Is this a person profile? Fields might be name, headline, company, location, skills, about.
+- Is this a job listing? Fields might be title, company, salary, location, description.
+- Is this a list/table? Fields might be the column headers or row attributes.
+- Is this a product page? Fields might be name, price, rating, description, specs.
+- Use the selected text to understand WHAT the user wants, and the page content
+  to understand the AVAILABLE data.
+
+Return ONLY valid JSON:
+{
+  "fields": ["field_name_1", "field_name_2", ...],
+  "description": "brief description of what will be extracted"
+}
+
+Rules:
+- Field names must be snake_case (e.g., "job_title", "company_name", "years_of_experience").
+- Infer semantic meaning — prefer "headline" over "text_1", "location" over "div_text".
+- Include only fields that are likely extractable from the page content provided.
+- If the user selected skills, include a "skills" field and infer related fields
+  like "endorsements" or "categories".
+- If the user selected a description/about section, include "about" or "description".
+- Be specific: prefer "salary_range" over "salary" when context indicates a range.
+- Return 3-10 fields for typical profile/product pages; fewer for simple pages."""
+
+
+def build_selection_inference_prompt(
+    selected_text: str,
+    container_text: str,
+    page_url: str,
+) -> str:
+    return (
+        f"The user visited this URL: {page_url}\n\n"
+        f"The user selected this text on the page:\n---\n{selected_text}\n---\n\n"
+        f"The surrounding page content is:\n---\n{container_text[:5000]}\n---\n\n"
+        f"Based on what the user selected and the page content, what structured "
+        f"data fields should be extracted from this page? Return a JSON object "
+        f"with the 'fields' and 'description' keys."
+    )

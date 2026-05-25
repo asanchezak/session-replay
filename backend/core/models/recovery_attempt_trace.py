@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, Index, Integer, String, Text
-from sqlalchemy import JSON
+from sqlalchemy import JSON, Boolean, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.models.base import Base, TimestampMixin, UUIDMixin

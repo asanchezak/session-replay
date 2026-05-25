@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+import io
 import types
 import uuid
 from datetime import UTC, datetime
-import io
 
 import fsspec
 import pytest
 from fastapi.responses import JSONResponse
-from starlette.datastructures import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile
 
 from adapters.base import ConnectorHealth
-from api.v1.agent import agent_action, agent_decisions, agent_outcomes, agent_poll, agent_result, agent_resume
-from api.v1.ai import ClassifyRequest, ExtractRequest, RecoverySuggestRequest, classify_page, extract_data, suggest_recovery
+from api.v1.agent import (
+    agent_action,
+    agent_decisions,
+    agent_outcomes,
+    agent_poll,
+    agent_result,
+    agent_resume,
+)
+from api.v1.ai import (
+    ClassifyRequest,
+    ExtractRequest,
+    RecoverySuggestRequest,
+    classify_page,
+    extract_data,
+    suggest_recovery,
+)
 from api.v1.analysis import (
     UpdateAnalysisRequest,
     UpdateParameterRequest,
@@ -24,7 +38,13 @@ from api.v1.analysis import (
     update_analysis,
     update_parameter,
 )
-from api.v1.artifacts import delete_artifact, download_artifact, get_artifact_metadata, list_artifacts, upload_artifact
+from api.v1.artifacts import (
+    delete_artifact,
+    download_artifact,
+    get_artifact_metadata,
+    list_artifacts,
+    upload_artifact,
+)
 from api.v1.audit import get_audit_trail
 from api.v1.connectors import (
     delete_connector,
@@ -32,6 +52,8 @@ from api.v1.connectors import (
     list_connectors,
     register_connector,
     update_connector,
+)
+from api.v1.connectors import (
     test_connector as connector_test_route,
 )
 from api.v1.debug import get_logs, ingest_log
@@ -50,7 +72,6 @@ from core.models.connector import ConnectorConfig
 from core.models.run import ExecutionRun
 from core.models.workflow import Workflow
 from services.agent_models import PollResponse, ResultResponse
-from services.execution_service import ExecutionService
 from services.workflow_service import WorkflowService
 
 

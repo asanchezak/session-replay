@@ -334,7 +334,7 @@ def _final_destination_domain(steps: list[dict]) -> str:
     idx = _final_non_search_navigate_index(steps)
     if idx is None:
         return ""
-    return _extract_domain(str((steps[idx].get("value") or "")))
+    return _extract_domain(str(steps[idx].get("value") or ""))
 
 
 def _missing_post_destination_critical_actions(
