@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { PopupState } from "../src/shared/types";
 import { DASHBOARD_ORIGIN } from "../src/shared/constants";
+import { createLogger } from "../src/shared/logger";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -11,6 +12,41 @@ function openDashboard(path = "/dashboard") {
 
 function send(msg: Record<string, unknown>) {
   chrome.runtime.sendMessage(msg);
+}
+
+const log = createLogger("side-panel");
+
+function sendRuntimeMessageWithTimeout<T>(message: Record<string, unknown>, timeoutMs = 45_000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const startedAt = Date.now();
+    const timeoutId = window.setTimeout(() => {
+      log.warn("Runtime message timed out", {
+        type: String(message.type || "unknown"),
+        timeout_ms: timeoutMs,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      reject(new Error("Page analysis took too long. Try again after the page finishes loading."));
+    }, timeoutMs);
+
+    chrome.runtime.sendMessage(message, (response) => {
+      window.clearTimeout(timeoutId);
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        log.error("Runtime message failed", {
+          type: String(message.type || "unknown"),
+          elapsed_ms: Date.now() - startedAt,
+          error: runtimeError.message,
+        });
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      log.log("Runtime message completed", {
+        type: String(message.type || "unknown"),
+        elapsed_ms: Date.now() - startedAt,
+      });
+      resolve(response as T);
+    });
+  });
 }
 
 // ── Shared primitives ────────────────────────────────────────────────────────
@@ -144,19 +180,33 @@ function AnalyzePageSection() {
     setAnalyze({ type: "loading" });
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const response = await chrome.runtime.sendMessage({
-        type: "ANALYZE_LIVE_PAGE",
-        tabId: tab?.id,
-      }) as {
+      log.log("Analyze requested", {
+        tab_id: tab?.id ?? null,
+        tab_url: tab?.url ?? null,
+      });
+      const response = await sendRuntimeMessageWithTimeout<{
         type: string;
         analysis?: AnalyzeState extends infer A ? A extends { result: infer R } ? R : never : never;
         error?: string;
         code?: string;
-      };
+      }>({
+        type: "ANALYZE_LIVE_PAGE",
+        tabId: tab?.id,
+      });
       if (response?.type === "ANALYZE_LIVE_PAGE_RESULT" && response.analysis) {
+        log.log("Analyze succeeded", {
+          suggested_field_count: response.analysis.suggested_fields.length,
+          page_snapshot_count: response.analysis.page_snapshots.length,
+          visible_text_length: response.analysis.visible_text.length,
+          dom_snippet_length: response.analysis.dom_snippet.length,
+        });
         setAnalyze({ type: "suggested", result: response.analysis });
         setSelectedKeys(response.analysis.suggested_fields.map((f) => f.key));
       } else {
+        log.warn("Analyze failed response", {
+          code: response?.code || "ANALYSIS_FAILED",
+          error: response?.error || "Page analysis failed.",
+        });
         setAnalyze({
           type: "error",
           code: response?.code || "ANALYSIS_FAILED",
@@ -164,6 +214,7 @@ function AnalyzePageSection() {
         });
       }
     } catch (err) {
+      log.error("Analyze threw", err instanceof Error ? err.message : String(err));
       setAnalyze({ type: "error", code: "ANALYSIS_FAILED", message: err instanceof Error ? err.message : String(err) });
     }
   };

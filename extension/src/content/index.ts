@@ -368,8 +368,12 @@ const OVERLAY_STYLES = `
 
 let overlayHost: HTMLDivElement | null = null;
 let overlayShadow: ShadowRoot | null = null;
+let suppressScrollRecordingUntil = 0;
 
 async function prepareForCapture(): Promise<void> {
+  const startedAt = Date.now();
+  sendDebugLog("log", `[capture] prepare start url=${window.location.href}`);
+  suppressScrollRecordingUntil = Date.now() + 10_000;
   const deadline = Date.now() + 8_000;
   let stableTicks = 0;
   let lastScrollY = -1;
@@ -387,6 +391,11 @@ async function prepareForCapture(): Promise<void> {
     }
   }
   await new Promise((resolve) => setTimeout(resolve, 400));
+  suppressScrollRecordingUntil = Date.now() + 1_500;
+  sendDebugLog(
+    "log",
+    `[capture] prepare done elapsed_ms=${Date.now() - startedAt} final_scroll_y=${Math.round(window.scrollY || window.pageYOffset || 0)}`,
+  );
 }
 
 export function showRunningOverlay(step: number, total: number, actionType: string, workflowName: string): void {
@@ -1038,6 +1047,7 @@ let scrollTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function handleScroll(event: Event): void {
   if (!recordingEnabled) return;
+  if (Date.now() < suppressScrollRecordingUntil) return;
   if (scrollTimeout) clearTimeout(scrollTimeout);
   scrollTimeout = setTimeout(() => {
     sendToBackground(captureScroll(event));

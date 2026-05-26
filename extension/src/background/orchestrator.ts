@@ -208,12 +208,12 @@ export class Orchestrator {
   async stopRecording(): Promise<{ id: string; name: string; step_count: number } | null> {
     this._isRecording = false;
     const events = [...this.eventBuffer];
+    this.eventBuffer = [];
+    this.broadcastState();
 
     if (events.length === 0) {
-      this.eventBuffer = [];
       this._pendingSave = null;
       await this._clearStorage();
-      this.broadcastState();
       return null;
     }
 
@@ -221,18 +221,22 @@ export class Orchestrator {
     const targetUrl = events.find(e => e.page_url)?.page_url || null;
     const goal = this._recordingGoal || undefined;
 
+    // Persist a pending-save snapshot BEFORE the network upload so storage
+    // immediately reflects isRecording=false. Without this, the content
+    // script's 500ms storage-polling fallback keeps seeing isRecording=true
+    // for the duration of the upload and re-enables recording, making the
+    // stop button feel unresponsive.
+    await this._persistPendingSave(events, name, goal || "");
+
     try {
       const result = await apiClient.recordWorkflow(name, targetUrl, events, goal);
       log.log(`Workflow recorded: ${result.id} (${result.step_count} steps)`);
-      this.eventBuffer = [];
       this._pendingSave = null;
       await this._clearStorage();
       this.broadcastState();
       return result;
     } catch (err) {
       log.error("Failed to save workflow recording:", err);
-      this.eventBuffer = events;
-      await this._persistPendingSave(events, name, goal || "");
       this.broadcastState();
       return null;
     }

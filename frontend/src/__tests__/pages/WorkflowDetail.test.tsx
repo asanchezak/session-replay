@@ -343,4 +343,71 @@ describe("WorkflowDetailPage", () => {
     await waitFor(() => expect(screen.getByText(/Backend rejected this run/i)).toBeInTheDocument());
     expect(popupWindow.close).toHaveBeenCalled();
   });
+
+  it("Edit fields modal lets the user remove a field and PUTs the updated step", async () => {
+    const extractWorkflow = {
+      ...baseWorkflow,
+      steps: [
+        { step_index: 0, action_type: "navigate", intent: "open profile", selector_chain: null, value: "https://www.linkedin.com/in/wbenafi/", methods: null },
+        {
+          step_index: 1,
+          action_type: "extract",
+          intent: "Extract About, Skills",
+          selector_chain: null,
+          value: "About, Skills",
+          methods: [
+            {
+              kind: "extract_shapes",
+              shapes: [
+                { key: "about", label: "About", kind: "scalar", item_keys: null },
+                { key: "skills", label: "Skills", kind: "string_list", item_keys: null },
+              ],
+            },
+          ],
+          dom_context: null,
+        },
+      ],
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/workflows/wf-1") && (!init?.method || init.method === "GET")) {
+        return { ok: true, status: 200, json: async () => extractWorkflow } as Response;
+      }
+      if (url.endsWith("/workflows/wf-1/steps") && init?.method === "PUT") {
+        return { ok: true, status: 200, json: async () => ({ step_count: 2, steps: [] }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [] } as Response;
+    });
+    (global as any).fetch = fetchMock;
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Demo WF/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit fields" }));
+    await waitFor(() => expect(screen.getByText(/Edit extraction fields/i)).toBeInTheDocument());
+
+    // Remove the "Skills" field.
+    const removeButtons = screen.getAllByRole("button", { name: "Remove" });
+    fireEvent.click(removeButtons[1]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save fields" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/workflows/wf-1/steps"),
+        expect.objectContaining({ method: "PUT" }),
+      );
+    });
+
+    const putCall = fetchMock.mock.calls.find(([input, init]) => String(input).includes("/workflows/wf-1/steps") && init?.method === "PUT");
+    const body = JSON.parse(String(putCall?.[1]?.body || "[]"));
+    expect(body[1]).toEqual(
+      expect.objectContaining({
+        action_type: "extract",
+        value: "About",
+        methods: [expect.objectContaining({ kind: "extract_shapes", shapes: [expect.objectContaining({ key: "about" })] })],
+      }),
+    );
+  });
 });

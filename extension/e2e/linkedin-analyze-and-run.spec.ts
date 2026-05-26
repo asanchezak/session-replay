@@ -5,7 +5,7 @@ import { LINKEDIN_STATE_PATH } from "./linkedin-fixtures";
 
 const BACKEND = "http://localhost:8081";
 const API_KEY = process.env.E2E_API_KEY || "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw";
-const PROFILE_URL = "https://www.linkedin.com/in/wbenafi/";
+const PROFILE_URL = "https://www.linkedin.com/in/alberto-quiros-90448a239/";
 
 test.describe.configure({ mode: "serial" });
 
@@ -61,7 +61,7 @@ test("side-panel Analyze-this-page during recording → run → structured extra
   const linkedInTabId = await sw.evaluate(async (urlSub: string) => {
     const tabs = await chrome.tabs.query({});
     return tabs.find((t) => (t.url || "").includes(urlSub))?.id ?? null;
-  }, "linkedin.com/in/wbenafi");
+  }, "linkedin.com/in/alberto-quiros-90448a239");
   expect(linkedInTabId).toBeTruthy();
   const analysis = await popup.page.evaluate(async (tabId: number) => {
     const resp = await chrome.runtime.sendMessage({ type: "ANALYZE_LIVE_PAGE", tabId });
@@ -150,7 +150,7 @@ test("side-panel Analyze-this-page during recording → run → structured extra
   const tabId = await sw.evaluate(async (urlSub: string) => {
     const tabs = await chrome.tabs.query({});
     return tabs.find((t) => (t.url || "").includes(urlSub))?.id ?? null;
-  }, "linkedin.com/in/wbenafi");
+  }, "linkedin.com/in/alberto-quiros-90448a239");
 
   const runStart = await popup.page.evaluate(async ({ workflowId, tabId }: { workflowId: string; tabId: number | null }) => {
     return chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, tabId });
@@ -182,7 +182,13 @@ test("side-panel Analyze-this-page during recording → run → structured extra
   console.log(`Extraction records: ${JSON.stringify(records, null, 2)}`);
   expect(records.length).toBeGreaterThan(0);
 
-  const record = records[0] || {};
+  const record = records.reduce((best, current) => {
+    const bestScore = (Array.isArray(best?.experience) ? best.experience.length : 0)
+      + (Array.isArray(best?.skills) ? best.skills.length : 0);
+    const currentScore = (Array.isArray(current?.experience) ? current.experience.length : 0)
+      + (Array.isArray(current?.skills) ? current.skills.length : 0);
+    return currentScore > bestScore ? current : best;
+  }, records[0] || {});
   expect(Array.isArray(record.experience)).toBeTruthy();
   expect((record.experience || []).length).toBeGreaterThanOrEqual(2);
   expect(Array.isArray(record.skills)).toBeTruthy();

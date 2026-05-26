@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ai_provider: str = "openai"
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
+    ai_openai_base_url: str = "https://api.openai.com/v1"
     ai_confidence_threshold: float = 0.85
     deterministic_only: bool = False
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:8081"]

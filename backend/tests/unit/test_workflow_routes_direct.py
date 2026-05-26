@@ -367,6 +367,37 @@ async def test_delete_all_workflows_routes_direct(db_session):
 
 
 @pytest.mark.asyncio
+async def test_delete_all_workflows_preserves_system_workflows(db_session):
+    """Bulk delete must never wipe system workflows when invoked without an
+    explicit type filter (the UI's 'Delete all' button on the user tab)."""
+    svc = WorkflowService(db_session)
+    user_wf = await svc.create(name="user one", workflow_type="user")
+    system_wf = await svc.create(name="system one", workflow_type="system")
+
+    deleted = await delete_all_workflows(db=db_session)
+    assert deleted["deleted"]["workflows"] == 1
+
+    remaining = await svc.list()
+    assert len(remaining) == 1
+    assert str(remaining[0].id) == str(system_wf.id)
+    with pytest.raises(NotFoundError):
+        await svc.get(str(user_wf.id))
+
+
+@pytest.mark.asyncio
+async def test_delete_all_workflows_with_explicit_system_type(db_session):
+    svc = WorkflowService(db_session)
+    await svc.create(name="user one", workflow_type="user")
+    await svc.create(name="system one", workflow_type="system")
+
+    deleted = await delete_all_workflows(type="system", db=db_session)
+    assert deleted["deleted"]["workflows"] == 1
+    remaining = await svc.list()
+    assert len(remaining) == 1
+    assert remaining[0].workflow_type == "user"
+
+
+@pytest.mark.asyncio
 async def test_record_workflow_no_simplification_and_causal_enrichment(db_session, monkeypatch):
     """All events are kept and accessibility_metadata is populated with causal data."""
     class _Provider:

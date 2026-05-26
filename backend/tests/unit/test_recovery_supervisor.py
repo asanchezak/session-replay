@@ -223,9 +223,48 @@ async def test_supervisor_completes_running_run_with_empty_snapshot(db_session):
 
 
 @pytest.mark.asyncio
+async def test_supervisor_defers_stale_recovery_check_during_grace_period(db_session):
+    """A fresh run_auto_resumed must not immediately pause the run — anti-bot
+    cadence can legitimately produce ~140s of quiet between events, so the
+    supervisor gives the extension POST_RECOVERY_GRACE_SECONDS to act."""
+    svc = ExecutionService(db_session)
+    wf = Workflow(name="Fresh Recovery WF", status="draft")
+    db_session.add(wf)
+    await db_session.flush()
+    run = await svc.create_run(workflow_id=str(wf.id))
+    run.workflow_snapshot = _snapshot([_step(0), _step(1)])
+    run.total_steps = 2
+    run.status = "running"
+    await db_session.flush()
+
+    from services.audit import AppendEvent, AuditService
+
+    await AuditService(db_session).append(AppendEvent(
+        event_type="run_auto_resumed",
+        payload={"step_index": 0, "attempt": 1},
+        run_id=str(run.id),
+    ))
+
+    supervisor = RecoverySupervisor(db_session)
+    supervisor.agent._analyze_failure = AsyncMock()
+
+    resumed = await supervisor.attempt_resume(run, forced=False)
+
+    assert resumed is False
+    await db_session.refresh(run)
+    # Within the grace period: run is still running, NOT paused.
+    assert run.status == "running"
+    assert run.pause_reason is None
+    supervisor.agent._analyze_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_supervisor_pauses_running_run_after_stale_auto_resume(db_session):
-    """If no extension activity follows an auto recovery, do not keep deleting
-    or mutating steps on every supervisor tick."""
+    """After POST_RECOVERY_GRACE_SECONDS elapse with no extension follow-up
+    activity, the supervisor pauses the run to waiting_for_user so it doesn't
+    keep mutating steps on every supervisor tick."""
+    from datetime import UTC, datetime, timedelta
+
     svc = ExecutionService(db_session)
     wf = Workflow(name="Stale Recovery WF", status="draft")
     db_session.add(wf)
@@ -243,6 +282,15 @@ async def test_supervisor_pauses_running_run_after_stale_auto_resume(db_session)
         payload={"step_index": 0, "attempt": 1},
         run_id=str(run.id),
     ))
+
+    # Backdate the event so it falls outside the grace window.
+    result = await db_session.execute(
+        select(EventLog)
+        .where(EventLog.run_id == run.id, EventLog.event_type == "run_auto_resumed")
+    )
+    ev = result.scalar_one()
+    ev.created_at = datetime.now(UTC) - timedelta(seconds=400)
+    await db_session.flush()
 
     supervisor = RecoverySupervisor(db_session)
     supervisor.agent._analyze_failure = AsyncMock()

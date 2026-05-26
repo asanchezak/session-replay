@@ -229,9 +229,32 @@ class WorkflowService:
         await self.session.delete(workflow)
         await self.session.flush()
 
-    async def delete_all(self) -> dict[str, int]:
-        """Delete all workflows and their workflow-scoped records."""
+    async def delete_all(self, workflow_type: str | None = None) -> dict[str, int]:
+        """Delete workflows and their workflow-scoped records.
+
+        When ``workflow_type`` is provided, only workflows of that type and their
+        dependent records are removed. The default ``None`` preserves system
+        workflows by limiting the wipe to ``user`` workflows — system automations
+        must never be deleted by a bulk "delete all" action from the UI.
+        """
+        effective_type = workflow_type if workflow_type is not None else WorkflowType.USER.value
+
+        ids_result = await self.session.execute(
+            select(Workflow.id).where(Workflow.workflow_type == effective_type)
+        )
+        workflow_ids = [str(row[0]) for row in ids_result]
+
         counts: dict[str, int] = {}
+        if not workflow_ids:
+            for key in (
+                "semantic_actions", "semantic_phases", "workflow_parameters",
+                "workflow_analyses", "workflow_connector_bindings",
+                "output_specifications", "workflow_templates",
+                "workflow_steps", "workflows",
+            ):
+                counts[key] = 0
+            return counts
+
         for model, key in [
             (SemanticAction, "semantic_actions"),
             (SemanticPhase, "semantic_phases"),
@@ -241,10 +264,17 @@ class WorkflowService:
             (OutputSpecification, "output_specifications"),
             (WorkflowTemplate, "workflow_templates"),
             (WorkflowStep, "workflow_steps"),
-            (Workflow, "workflows"),
         ]:
-            resp = await self.session.execute(delete(model))
+            resp = await self.session.execute(
+                delete(model).where(model.workflow_id.in_(workflow_ids))
+            )
             counts[key] = resp.rowcount or 0
+
+        resp = await self.session.execute(
+            delete(Workflow).where(Workflow.id.in_([uuid.UUID(i) for i in workflow_ids]))
+        )
+        counts["workflows"] = resp.rowcount or 0
+
         await self.session.flush()
         return counts
 

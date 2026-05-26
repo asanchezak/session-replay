@@ -27,8 +27,9 @@ export function useWorkflows(pollInterval?: number, workflowType?: "system" | "u
   }, [request]);
 
   const deleteAllWorkflows = useCallback(async () => {
-    await request("DELETE", "/workflows");
-  }, [request]);
+    const target = workflowType ? `/workflows?type=${workflowType}` : "/workflows";
+    await request("DELETE", target);
+  }, [request, workflowType]);
 
   useEffect(() => {
     refetch();

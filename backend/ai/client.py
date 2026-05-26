@@ -154,7 +154,12 @@ class OpenAIProvider(AIProvider):
         # The official SDK manages connection pooling, retries, and timeouts.
         # We retain a single client per provider instance and let asyncio + the
         # SDK handle lifecycle.
-        self._client = AsyncOpenAI(api_key=api_key, timeout=30.0, max_retries=2)
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=settings.ai_openai_base_url,
+            timeout=30.0,
+            max_retries=2,
+        )
 
     async def generate(
         self,

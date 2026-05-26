@@ -37,7 +37,19 @@ logger = logging.getLogger(__name__)
 _auto_resume_count: dict[str, int] = {}
 
 MAX_AUTO_RESUMES_PER_RUN = 5
-STUCK_THRESHOLD_SECONDS = 60  # 1 minute
+# Threshold for "the extension has gone quiet". Sized to accommodate the
+# anti-bot pacing in LinkedIn-style workflows: extended cooldowns (45-90s)
+# stacked on per-iteration delays (20-50s) can produce 140s+ of legitimate
+# quiet between step_executed events without anything being wrong. 240s
+# gives ~100s of safety margin while still catching a truly wedged run
+# within a few minutes.
+STUCK_THRESHOLD_SECONDS = 240
+# After the supervisor emits a plan_update / run_auto_resumed, the
+# extension needs time to pick it up on its next poll AND time to finish
+# whatever long deliberate quiet it was in (cooldown, dwell). 180s lets the
+# anti-bot cadence complete one full cycle before we declare the recovery
+# unfollowed.
+POST_RECOVERY_GRACE_SECONDS = 180
 SUPERVISOR_POLL_INTERVAL = 30
 
 
@@ -141,6 +153,21 @@ class RecoverySupervisor:
             and latest_event is not None
             and latest_event.event_type in {"run_auto_resumed", "plan_update"}
         ):
+            # Grace period: with anti-bot pacing the extension can legitimately
+            # be quiet for 140s+ (extended cooldown + iter delay). Don't kill
+            # the run on the very next supervisor cycle (~30s after the
+            # plan_update) — give the extension a full cadence cycle to act.
+            event_at = latest_event.created_at
+            if event_at.tzinfo is None:
+                event_at = event_at.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - event_at).total_seconds()
+            if age_seconds < POST_RECOVERY_GRACE_SECONDS:
+                logger.info(
+                    "Supervisor: deferring stale-recovery check on run %s "
+                    "(plan_update age=%.0fs, grace=%ds)",
+                    run_id, age_seconds, POST_RECOVERY_GRACE_SECONDS,
+                )
+                return False
             await self._pause_stalled_after_recovery(run, latest_event)
             return False
 

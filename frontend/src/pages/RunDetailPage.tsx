@@ -11,8 +11,115 @@ import { formatDuration, formatEventSummary, getStepStatus, truncatePayload } fr
 import {
   ArrowLeft, Play, RotateCcw, Square, ChevronDown, ChevronRight,
   CheckCircle, AlertTriangle, Circle, CircleDot, Loader2, SkipForward,
-  Eye, MousePointer, Keyboard, Navigation, Database, RefreshCw
+  Eye, MousePointer, Keyboard, Navigation, Database, RefreshCw, Copy, Check
 } from "lucide-react";
+
+// Recursive JSON value renderer used by the Extraction tab. Walks arrays
+// and plain objects so nested records show their real structure instead of
+// "[object Object]". Strings, numbers, booleans, and nulls render inline.
+function JsonValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (value === null || value === undefined) {
+    return <span className="text-text-gray italic">—</span>;
+  }
+  if (typeof value === "string") {
+    if (value === "") return <span className="text-text-gray italic">""</span>;
+    return <span className="whitespace-pre-wrap break-words">{value}</span>;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return <span className="font-mono text-accent">{String(value)}</span>;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-text-gray italic">[]</span>;
+    const allPrimitives = value.every((v) => v === null || ["string", "number", "boolean"].includes(typeof v));
+    if (allPrimitives) {
+      return (
+        <ul className="list-disc list-inside space-y-0.5">
+          {value.map((v, i) => (
+            <li key={i} className="text-xs text-text-primary"><JsonValue value={v} depth={depth + 1} /></li>
+          ))}
+        </ul>
+      );
+    }
+    // Array of objects → mini-table over the union of keys.
+    const allObjects = value.every((v) => v !== null && typeof v === "object" && !Array.isArray(v));
+    if (allObjects) {
+      const keys = Array.from(new Set(value.flatMap((row) => Object.keys(row as Record<string, unknown>))));
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-border">
+                {keys.map((k) => (
+                  <th key={k} className="text-left py-1.5 px-2 text-text-secondary font-medium capitalize align-top">
+                    {k.replace(/_/g, " ")}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(value as Array<Record<string, unknown>>).map((row, i) => (
+                <tr key={i} className="border-b border-border/30 align-top">
+                  {keys.map((k) => (
+                    <td key={k} className="py-1.5 px-2 text-text-primary text-xs max-w-[280px]">
+                      <JsonValue value={row[k]} depth={depth + 1} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+    // Mixed / nested arrays → indented list of JsonValue renders.
+    return (
+      <ol className="space-y-1 list-decimal list-inside">
+        {value.map((v, i) => (
+          <li key={i}><JsonValue value={v} depth={depth + 1} /></li>
+        ))}
+      </ol>
+    );
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return <span className="text-text-gray italic">{"{}"}</span>;
+    return (
+      <dl className={`space-y-1 ${depth > 0 ? "pl-3 border-l border-border/40" : ""}`}>
+        {entries.map(([k, v]) => (
+          <div key={k} className="flex flex-col sm:flex-row sm:gap-2">
+            <dt className="text-xs font-medium text-text-secondary capitalize sm:w-32 shrink-0">
+              {k.replace(/_/g, " ")}
+            </dt>
+            <dd className="text-xs text-text-primary flex-1"><JsonValue value={v} depth={depth + 1} /></dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  return <span className="font-mono text-text-secondary">{String(value)}</span>;
+}
+
+function CopyJsonButton({ payload }: { payload: unknown }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // Clipboard may be unavailable (insecure context). Silently no-op.
+        }
+      }}
+      className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:border-accent"
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? "Copied" : "Copy JSON"}
+    </button>
+  );
+}
 
 interface WorkflowStep {
   step_index: number;
@@ -884,35 +991,35 @@ export default function RunDetailPage() {
               <p className="text-text-gray text-xs mt-1">Extracted data will appear here when the run processes extraction steps.</p>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-6">
               {extractionEvents.map((event) => {
                 const records = (event.payload.data as unknown[]) || [];
                 if (records.length === 0) return null;
-                const keys = Object.keys(records[0] as Record<string, unknown> || {});
+                const stepIndex = event.payload.step_index as number;
                 return (
-                  <div key={event.id} className="overflow-x-auto">
-                    <h3 className="text-xs text-text-secondary mb-1">Step {(event.payload.step_index as number) + 1} — {records.length} records</h3>
-                    <table className="w-full text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-border">
-                          {keys.map((k) => (
-                            <th key={k} className="text-left py-2 px-2 text-text-secondary font-medium capitalize">{k.replace(/_/g, " ")}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {records.map((rec, ri) => (
-                          <tr key={ri} className="border-b border-border/30 hover:bg-bg-elevated">
-                            {keys.map((k) => (
-                              <td key={k} className="py-1.5 px-2 text-text-primary font-mono max-w-[300px] truncate">
-                                {String((rec as Record<string, unknown>)[k] || "").slice(0, 100)}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <section key={event.id} className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-xs text-text-secondary">
+                        Step {stepIndex + 1} — {records.length} record{records.length === 1 ? "" : "s"}
+                      </h3>
+                      <CopyJsonButton payload={records} />
+                    </div>
+                    <div className="space-y-4">
+                      {records.map((record, ri) => (
+                        <div key={ri} className="rounded-lg border border-border bg-bg-elevated p-3">
+                          <JsonValue value={record} />
+                        </div>
+                      ))}
+                    </div>
+                    <details className="rounded border border-border bg-bg-card">
+                      <summary className="cursor-pointer px-3 py-2 text-xs text-text-secondary hover:text-text-primary">
+                        Raw JSON
+                      </summary>
+                      <pre className="overflow-x-auto px-3 py-2 text-xs font-mono text-text-primary whitespace-pre-wrap break-words">
+                        {JSON.stringify(records, null, 2)}
+                      </pre>
+                    </details>
+                  </section>
                 );
               })}
             </div>
