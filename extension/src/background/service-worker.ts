@@ -534,57 +534,42 @@ function isLinkedInProfilePage(url: string): boolean {
   }
 }
 
-async function captureLinkedInDetailsViaBackgroundTabs(
-  parentTabId: number,
+async function captureLinkedInDetailsViaTabNavigation(
+  tabId: number,
   pageUrl: string,
 ): Promise<SavedPageSnapshot[]> {
+  // Anti-bot strategy: drive the SAME tab through /in/X → /details/skills →
+  // /details/experience → ... — exactly what a human clicking section links
+  // would do. No hidden background tabs (LinkedIn fingerprints those), no
+  // parallelism, jittered delays between section navigations.
   const startedAt = Date.now();
   const targets = getPageSnapshotTargets(pageUrl);
   if (targets.length === 0) return [];
 
-  log.log("LinkedIn bg-tab capture start", {
-    parent_tab_id: parentTabId,
+  log.log("LinkedIn in-tab capture start", {
+    tab_id: tabId,
     page_url: pageUrl,
     sections: targets.map((t) => t.sectionName),
   });
 
-  let createdTabs: chrome.tabs.Tab[] = [];
-  try {
-    createdTabs = await Promise.all(targets.map((t) =>
-      chrome.tabs.create({ url: t.pageUrl, active: false, openerTabId: parentTabId }),
-    ));
-  } catch (err) {
-    log.warn("LinkedIn bg-tab create failed", {
-      parent_tab_id: parentTabId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
+  const snapshots: SavedPageSnapshot[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    try {
+      // Short jittered pre-navigation pause — looks more natural than
+      // mechanical back-to-back clicks.
+      await new Promise((resolve) =>
+        setTimeout(resolve, 600 + Math.floor(Math.random() * 1400)));
 
-  const cleanup = async () => {
-    await Promise.all(createdTabs.map((t) =>
-      t.id !== undefined ? chrome.tabs.remove(t.id).catch(() => undefined) : Promise.resolve(),
-    ));
-  };
+      await chrome.tabs.update(tabId, { url: target.pageUrl });
+      await waitForTabLoad(tabId, 25_000).catch(() => undefined);
+      // Let the SPA bundle fetch + render the section content.
+      await new Promise((resolve) =>
+        setTimeout(resolve, 2000 + Math.floor(Math.random() * 1200)));
+      await prepareTabForCapture(tabId).catch(() => undefined);
 
-  try {
-    await Promise.all(createdTabs.map((t) =>
-      t.id !== undefined ? waitForTabLoad(t.id, 25_000).catch(() => undefined) : Promise.resolve(),
-    ));
-    // Give the SPA bundle a moment to fetch and render section content.
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    await Promise.all(createdTabs.map((t) =>
-      t.id !== undefined ? prepareTabForCapture(t.id).catch(() => undefined) : Promise.resolve(),
-    ));
-
-    const snapshots: SavedPageSnapshot[] = [];
-    for (let i = 0; i < createdTabs.length; i++) {
-      const tab = createdTabs[i];
-      const target = targets[i];
-      if (tab.id === undefined) continue;
-      try {
-        const ctx = await commandExecutor.captureContext(tab.id);
-        if (!ctx.visible_text && !ctx.dom_snippet) continue;
+      const ctx = await commandExecutor.captureContext(tabId);
+      if (ctx.visible_text || ctx.dom_snippet) {
         snapshots.push({
           section_name: target.sectionName,
           page_url: target.pageUrl,
@@ -593,25 +578,23 @@ async function captureLinkedInDetailsViaBackgroundTabs(
           dom_snippet: ctx.dom_snippet,
           captured_at: new Date().toISOString(),
         });
-      } catch (err) {
-        log.warn("LinkedIn bg-tab capture per-section failed", {
-          section: target.sectionName,
-          error: err instanceof Error ? err.message : String(err),
-        });
       }
+    } catch (err) {
+      log.warn("LinkedIn in-tab capture per-section failed", {
+        section: target.sectionName,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-
-    log.log("LinkedIn bg-tab capture done", {
-      parent_tab_id: parentTabId,
-      elapsed_ms: Date.now() - startedAt,
-      captured_count: snapshots.length,
-      sections: snapshots.map((s) => s.section_name),
-      text_lengths: snapshots.map((s) => s.visible_text.length),
-    });
-    return snapshots;
-  } finally {
-    await cleanup();
   }
+
+  log.log("LinkedIn in-tab capture done", {
+    tab_id: tabId,
+    elapsed_ms: Date.now() - startedAt,
+    captured_count: snapshots.length,
+    sections: snapshots.map((s) => s.section_name),
+    text_lengths: snapshots.map((s) => s.visible_text.length),
+  });
+  return snapshots;
 }
 
 async function resolveSupplementalSnapshots(
@@ -619,14 +602,14 @@ async function resolveSupplementalSnapshots(
   pageUrl: string,
 ): Promise<SavedPageSnapshot[]> {
   // LinkedIn /in/{user}/ profile pages: bypass the broken fetch+iframe path
-  // (X-Frame-Options: DENY) and capture each /details/X/ via a parallel hidden
-  // background tab. Falls through to the legacy path on errors.
+  // (X-Frame-Options: DENY) by driving the same tab through each /details/X/.
+  // This avoids hidden-tab fingerprinting that LinkedIn's anti-bot picks up.
   if (isLinkedInProfilePage(pageUrl)) {
     try {
-      const captured = await captureLinkedInDetailsViaBackgroundTabs(tabId, pageUrl);
+      const captured = await captureLinkedInDetailsViaTabNavigation(tabId, pageUrl);
       if (captured.length > 0) return captured;
     } catch (err) {
-      log.warn("LinkedIn bg-tab capture errored — falling back to legacy path", {
+      log.warn("LinkedIn in-tab capture errored — falling back to legacy path", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1166,8 +1149,9 @@ async function executeExtractStep(
       const tabInfo = await chrome.tabs.get(targetTabId);
       const { captured, pageSnapshots, buildPageContent } = await captureExpandedPageData(targetTabId, tabInfo);
       const chosenSnapshots = chooseExtractionSnapshots(captured.url, pageSnapshots, step);
-      const aiData: Record<string, unknown> = {};
-      for (const field of remainingFields) {
+      // Parallelize the per-field AI calls — they're independent, and at
+      // ~3 s each going serial costs 18 s+ for a 6-field profile extract.
+      const aiEntries = await Promise.all(remainingFields.map(async (field) => {
         const fieldKey = normalizeFieldKey(field);
         const fieldSchema = buildExtractSchema([field], shapes.filter((shape) => normalizeFieldKey(shape.key || shape.label || "") === fieldKey));
         const fieldContent = buildSnapshotPageContent(selectSnapshotsForField(field, chosenSnapshots), [field]);
@@ -1178,12 +1162,21 @@ async function executeExtractStep(
           [field],
         );
         const pageText = fieldContent || fallbackContent || captured.visible_text || captured.dom_snippet || "";
-        if (!pageText) continue;
-        const aiResult = await apiClient.aiExtract(pageText, fieldSchema);
-        const fieldData = aiResult.data as Record<string, unknown>;
-        if (fieldData && typeof fieldData === "object" && !Array.isArray(fieldData) && fieldKey in fieldData) {
-          aiData[fieldKey] = fieldData[fieldKey];
+        if (!pageText) return null;
+        try {
+          const aiResult = await apiClient.aiExtract(pageText, fieldSchema);
+          const fieldData = aiResult.data as Record<string, unknown>;
+          if (fieldData && typeof fieldData === "object" && !Array.isArray(fieldData) && fieldKey in fieldData) {
+            return [fieldKey, fieldData[fieldKey]] as const;
+          }
+        } catch (err) {
+          log.warn(`[Extract] Step ${stepIndex}: AI extract for field ${field} failed:`, err);
         }
+        return null;
+      }));
+      const aiData: Record<string, unknown> = {};
+      for (const entry of aiEntries) {
+        if (entry) aiData[entry[0]] = entry[1];
       }
       const merged = { ...scriptResults, ...aiData };
       if (Object.keys(merged).length > 0) {
@@ -1736,8 +1729,43 @@ async function executeAgentRun(
 
     // Extract steps are deterministic — execute them inline without an AI poll.
     const currentStep = steps[currentStepIndex] as
-      | { action_type?: string; value?: string; intent?: string; methods?: unknown; dom_context?: Record<string, unknown> | null }
+      | { action_type?: string; value?: string; intent?: string; methods?: unknown; dom_context?: Record<string, unknown> | null; _for_each_item?: string; delay_before_ms?: number }
       | undefined;
+
+    // Fast-path: for_each-expanded navigate steps have a known $item URL —
+    // skip the ~5-10 s AI poll and just navigate directly. Massively cuts
+    // total time on multi-profile workflows (count=15 saves ~3-5 minutes).
+    if (
+      currentStep
+      && currentStep.action_type === "navigate"
+      && currentStep._for_each_item
+      && typeof currentStep.value === "string"
+      && /^https?:\/\//.test(currentStep.value)
+    ) {
+      const targetUrl = currentStep.value;
+      try {
+        if (currentStep.delay_before_ms && currentStep.delay_before_ms > 0) {
+          await new Promise((r) => setTimeout(r, currentStep.delay_before_ms));
+        }
+        log.log(`[Agent] fast-path navigate (for_each) to ${targetUrl}`);
+        await chrome.tabs.update(targetTabId, { url: targetUrl });
+        await waitForTabLoad(targetTabId, 20_000).catch(() => undefined);
+        await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "navigate", undefined, targetUrl);
+      } catch (err) {
+        log.error("[Agent] fast-path navigate failed:", err);
+        await reportStepFailure(runId, currentStepIndex, "Navigate failed", "navigate");
+        finalStatus = "failed";
+        break;
+      }
+      currentStepIndex++;
+      if (currentStepIndex >= steps.length) {
+        await apiClient.completeRun(runId);
+        finalStatus = "completed";
+        break;
+      }
+      continue;
+    }
+
     if (currentStep && currentStep.action_type === "extract") {
       log.log(`[Agent] Extract step ${currentStepIndex}: executing inline`);
       await executeExtractStep(

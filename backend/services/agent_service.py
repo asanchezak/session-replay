@@ -471,6 +471,10 @@ class AgentService:
         _ = (run_id, _ctx)
         if not bool(settings.ai_api_key and not settings.deterministic_only):
             return False  # No AI provider — never consult
+        action_type = str(step.get("action_type") or "").lower()
+        selector_chain = step.get("selector_chain") or []
+        if action_type == "scroll" and not selector_chain:
+            return False
         # With AI available: always consult (standard behavior)
         return True
 
@@ -2936,6 +2940,11 @@ function doType(el) {
         # locate a TYPE target.  This prevents premature ELEMENT_NOT_FOUND
         # failures on React/Vue apps where inputs mount asynchronously.
         delay_before_ms = 2000 if action_type == "type" else 0
+        # Honour a step-level delay_before_ms (e.g. set by for_each expansion
+        # to throttle iterations and avoid anti-bot detection).
+        step_delay = step.get("delay_before_ms")
+        if isinstance(step_delay, int) and step_delay > delay_before_ms:
+            delay_before_ms = step_delay
         return AgentCommand(
             action=action,
             target=value,

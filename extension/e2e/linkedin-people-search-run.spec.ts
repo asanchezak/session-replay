@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { test, expect } from "./fixtures";
-import { ExtensionHelper, PopupPage } from "./page-objects";
+import { ExtensionHelper } from "./page-objects";
 import { LINKEDIN_STATE_PATH } from "./linkedin-fixtures";
 
 const BACKEND = "http://localhost:8081";
@@ -35,14 +35,13 @@ async function seedWorkflow(): Promise<string> {
 }
 
 async function pollRunUntilTerminal(
-  request: PopupPage["page"]["request"],
   runId: string,
   timeoutMs: number,
 ): Promise<{ status: string; total_steps: number; current_step_index: number }> {
   const deadline = Date.now() + timeoutMs;
   let last: any = null;
   while (Date.now() < deadline) {
-    const r = await request.get(`${BACKEND}/v1/runs/${runId}`, {
+    const r = await fetch(`${BACKEND}/v1/runs/${runId}`, {
       headers: { "X-API-Key": API_KEY },
     });
     const s = (await r.json()) as any;
@@ -69,24 +68,18 @@ async function runOnce(
   count: number,
   pollMs: number,
 ): Promise<{ runId: string; events: any[]; status: string }> {
-  const popup = new PopupPage(await context.newPage(), extensionId);
-  await popup.open();
-  await popup.page.waitForTimeout(500);
-
+  // Only one visible page: the LinkedIn search tab the agent loop drives.
+  // No popup, no extra blank tabs flashing during the run.
   const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${SEARCH_KEYWORD}&origin=SWITCH_SEARCH_VERTICAL`;
   const searchPage = await context.newPage();
   await searchPage.goto(searchUrl, { waitUntil: "domcontentloaded" });
   await searchPage.waitForTimeout(5000);
   if (/login|authwall|signup/.test(searchPage.url())) {
-    // LinkedIn's anti-bot has flagged this session. Outside our control; skip
-    // the test so it doesn't blockedly fail.
     await searchPage.close().catch(() => {});
-    await popup.page.close().catch(() => {});
     test.skip(true, `LinkedIn auth wall — anti-bot rate-limited this session: ${searchPage.url()}`);
   }
   await searchPage.bringToFront();
 
-  // Resolve the search tab's id from the service worker.
   const ext = new ExtensionHelper(context, extensionId);
   const sw = await ext.getServiceWorker();
   const tabId = await sw.evaluate(async (urlSub: string) => {
@@ -95,25 +88,46 @@ async function runOnce(
   }, "linkedin.com/search/results/people");
   expect(tabId).toBeTruthy();
 
-  const runResp = await popup.page.evaluate(
-    async ({ workflowId, tabId, params }: { workflowId: string; tabId: number | null; params: Record<string, unknown> }) => {
-      return chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, tabId, params });
+  // Kick off the agent loop directly inside the service worker without
+  // awaiting the long-running promise (otherwise sw.evaluate hangs for the
+  // entire run). The onStart callback resolves with the run id as soon as
+  // the backend creates the run.
+  const runId = await sw.evaluate(
+    ({ workflowId, tabId, params }: { workflowId: string; tabId: number | null; params: Record<string, unknown> }) => {
+      const g = self as unknown as Record<string, any>;
+      if (typeof g.__executeAgentRun !== "function") {
+        throw new Error("__executeAgentRun not exposed on service worker");
+      }
+      return new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const onStart = (handle: { id: string }) => {
+          if (!settled) {
+            settled = true;
+            resolve(handle.id);
+          }
+        };
+        g.__executeAgentRun(workflowId, tabId, undefined, params, onStart)
+          .catch((err: unknown) => {
+            if (!settled) {
+              settled = true;
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          });
+      });
     },
     { workflowId, tabId, params: { keyword: SEARCH_KEYWORD, count } },
   );
-  const runId = String((runResp as any)?.run?.id || "");
   expect(runId).toBeTruthy();
   console.log(`Started run ${runId} with count=${count}`);
 
-  const final = await pollRunUntilTerminal(popup.page.request, runId, pollMs);
+  const final = await pollRunUntilTerminal(runId, pollMs);
 
-  const eventsResp = await popup.page.request.get(`${BACKEND}/v1/runs/${runId}/events?limit=500`, {
+  const eventsResp = await fetch(`${BACKEND}/v1/runs/${runId}/events?limit=500`, {
     headers: { "X-API-Key": API_KEY },
   });
   const events = (await eventsResp.json()) as any[];
 
   await searchPage.close().catch(() => {});
-  await popup.page.close().catch(() => {});
 
   return { runId, events, status: final.status };
 }

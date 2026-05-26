@@ -164,6 +164,14 @@ def _build_steps() -> list[dict]:
                     "item_var": "profile_url",
                     "item_sigil": "$item",
                     "inner_failure_policy": "continue",
+                    # Anti-bot pacing: pause 20-50 s (jittered) between profile
+                    # iterations. Observed: LinkedIn triggers a login_form
+                    # blocker around the 5th rapid sequential profile visit
+                    # even with in-tab navigation + webdriver masking. The
+                    # longer the inter-profile gap, the less the pattern
+                    # looks like an automated crawl.
+                    "iteration_delay_ms": 20000,
+                    "iteration_delay_jitter_ms": 30000,
                     "inner_steps": inner_steps,
                 }
             ],

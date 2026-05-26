@@ -39,7 +39,26 @@ export const test = base.extend<TestFixtures>({
         `--disable-extensions-except=${EXT_PATH}`,
         `--load-extension=${EXT_PATH}`,
         "--no-sandbox",
+        // Anti-bot stealth: hide navigator.webdriver and the
+        // "Chrome is being controlled by automated test software" hint that
+        // LinkedIn's anti-automation fingerprints. Combined with
+        // ignoreDefaultArgs below to drop --enable-automation.
+        "--disable-blink-features=AutomationControlled",
       ],
+      ignoreDefaultArgs: ["--enable-automation"],
+    });
+
+    // Patch navigator.webdriver to "undefined" on every new document so
+    // LinkedIn's anti-bot bundle can't read it as `true`.
+    await context.addInitScript(() => {
+      try {
+        Object.defineProperty(navigator, "webdriver", {
+          get: () => undefined,
+          configurable: true,
+        });
+      } catch {
+        /* ignore */
+      }
     });
 
     await use(context);

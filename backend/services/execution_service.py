@@ -188,6 +188,14 @@ class ExecutionService:
         limit_param = str(config.get("limit_param") or "")
         inner_steps = config.get("inner_steps") or []
         inner_failure_policy = str(config.get("inner_failure_policy") or "continue")
+        try:
+            iteration_delay_ms = int(config.get("iteration_delay_ms") or 0)
+        except (TypeError, ValueError):
+            iteration_delay_ms = 0
+        try:
+            iteration_delay_jitter_ms = int(config.get("iteration_delay_jitter_ms") or 0)
+        except (TypeError, ValueError):
+            iteration_delay_jitter_ms = 0
 
         # Resolve the iteration limit from the run's resolved parameters.
         limit = None
@@ -252,15 +260,26 @@ class ExecutionService:
                 return {k: _substitute(v, item) for k, v in node.items()}
             return node
 
+        import random as _random
+
         materialized: list[dict] = []
-        for item in items:
-            for tmpl in inner_steps:
+        for iter_index, item in enumerate(items):
+            # Optional inter-iteration jittered delay: first iteration has no
+            # pre-wait. Encoded as `delay_before_ms` on the first inner step
+            # so the extension's existing per-step delay path handles it.
+            pre_delay = 0
+            if iter_index > 0 and iteration_delay_ms > 0:
+                jitter = _random.randint(0, iteration_delay_jitter_ms) if iteration_delay_jitter_ms > 0 else 0
+                pre_delay = iteration_delay_ms + jitter
+            for inner_pos, tmpl in enumerate(inner_steps):
                 if not isinstance(tmpl, dict):
                     continue
                 inner = _substitute(deepcopy(tmpl), item)
                 inner["_for_each_item"] = item
                 inner["_for_each_origin_step"] = step_index
                 inner["_inner_failure_policy"] = inner_failure_policy
+                if inner_pos == 0 and pre_delay > 0:
+                    inner["delay_before_ms"] = pre_delay
                 materialized.append(inner)
 
         # Splice: keep everything up to and including the for_each step, append
