@@ -310,10 +310,20 @@ function selectSnapshotsForField(
 }
 
 async function prepareTabForCapture(tabId: number): Promise<void> {
+  const startedAt = Date.now();
+  log.log("Analyze prepare start", { tab_id: tabId });
   try {
     await chrome.tabs.sendMessage(tabId, { type: "PREPARE_FOR_CAPTURE" });
+    log.log("Analyze prepare done", {
+      tab_id: tabId,
+      elapsed_ms: Date.now() - startedAt,
+    });
   } catch {
     // Best-effort only; capture still proceeds if the content script cannot scroll.
+    log.warn("Analyze prepare skipped", {
+      tab_id: tabId,
+      elapsed_ms: Date.now() - startedAt,
+    });
   }
 }
 
@@ -323,6 +333,12 @@ async function fetchSupplementalSnapshots(
 ): Promise<SavedPageSnapshot[]> {
   const targets = getPageSnapshotTargets(pageUrl);
   if (targets.length === 0) return [];
+  const startedAt = Date.now();
+  log.log("Supplemental snapshot fetch start", {
+    tab_id: tabId,
+    page_url: pageUrl,
+    target_sections: targets.map((target) => target.sectionName),
+  });
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -336,41 +352,53 @@ async function fetchSupplementalSnapshots(
           cloned.querySelectorAll("script, style, noscript").forEach((node) => node.remove());
           return cloned.innerHTML;
         };
-        const out: Array<{
-          section_name: string;
-          page_url: string;
-          page_title?: string;
-          visible_text: string;
-          dom_snippet: string;
-          captured_at: string;
-        }> = [];
-        for (const target of snapshotTargets) {
+        const snapshots = await Promise.all(snapshotTargets.map(async (target) => {
           try {
             const response = await fetch(target.pageUrl, { credentials: "include" });
-            if (!response.ok) continue;
+            if (!response.ok) return null;
             const html = await response.text();
             const doc = new DOMParser().parseFromString(html, "text/html");
             const visibleText = normalizeText(doc.body?.innerText || "");
             const domSnippet = normalizeDom(doc);
-            if (!visibleText && !domSnippet) continue;
-            out.push({
+            if (!visibleText && !domSnippet) return null;
+            return {
               section_name: target.sectionName,
               page_url: target.pageUrl,
               page_title: doc.title || undefined,
               visible_text: visibleText.slice(0, 60_000),
               dom_snippet: domSnippet.slice(0, 120_000),
               captured_at: new Date().toISOString(),
-            });
+            };
           } catch {
-            // Skip individual section failures.
+            return null;
           }
-        }
-        return out;
+        }));
+        return snapshots.filter((snapshot): snapshot is {
+          section_name: string;
+          page_url: string;
+          page_title?: string;
+          visible_text: string;
+          dom_snippet: string;
+          captured_at: string;
+        } => snapshot !== null);
       },
     });
-    return (results[0]?.result as SavedPageSnapshot[] | undefined) || [];
+    const snapshots = (results[0]?.result as SavedPageSnapshot[] | undefined) || [];
+    log.log("Supplemental snapshot fetch done", {
+      tab_id: tabId,
+      page_url: pageUrl,
+      snapshot_count: snapshots.length,
+      elapsed_ms: Date.now() - startedAt,
+      sections: snapshots.map((snapshot) => snapshot.section_name),
+    });
+    return snapshots;
   } catch (err) {
-    log.warn("Supplemental snapshot fetch failed", err);
+    log.warn("Supplemental snapshot fetch failed", {
+      tab_id: tabId,
+      page_url: pageUrl,
+      elapsed_ms: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }
@@ -393,6 +421,12 @@ async function captureSnapshotFromIframe(
   targetUrl: string,
   sectionName: string,
 ): Promise<SavedPageSnapshot | null> {
+  const startedAt = Date.now();
+  log.log("Iframe snapshot start", {
+    tab_id: tabId,
+    section_name: sectionName,
+    target_url: targetUrl,
+  });
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -467,10 +501,116 @@ async function captureSnapshotFromIframe(
         }
       },
     });
-    return (results[0]?.result as SavedPageSnapshot | null | undefined) || null;
+    const snapshot = (results[0]?.result as SavedPageSnapshot | null | undefined) || null;
+    log.log("Iframe snapshot done", {
+      tab_id: tabId,
+      section_name: sectionName,
+      target_url: targetUrl,
+      elapsed_ms: Date.now() - startedAt,
+      found: !!snapshot,
+      visible_text_length: snapshot?.visible_text.length || 0,
+      dom_snippet_length: snapshot?.dom_snippet.length || 0,
+    });
+    return snapshot;
   } catch (err) {
-    log.warn("Iframe detail snapshot failed", err);
+    log.warn("Iframe detail snapshot failed", {
+      tab_id: tabId,
+      section_name: sectionName,
+      target_url: targetUrl,
+      elapsed_ms: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
+  }
+}
+
+function isLinkedInProfilePage(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (!/(^|\.)linkedin\.com$/i.test(parsed.hostname)) return false;
+    return /^\/in\/[^/]+\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function captureLinkedInDetailsViaBackgroundTabs(
+  parentTabId: number,
+  pageUrl: string,
+): Promise<SavedPageSnapshot[]> {
+  const startedAt = Date.now();
+  const targets = getPageSnapshotTargets(pageUrl);
+  if (targets.length === 0) return [];
+
+  log.log("LinkedIn bg-tab capture start", {
+    parent_tab_id: parentTabId,
+    page_url: pageUrl,
+    sections: targets.map((t) => t.sectionName),
+  });
+
+  let createdTabs: chrome.tabs.Tab[] = [];
+  try {
+    createdTabs = await Promise.all(targets.map((t) =>
+      chrome.tabs.create({ url: t.pageUrl, active: false, openerTabId: parentTabId }),
+    ));
+  } catch (err) {
+    log.warn("LinkedIn bg-tab create failed", {
+      parent_tab_id: parentTabId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  const cleanup = async () => {
+    await Promise.all(createdTabs.map((t) =>
+      t.id !== undefined ? chrome.tabs.remove(t.id).catch(() => undefined) : Promise.resolve(),
+    ));
+  };
+
+  try {
+    await Promise.all(createdTabs.map((t) =>
+      t.id !== undefined ? waitForTabLoad(t.id, 25_000).catch(() => undefined) : Promise.resolve(),
+    ));
+    // Give the SPA bundle a moment to fetch and render section content.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await Promise.all(createdTabs.map((t) =>
+      t.id !== undefined ? prepareTabForCapture(t.id).catch(() => undefined) : Promise.resolve(),
+    ));
+
+    const snapshots: SavedPageSnapshot[] = [];
+    for (let i = 0; i < createdTabs.length; i++) {
+      const tab = createdTabs[i];
+      const target = targets[i];
+      if (tab.id === undefined) continue;
+      try {
+        const ctx = await commandExecutor.captureContext(tab.id);
+        if (!ctx.visible_text && !ctx.dom_snippet) continue;
+        snapshots.push({
+          section_name: target.sectionName,
+          page_url: target.pageUrl,
+          page_title: ctx.title || undefined,
+          visible_text: ctx.visible_text,
+          dom_snippet: ctx.dom_snippet,
+          captured_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn("LinkedIn bg-tab capture per-section failed", {
+          section: target.sectionName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    log.log("LinkedIn bg-tab capture done", {
+      parent_tab_id: parentTabId,
+      elapsed_ms: Date.now() - startedAt,
+      captured_count: snapshots.length,
+      sections: snapshots.map((s) => s.section_name),
+      text_lengths: snapshots.map((s) => s.visible_text.length),
+    });
+    return snapshots;
+  } finally {
+    await cleanup();
   }
 }
 
@@ -478,6 +618,21 @@ async function resolveSupplementalSnapshots(
   tabId: number,
   pageUrl: string,
 ): Promise<SavedPageSnapshot[]> {
+  // LinkedIn /in/{user}/ profile pages: bypass the broken fetch+iframe path
+  // (X-Frame-Options: DENY) and capture each /details/X/ via a parallel hidden
+  // background tab. Falls through to the legacy path on errors.
+  if (isLinkedInProfilePage(pageUrl)) {
+    try {
+      const captured = await captureLinkedInDetailsViaBackgroundTabs(tabId, pageUrl);
+      if (captured.length > 0) return captured;
+    } catch (err) {
+      log.warn("LinkedIn bg-tab capture errored — falling back to legacy path", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const startedAt = Date.now();
   const fetched = await fetchSupplementalSnapshots(tabId, pageUrl);
   const targets = getPageSnapshotTargets(pageUrl);
   const bySection = new Map(fetched.map((snapshot) => [snapshot.section_name, snapshot]));
@@ -499,6 +654,14 @@ async function resolveSupplementalSnapshots(
     }
   }
 
+  log.log("Supplemental snapshot resolution done", {
+    tab_id: tabId,
+    page_url: pageUrl,
+    fetched_count: fetched.length,
+    resolved_count: resolved.length,
+    elapsed_ms: Date.now() - startedAt,
+    sections: resolved.map((snapshot) => snapshot.section_name),
+  });
   return resolved;
 }
 
@@ -507,10 +670,17 @@ async function captureExpandedPageData(tabId: number, tabInfo: chrome.tabs.Tab):
   pageSnapshots: SavedPageSnapshot[];
   buildPageContent: (preferredSections?: string[]) => string;
 }> {
+  const startedAt = Date.now();
+  log.log("Expanded page capture start", {
+    tab_id: tabId,
+    tab_url: tabInfo.url || "",
+    tab_status: tabInfo.status || "unknown",
+  });
   await prepareTabForCapture(tabId);
 
   let captured: { visible_text: string; dom_snippet: string; title: string; url: string } | null = null;
   for (let attempt = 0; attempt < 4; attempt++) {
+    const attemptStartedAt = Date.now();
     const ctx = await commandExecutor.captureContext(tabId);
     if (ctx.visible_text || ctx.dom_snippet) {
       captured = {
@@ -519,8 +689,21 @@ async function captureExpandedPageData(tabId: number, tabInfo: chrome.tabs.Tab):
         title: ctx.title || tabInfo.title || "",
         url: ctx.url || tabInfo.url || "",
       };
+      log.log("Main page capture done", {
+        tab_id: tabId,
+        attempt: attempt + 1,
+        elapsed_ms: Date.now() - attemptStartedAt,
+        visible_text_length: captured.visible_text.length,
+        dom_snippet_length: captured.dom_snippet.length,
+        page_url: captured.url,
+      });
       break;
     }
+    log.warn("Main page capture empty", {
+      tab_id: tabId,
+      attempt: attempt + 1,
+      elapsed_ms: Date.now() - attemptStartedAt,
+    });
     await new Promise((r) => setTimeout(r, 700));
   }
 
@@ -537,6 +720,14 @@ async function captureExpandedPageData(tabId: number, tabInfo: chrome.tabs.Tab):
     captured_at: new Date().toISOString(),
   }];
   pageSnapshots.push(...await resolveSupplementalSnapshots(tabId, captured.url));
+
+  log.log("Expanded page capture done", {
+    tab_id: tabId,
+    page_url: captured.url,
+    total_elapsed_ms: Date.now() - startedAt,
+    snapshot_count: pageSnapshots.length,
+    snapshot_sections: pageSnapshots.map((snapshot) => snapshot.section_name),
+  });
 
   return {
     captured,
@@ -558,12 +749,17 @@ async function analyzeLivePage(tabId?: number): Promise<{
     shape?: { kind: "scalar" | "string_list" | "record_list" | "unknown"; item_keys: string[] | null };
   }>;
 }> {
+  const startedAt = Date.now();
   let resolvedTabId = tabId;
   if (!resolvedTabId) {
     const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
     resolvedTabId = active?.id;
   }
   if (!resolvedTabId) throw new AnalyzeError("NO_TAB", "No active tab to analyze.");
+  log.log("Analyze live page start", {
+    requested_tab_id: tabId ?? null,
+    resolved_tab_id: resolvedTabId,
+  });
 
   let tabInfo: chrome.tabs.Tab | undefined;
   try {
@@ -579,8 +775,16 @@ async function analyzeLivePage(tabId?: number): Promise<{
   if (tabInfo.status !== "complete") {
     try {
       await waitForTabLoad(resolvedTabId, 15000);
+      log.log("Analyze waited for tab load", {
+        tab_id: resolvedTabId,
+        page_url: tabInfo.url || "",
+      });
     } catch {
       // best-effort
+      log.warn("Analyze tab load wait timed out", {
+        tab_id: resolvedTabId,
+        page_url: tabInfo.url || "",
+      });
     }
   }
 
@@ -607,12 +811,25 @@ async function analyzeLivePage(tabId?: number): Promise<{
   }
   const { captured, pageSnapshots } = expanded;
 
+  const suggestionStartedAt = Date.now();
   const response = await apiClient.analyzePageSuggestions({
     page_url: captured.url,
     page_title: captured.title,
     visible_text: captured.visible_text,
     dom_snippet: captured.dom_snippet,
     page_snapshots: pageSnapshots,
+  });
+  log.log("Analyze suggestions done", {
+    tab_id: resolvedTabId,
+    page_url: captured.url,
+    elapsed_ms: Date.now() - suggestionStartedAt,
+    suggested_field_count: response.suggested_fields.length,
+  });
+  log.log("Analyze live page done", {
+    tab_id: resolvedTabId,
+    page_url: captured.url,
+    total_elapsed_ms: Date.now() - startedAt,
+    snapshot_count: pageSnapshots.length,
   });
 
   return {
@@ -770,6 +987,80 @@ function readShapesFromStep(
   return [];
 }
 
+async function collectDomAnchors(
+  tabId: number,
+  pattern: string,
+  max: number,
+): Promise<{ urls: string[]; scrollTicks: number; anchorsSeen: number }> {
+  // Function injected into the page MAIN world. Must be self-contained (no
+  // closures over outer scope) because chrome.scripting serializes it.
+  const collector = async (urlPattern: string, maxResults: number) => {
+    const collect = (): string[] => {
+      const out = new Set<string>();
+      const anchors = document.querySelectorAll('a[href*="/in/"], a[href*="/company/"], a[href*="/jobs/"]');
+      for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i] as HTMLAnchorElement;
+        let href: string;
+        try { href = a.href; } catch { continue; }
+        if (!href) continue;
+        let u: URL;
+        try { u = new URL(href); } catch { continue; }
+        if (urlPattern === "linkedin_profile") {
+          if (!/(^|\.)linkedin\.com$/i.test(u.hostname)) continue;
+          const m = u.pathname.match(/^\/in\/([^/]+)(\/[a-z]{2}(-[a-zA-Z]{2,4})?\/?)?\/?$/i);
+          if (!m) continue;
+          const slug = m[1];
+          if (!slug || slug.toLowerCase() === "me") continue;
+          out.add(`https://www.linkedin.com/in/${slug}/`);
+        }
+      }
+      return Array.from(out);
+    };
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const deadline = Date.now() + 22_000;
+    let urls = collect();
+    let lastCount = urls.length;
+    let stableTicks = 0;
+    let scrollTicks = 0;
+    while (Date.now() < deadline) {
+      window.scrollBy(0, Math.max(window.innerHeight || 800, 600));
+      scrollTicks++;
+      await sleep(900);
+      urls = collect();
+      if (urls.length === lastCount) {
+        stableTicks++;
+        if (stableTicks >= 3 && urls.length >= 5) break;
+        if (stableTicks >= 8) break;
+      } else {
+        stableTicks = 0;
+        lastCount = urls.length;
+      }
+    }
+    window.scrollTo(0, 0);
+    return {
+      urls: urls.slice(0, maxResults),
+      scrollTicks,
+      anchorsSeen: document.querySelectorAll('a[href*="/in/"]').length,
+    };
+  };
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: collector,
+    args: [pattern, max],
+  });
+  const out = results?.[0]?.result;
+  if (out && typeof out === "object") {
+    return {
+      urls: Array.isArray((out as { urls?: unknown }).urls) ? (out as { urls: string[] }).urls : [],
+      scrollTicks: typeof (out as { scrollTicks?: number }).scrollTicks === "number" ? (out as { scrollTicks: number }).scrollTicks : 0,
+      anchorsSeen: typeof (out as { anchorsSeen?: number }).anchorsSeen === "number" ? (out as { anchorsSeen: number }).anchorsSeen : 0,
+    };
+  }
+  return { urls: [], scrollTicks: 0, anchorsSeen: 0 };
+}
+
 async function executeExtractStep(
   runId: string,
   stepIndex: number,
@@ -816,6 +1107,52 @@ async function executeExtractStep(
   const schema = buildExtractSchema(fields, shapes);
   log.log(`[Extract] Step ${stepIndex}: fields=${fields.join(",")} shapes=${shapes.length}`);
 
+  // Declarative DOM-anchor extraction takes precedence: when methods include
+  // {kind:"extract_dom_anchors", field, url_pattern}, scroll the page and
+  // collect matching anchor hrefs via a hard-coded chrome.scripting func
+  // (avoids new Function()/eval which LinkedIn's CSP blocks in MAIN world).
+  const scriptResults: Record<string, unknown> = {};
+  const scriptHandledFields = new Set<string>();
+  if (Array.isArray(step.methods)) {
+    for (const m of step.methods as Array<Record<string, unknown>>) {
+      if (!m || typeof m !== "object") continue;
+      if (m.kind !== "extract_dom_anchors") continue;
+      const field = String(m.field || "");
+      const urlPattern = String(m.url_pattern || "");
+      const max = typeof m.max === "number" ? m.max : 30;
+      if (!field || !urlPattern) continue;
+      const fieldKey = normalizeFieldKey(field);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const out = await collectDomAnchors(targetTabId, urlPattern, max);
+        scriptResults[fieldKey] = out.urls;
+        scriptHandledFields.add(fieldKey);
+        log.log(`[Extract] Step ${stepIndex}: extract_dom_anchors ${field} (${urlPattern}) -> ${out.urls.length} urls, scrollTicks=${out.scrollTicks}, anchorsSeen=${out.anchorsSeen}`);
+      } catch (err) {
+        log.error(`[Extract] Step ${stepIndex}: extract_dom_anchors ${field} threw:`, err);
+      }
+    }
+  }
+
+  const remainingFields = fields.filter(
+    (f) => !scriptHandledFields.has(normalizeFieldKey(f)),
+  );
+
+  // If every requested field was satisfied by a script, skip the AI/heuristic
+  // path and report directly.
+  if (remainingFields.length === 0 && scriptHandledFields.size > 0) {
+    const tabInfo = await chrome.tabs.get(targetTabId).catch(() => undefined);
+    const directData = [{
+      page_title: tabInfo?.title || "",
+      url: tabInfo?.url || "",
+      ...scriptResults,
+    }];
+    await apiClient.reportExtraction(runId, stepIndex, directData, schema);
+    await apiClient.reportStepResult(runId, stepIndex, true, undefined, "extract");
+    log.log(`[Extract] Step ${stepIndex}: all fields satisfied by extract_script(s)`);
+    return;
+  }
+
   // For shape-aware extracts (Analyze Page → Apply) the heuristic DOM scraper
   // can't produce nested records, so we go AI-first. For legacy comma-list
   // extracts without shapes we still try the heuristic first and fall back.
@@ -830,7 +1167,7 @@ async function executeExtractStep(
       const { captured, pageSnapshots, buildPageContent } = await captureExpandedPageData(targetTabId, tabInfo);
       const chosenSnapshots = chooseExtractionSnapshots(captured.url, pageSnapshots, step);
       const aiData: Record<string, unknown> = {};
-      for (const field of fields) {
+      for (const field of remainingFields) {
         const fieldKey = normalizeFieldKey(field);
         const fieldSchema = buildExtractSchema([field], shapes.filter((shape) => normalizeFieldKey(shape.key || shape.label || "") === fieldKey));
         const fieldContent = buildSnapshotPageContent(selectSnapshotsForField(field, chosenSnapshots), [field]);
@@ -848,13 +1185,14 @@ async function executeExtractStep(
           aiData[fieldKey] = fieldData[fieldKey];
         }
       }
-      if (Object.keys(aiData).length > 0) {
+      const merged = { ...scriptResults, ...aiData };
+      if (Object.keys(merged).length > 0) {
         data = [{
           page_title: captured.title || "",
           url: captured.url || "",
-          ...aiData,
+          ...merged,
         }];
-        log.log(`[Extract] Step ${stepIndex}: AI extracted ${Object.keys(aiData).length} field(s)`);
+        log.log(`[Extract] Step ${stepIndex}: extracted ${Object.keys(merged).length} field(s) (${Object.keys(scriptResults).length} script, ${Object.keys(aiData).length} AI)`);
       }
     } catch (err) {
       log.error(`[Extract] Step ${stepIndex}: AI-first extract failed:`, err);
@@ -1414,6 +1752,43 @@ async function executeAgentRun(
         },
         targetTabId,
       );
+      currentStepIndex++;
+      if (currentStepIndex >= steps.length) {
+        await apiClient.completeRun(runId);
+        finalStatus = "completed";
+        break;
+      }
+      continue;
+    }
+
+    // for_each steps materialize their inner iteration sequence by asking the
+    // backend to read prior extracted URLs from event_log, splice N copies of
+    // inner_steps with $item substituted, and return the updated snapshot.
+    if (currentStep && currentStep.action_type === "for_each") {
+      log.log(`[Agent] for_each step ${currentStepIndex}: expanding`);
+      try {
+        const result = await apiClient.expandForEach(runId, currentStepIndex);
+        const newSteps = Array.isArray(result.steps) ? result.steps : [];
+        // Replace local steps with the materialized snapshot.
+        steps.length = 0;
+        for (const s of newSteps) steps.push(s as Record<string, unknown>);
+        const iterations = typeof result.iterations === "number" ? result.iterations : 0;
+        log.log(`[Agent] for_each expanded into ${iterations} iteration(s); total steps now ${steps.length}`);
+        orchestrator.notifyRunning(workflow.name, currentStepIndex, steps.length, runId);
+        // Tell the backend the for_each step is done so its current_step_index
+        // advances past it; otherwise subsequent inner-step results trip the
+        // STEP_INDEX_MISMATCH guard.
+        try {
+          await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "for_each");
+        } catch (err) {
+          log.warn("[Agent] reportStepResult for for_each failed:", err);
+        }
+      } catch (err) {
+        log.error("[Agent] for_each expansion failed:", err);
+        await apiClient.failRun(runId, "for_each expansion failed");
+        finalStatus = "failed";
+        break;
+      }
       currentStepIndex++;
       if (currentStepIndex >= steps.length) {
         await apiClient.completeRun(runId);

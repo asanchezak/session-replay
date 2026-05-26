@@ -346,6 +346,33 @@ async def rerun_run(
     }
 
 
+class ExpandForEachRequest(BaseModel):
+    step_index: int
+
+
+@router.post("/{run_id}/expand-for-each")
+async def expand_for_each(
+    run_id: str,
+    req: ExpandForEachRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Materialize a for_each step into N concrete inner-step copies.
+
+    The extension calls this mid-run after the source extract step has reported
+    its profile_urls. The endpoint reads those URLs from event_log, applies the
+    configured limit, and splices [navigate, extract, ...] copies into the run's
+    workflow_snapshot.steps. Idempotent.
+    """
+    svc = ExecutionService(db)
+    try:
+        result = await svc.expand_for_each(run_id, req.step_index)
+    except NotFoundError as e:
+        return _error("NOT_FOUND", str(e))
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+    return result
+
+
 @router.post("/{run_id}/checkpoint")
 async def checkpoint_run(
     run_id: str,

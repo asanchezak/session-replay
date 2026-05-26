@@ -108,6 +108,15 @@ export class ApiClient {
     );
   }
 
+  async expandForEach(runId: string, stepIndex: number) {
+    return this.request<{
+      steps: Array<Record<string, unknown>>;
+      iterations: number;
+      items?: string[];
+      already_expanded?: boolean;
+    }>("POST", `/runs/${runId}/expand-for-each`, { step_index: stepIndex });
+  }
+
   async reportStepResult(
     runId: string,
     stepIndex: number,

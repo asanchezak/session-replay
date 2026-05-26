@@ -150,6 +150,154 @@ class ExecutionService:
         await self.session.flush()
         return run
 
+    async def expand_for_each(self, run_id: str, step_index: int) -> dict:
+        """Materialize a for_each step by reading the configured source URLs from
+        prior extraction events and splicing inner_steps copies into the run's
+        snapshot — one per item, with $item substituted.
+
+        Idempotent: if the for_each step is already marked expanded, returns the
+        current snapshot without re-splicing.
+        """
+        from core.models.event import EventLog
+
+        run = await self.get_run(run_id)
+        snapshot = deepcopy(run.workflow_snapshot or {})
+        steps = snapshot.get("steps") or []
+        if step_index < 0 or step_index >= len(steps):
+            raise NotFoundError(f"Step {step_index} not in snapshot")
+
+        step = steps[step_index]
+        if step.get("action_type") != "for_each":
+            raise StateTransitionError(
+                f"Step {step_index} is action_type={step.get('action_type')}, not for_each"
+            )
+
+        methods = step.get("methods") or []
+        config = None
+        for m in methods:
+            if isinstance(m, dict) and m.get("kind") == "for_each_config":
+                config = m
+                break
+        if not config:
+            raise StateTransitionError("for_each step is missing a for_each_config method")
+        if config.get("expanded"):
+            return {"steps": steps, "iterations": 0, "already_expanded": True}
+
+        sources = config.get("sources") or []
+        item_sigil = str(config.get("item_sigil") or "$item")
+        limit_param = str(config.get("limit_param") or "")
+        inner_steps = config.get("inner_steps") or []
+        inner_failure_policy = str(config.get("inner_failure_policy") or "continue")
+
+        # Resolve the iteration limit from the run's resolved parameters.
+        limit = None
+        if limit_param:
+            analysis = snapshot.get("analysis") or {}
+            execution_plan = analysis.get("execution_plan") or {}
+            resolved = execution_plan.get("resolved_parameters") or {}
+            raw = resolved.get(limit_param)
+            if raw is not None:
+                try:
+                    limit = int(raw)
+                except (TypeError, ValueError):
+                    limit = None
+
+        # Pull source items from event_log extraction payloads, keyed by step_index.
+        result = await self.session.execute(
+            select(EventLog).where(
+                EventLog.run_id == to_uuid(run_id),
+                EventLog.event_type == "extraction",
+            )
+        )
+        extractions_by_step: dict[int, list] = {}
+        for ev in result.scalars().all():
+            payload = ev.payload or {}
+            si = payload.get("step_index")
+            data = payload.get("data") or []
+            if isinstance(si, int) and isinstance(data, list):
+                extractions_by_step.setdefault(si, []).extend(data)
+
+        items: list[str] = []
+        seen: set[str] = set()
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            src_idx = source.get("step_index")
+            field = source.get("field")
+            if not isinstance(src_idx, int) or not isinstance(field, str):
+                continue
+            for record in extractions_by_step.get(src_idx, []) or []:
+                if not isinstance(record, dict):
+                    continue
+                value = record.get(field)
+                if isinstance(value, list):
+                    for v in value:
+                        if isinstance(v, str) and v not in seen:
+                            seen.add(v)
+                            items.append(v)
+                elif isinstance(value, str) and value not in seen:
+                    seen.add(value)
+                    items.append(value)
+
+        if limit is not None:
+            items = items[:limit]
+
+        # Build the materialized inner steps with $item replaced.
+        def _substitute(node, item: str):
+            if isinstance(node, str):
+                return node.replace(item_sigil, item)
+            if isinstance(node, list):
+                return [_substitute(x, item) for x in node]
+            if isinstance(node, dict):
+                return {k: _substitute(v, item) for k, v in node.items()}
+            return node
+
+        materialized: list[dict] = []
+        for item in items:
+            for tmpl in inner_steps:
+                if not isinstance(tmpl, dict):
+                    continue
+                inner = _substitute(deepcopy(tmpl), item)
+                inner["_for_each_item"] = item
+                inner["_for_each_origin_step"] = step_index
+                inner["_inner_failure_policy"] = inner_failure_policy
+                materialized.append(inner)
+
+        # Splice: keep everything up to and including the for_each step, append
+        # materialized inner steps, then keep everything after.
+        before = steps[: step_index + 1]
+        after = steps[step_index + 1 :]
+        new_steps = before + materialized + after
+        for i, s in enumerate(new_steps):
+            s["step_index"] = i
+
+        # Mark the for_each step as expanded (idempotency) and record the
+        # iteration metadata for the UI.
+        for m in new_steps[step_index].get("methods") or []:
+            if isinstance(m, dict) and m.get("kind") == "for_each_config":
+                m["expanded"] = True
+                m["expanded_iterations"] = len(items)
+                m["expanded_items"] = items
+                break
+
+        snapshot["steps"] = new_steps
+        run.workflow_snapshot = snapshot
+        run.total_steps = len(new_steps)
+        flag_modified(run, "workflow_snapshot")
+        await self.session.flush()
+
+        await self.audit.append(AppendEvent(
+            event_type="for_each_expanded",
+            payload={
+                "step_index": step_index,
+                "iterations": len(items),
+                "inner_steps_per_iteration": len(inner_steps),
+                "total_steps_after": len(new_steps),
+            },
+            run_id=run_id,
+        ))
+        return {"steps": new_steps, "iterations": len(items), "items": items}
+
     async def reset_to_start(self, run_id: str) -> ExecutionRun:
         """Reset a run to its original executable snapshot and step 0."""
         run = await self.get_run(run_id)

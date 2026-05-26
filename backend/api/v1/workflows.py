@@ -50,12 +50,13 @@ class CreateWorkflowRequest(BaseModel):
 
 class AddStepRequest(BaseModel):
     step_index: int
-    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract"]
+    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract", "for_each"]
     intent: str | None = None
     selector_chain: list[SelectorSet] | None = None
     value: str | None = None
-    methods: list[MethodDef] | None = None
+    methods: list[dict[str, Any]] | None = None
     success_condition: dict[str, Any] | None = None
+    dom_context: dict[str, Any] | None = None
 
 
 class UpdateStatusRequest(BaseModel):
@@ -739,7 +740,7 @@ async def add_step(
     except NotFoundError:
         return _not_found("Workflow not found")
 
-    methods_data = [m.model_dump() for m in req.methods] if req.methods else None
+    methods_data = list(req.methods) if req.methods else None
     selector_chain_data = [s.model_dump() for s in req.selector_chain] if req.selector_chain else None
 
     step = await svc.add_step(
@@ -751,6 +752,7 @@ async def add_step(
         value=req.value,
         methods=methods_data,
         success_condition=req.success_condition,
+        dom_context=req.dom_context,
     )
     return {
         "id": str(step.id),

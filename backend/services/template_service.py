@@ -161,6 +161,8 @@ class TemplateService:
         return template
 
     async def substitute_parameters(self, template: dict, runtime_params: dict) -> list[dict]:
+        import re as _re
+
         steps = deepcopy(template.get("steps", []))
         params_config = {p["key"]: p for p in template.get("parameters", [])}
         default_to_param = {
@@ -181,24 +183,48 @@ class TemplateService:
                 return str(params_config[param_key]["default"])
             return None
 
+        _embedded_pattern = _re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+        def _resolve_string(raw: str) -> str:
+            # Whole-value placeholder (preserves type semantics): "{{key}}" -> resolved
+            param_key = _resolve_param_key(raw)
+            if param_key:
+                resolved = _resolve_param_value(param_key)
+                if resolved is not None:
+                    return resolved
+            # Embedded placeholders inside a longer string: "https://.../?keywords={{keyword}}&..."
+            def _replace(match: _re.Match) -> str:
+                key = match.group(1).strip()
+                resolved = _resolve_param_value(key)
+                return resolved if resolved is not None else match.group(0)
+            return _embedded_pattern.sub(_replace, raw)
+
+        def _walk(node):
+            if isinstance(node, str):
+                return _resolve_string(node)
+            if isinstance(node, list):
+                return [_walk(x) for x in node]
+            if isinstance(node, dict):
+                return {k: _walk(v) for k, v in node.items()}
+            return node
+
         for step in steps:
             value = step.get("value")
             if isinstance(value, str):
-                param_key = _resolve_param_key(value)
-                if param_key:
-                    resolved = _resolve_param_value(param_key)
-                    if resolved is not None:
-                        step["value"] = resolved
+                step["value"] = _resolve_string(value)
 
             success_condition = step.get("success_condition")
             if isinstance(success_condition, dict):
                 sc_value = success_condition.get("value")
                 if isinstance(sc_value, str):
-                    param_key = _resolve_param_key(sc_value)
-                    if param_key:
-                        resolved = _resolve_param_value(param_key)
-                        if resolved is not None:
-                            success_condition["value"] = resolved
+                    success_condition["value"] = _resolve_string(sc_value)
+
+            # For_each steps embed inner_steps inside methods[].for_each_config.
+            # Walk the methods tree so placeholders inside inner_steps[].value
+            # (e.g. the search URL template) get resolved too.
+            methods = step.get("methods")
+            if isinstance(methods, list):
+                step["methods"] = [_walk(m) for m in methods]
 
         # Mark which steps were substituted
         for step in steps:
