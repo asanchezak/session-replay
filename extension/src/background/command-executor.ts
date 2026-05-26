@@ -23,7 +23,7 @@ const log = createLogger("command-executor");
  * known UX cost, accepted by the product. Attach is lazy (on first use)
  * and detach is automatic on tab close.
  */
-class DebuggerSession {
+export class DebuggerSession {
   private static attached = new Map<number, boolean>();
   private static onDetachRegistered = false;
 
@@ -87,6 +87,28 @@ class DebuggerSession {
       return true;
     } catch (err) {
       log.error("dispatchMouseClick failed:", err instanceof Error ? err.message : String(err));
+      return false;
+    }
+  }
+
+  /**
+   * Issue a trusted mouseMoved event at (x, y). Fires :hover and mouse
+   * tracking handlers. Used to simulate cursor travel along a path before
+   * dispatchMouseClick so the click looks like it followed a real cursor.
+   */
+  static async dispatchMouseMove(tabId: number, x: number, y: number): Promise<boolean> {
+    if (!(await this.attach(tabId))) return false;
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: Math.round(x),
+        y: Math.round(y),
+        button: "none",
+        buttons: 0,
+      });
+      return true;
+    } catch (err) {
+      log.warn("dispatchMouseMove failed:", err instanceof Error ? err.message : String(err));
       return false;
     }
   }

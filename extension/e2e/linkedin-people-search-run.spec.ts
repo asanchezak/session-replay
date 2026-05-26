@@ -150,27 +150,65 @@ test("LinkedIn people-search workflow extracts 5 profiles end-to-end", async ({ 
   const workflowId = await seedWorkflow();
   console.log(`Seeded workflow: ${workflowId}`);
 
-  const { runId, events, status } = await runOnce(context, extensionId, workflowId, 5, 300_000);
+  // The hardened anti-bot path takes longer (in-tab section navigation +
+  // variable dwell + jittered cooldowns + noise breaks).
+  const { runId, events, status } = await runOnce(context, extensionId, workflowId, 5, 1_200_000);
   console.log(`Run ${runId} finished with status=${status}`);
 
-  expect(status).toBe("completed");
+  // Load-bearing assertion: the only failure mode we're hardening against
+  // is LinkedIn's hard login wall. Soft pauses are acceptable.
+  const stepEvents = events.filter((e) => e.event_type === "step_executed");
+  const blockingPauses = events.filter(
+    (e) => e.event_type === "run_paused" && /login_form/i.test(String(e.payload?.reason || "")),
+  );
+  expect(blockingPauses).toEqual([]);
+
+  expect(["completed", "waiting_for_user"]).toContain(status);
   const records = profileRecords(events);
   console.log(`Profile records: ${records.length}`);
-  expect(records.length).toBeGreaterThanOrEqual(3);
-  expect(records.length).toBeLessThanOrEqual(5);
+  expect(records.length).toBeGreaterThanOrEqual(4);
 
-  // Each record should have at least some richness — about + experience or skills.
+  // Each record should carry SOMETHING — about, skills, experience, or education.
+  // Section-subset randomization means we don't always visit every section,
+  // so we can't insist on a specific shape.
   for (const r of records) {
     const hasAbout = typeof r.about === "string" && r.about.length > 30;
     const hasExperience = Array.isArray(r.experience) && r.experience.length >= 1;
-    const hasSkills = Array.isArray(r.skills) && r.skills.length >= 3;
-    expect(hasAbout || hasExperience || hasSkills).toBeTruthy();
+    const hasSkills = Array.isArray(r.skills) && r.skills.length >= 1;
+    const hasEducation = Array.isArray(r.education) && r.education.length >= 1;
+    expect(hasAbout || hasExperience || hasSkills || hasEducation).toBeTruthy();
   }
 
   // Confirm for_each was expanded by checking the audit event.
   const expanded = events.find((e) => e.event_type === "for_each_expanded");
   expect(expanded).toBeTruthy();
   expect(expanded.payload.iterations).toBeGreaterThanOrEqual(3);
+
+  // Cadence randomization: section subsets should not all be identical.
+  // For each iteration, collect the set of section names extracted (after
+  // the for_each_expanded event). Profile records inherently encode this
+  // via which fields are non-empty.
+  const sectionSetPerRecord = records.map((r) =>
+    [
+      r.about ? "about" : null,
+      Array.isArray(r.skills) && r.skills.length ? "skills" : null,
+      Array.isArray(r.experience) && r.experience.length ? "experience" : null,
+      Array.isArray(r.education) && r.education.length ? "education" : null,
+      Array.isArray(r.certifications) && r.certifications.length ? "certifications" : null,
+      Array.isArray(r.projects) && r.projects.length ? "projects" : null,
+    ].filter(Boolean).sort().join(","),
+  );
+  console.log("Section sets per record:", sectionSetPerRecord);
+  // Not all 4+ records should have an identical section signature — variety
+  // proves the randomization fired.
+  expect(new Set(sectionSetPerRecord).size).toBeGreaterThan(1);
+
+  // Noise breaks fired between iterations: expect ≥ (iterations - 1).
+  const noiseEvents = stepEvents.filter(
+    (e) => String(e.payload?.action_type || "") === "noise_break",
+  );
+  console.log("noise_break events:", noiseEvents.length);
+  expect(noiseEvents.length).toBeGreaterThanOrEqual(records.length - 1);
 });
 
 test("LinkedIn people-search workflow paginates to page 2 for count=15", async ({ context, extensionId }) => {

@@ -4,7 +4,7 @@ import { createLogger } from "../shared/logger";
 import { stepHealer } from "./healer";
 import { stepExecutor } from "./executor";
 import { registerServiceWorkerListeners } from "./message-router";
-import { commandExecutor } from "./command-executor";
+import { commandExecutor, DebuggerSession } from "./command-executor";
 import { waitForTabLoad, waitForTabLoadBestEffort } from "./tab-load";
 import { getPageSnapshotTargets } from "./site-adapters/registry";
 import { detectChallenges } from "../shared/detector";
@@ -534,38 +534,370 @@ function isLinkedInProfilePage(url: string): boolean {
   }
 }
 
+// Pick a uniform float in [0,1) using crypto for unbiased entropy.
+function cryptoRandom(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return buf[0] / 0x1_0000_0000;
+}
+
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(cryptoRandom() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Beta-skewed dwell: low alpha biases toward shorter; occasional long reads.
+function pickDwellMs(min: number, max: number): number {
+  // Mix of two uniforms, lighter weight on the upper tail.
+  const r = cryptoRandom() * cryptoRandom() + cryptoRandom() * 0.15;
+  return Math.floor(min + (max - min) * Math.min(1, r));
+}
+
+async function getShowAllSections(tabId: number, pageUrl: string): Promise<Set<string>> {
+  // Inspect the current profile page for "Show all" links into /details/X/.
+  // Real readers only click into sections that have substance; sections with
+  // no Show-all link have their data already inline on the main page.
+  try {
+    const targets = getPageSnapshotTargets(pageUrl);
+    if (targets.length === 0) return new Set();
+    const sectionPaths = targets.map((t) => new URL(t.pageUrl).pathname);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [sectionPaths],
+      func: (paths: string[]) => {
+        const out: string[] = [];
+        for (const path of paths) {
+          const anchors = document.querySelectorAll(`a[href*="${path}"]`);
+          if (anchors.length > 0) out.push(path);
+        }
+        return out;
+      },
+    });
+    const found = (results?.[0]?.result as string[]) || [];
+    return new Set(found);
+  } catch {
+    return new Set();
+  }
+}
+
+async function microScroll(tabId: number, ticks: number): Promise<void> {
+  for (let i = 0; i < ticks; i++) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [(cryptoRandom() > 0.3 ? 1 : -1) * (300 + Math.floor(cryptoRandom() * 500))],
+        func: (dy: number) => window.scrollBy({ top: dy, behavior: "smooth" }),
+      });
+    } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 800 + Math.floor(cryptoRandom() * 1700)));
+  }
+}
+
+// Tracks last-known cursor position per tab so successive trusted clicks
+// can dispatch a bezier-curve path from where the cursor "is" to the next
+// target. Real users don't teleport — clicks always follow a mouse move.
+const lastCursorByTab = new Map<number, { x: number; y: number }>();
+
+function bezierPath(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  steps: number,
+): Array<{ x: number; y: number }> {
+  // Two random control points so successive paths aren't identically shaped.
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const c1 = {
+    x: from.x + dx * (0.25 + cryptoRandom() * 0.2),
+    y: from.y + dy * (0.25 + cryptoRandom() * 0.2) + (cryptoRandom() - 0.5) * 80,
+  };
+  const c2 = {
+    x: from.x + dx * (0.6 + cryptoRandom() * 0.2),
+    y: from.y + dy * (0.6 + cryptoRandom() * 0.2) + (cryptoRandom() - 0.5) * 80,
+  };
+  const out: Array<{ x: number; y: number }> = [];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const it = 1 - t;
+    const x =
+      it * it * it * from.x +
+      3 * it * it * t * c1.x +
+      3 * it * t * t * c2.x +
+      t * t * t * to.x;
+    const y =
+      it * it * it * from.y +
+      3 * it * it * t * c1.y +
+      3 * it * t * t * c2.y +
+      t * t * t * to.y;
+    out.push({ x, y });
+  }
+  return out;
+}
+
+async function locateSectionAnchor(
+  tabId: number,
+  sectionPath: string,
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [sectionPath],
+      func: async (path: string) => {
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const anchors = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>(`a[href*="${path}"]`),
+        );
+        const target = anchors.find((a) => {
+          try {
+            const u = new URL(a.href);
+            return u.pathname.endsWith(path) || u.pathname.endsWith(path.replace(/\/$/, ""));
+          } catch {
+            return false;
+          }
+        });
+        if (!target) return null;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        await sleep(700);
+        const r = target.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        return {
+          x: r.left + r.width / 2,
+          y: r.top + r.height / 2,
+        };
+      },
+    });
+    return (results?.[0]?.result as { x: number; y: number } | null) || null;
+  } catch (err) {
+    log.warn("locateSectionAnchor failed:", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+async function clickSectionLink(
+  tabId: number,
+  sectionPath: string,
+): Promise<boolean> {
+  const target = await locateSectionAnchor(tabId, sectionPath);
+  if (!target) return false;
+  // Initialise cursor to a randomized "innocent" spot near viewport center
+  // on first interaction in this tab.
+  let cursor = lastCursorByTab.get(tabId);
+  if (!cursor) {
+    cursor = {
+      x: 600 + (cryptoRandom() - 0.5) * 300,
+      y: 360 + (cryptoRandom() - 0.5) * 200,
+    };
+  }
+  const steps = 3 + Math.floor(cryptoRandom() * 4); // 3-6 moves
+  const path = bezierPath(cursor, target, steps);
+  for (const p of path) {
+    const ok = await DebuggerSession.dispatchMouseMove(tabId, p.x, p.y);
+    if (!ok) return false;
+    await new Promise((r) => setTimeout(r, 30 + Math.floor(cryptoRandom() * 60)));
+  }
+  // Tiny pause at the target before the click (humans don't click instantly
+  // upon arrival).
+  await new Promise((r) => setTimeout(r, 80 + Math.floor(cryptoRandom() * 140)));
+  const clicked = await DebuggerSession.dispatchMouseClick(tabId, target.x, target.y);
+  if (!clicked) return false;
+  lastCursorByTab.set(tabId, target);
+  return true;
+}
+
+// Tiny deterministic PRNG — same algorithm as the backend's `random.Random`
+// approximation: given the same seed, two extension invocations yield
+// identical noise shapes. Used so tests can replay noise behaviour.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Track the most recent search URL the agent navigated to per tab. Used by
+// `noise_break.search_bounce` so we can return to the user's search context
+// instead of guessing a URL. Populated by any LinkedIn search navigation
+// (agent EXECUTE path, fast-path for_each navigate, or even manual user
+// navigation in the same tab).
+const lastSearchUrlByTab = new Map<number, string>();
+try {
+  chrome.tabs?.onUpdated.addListener((tabId, _changeInfo, tab) => {
+    const url = tab.url || "";
+    if (/linkedin\.com\/search\/results\//.test(url)) {
+      lastSearchUrlByTab.set(tabId, url);
+    }
+  });
+} catch { /* MV2/test env fallback */ }
+
+// Track URLs the workflow has already navigated to (for `profile_hover` to
+// pick a decoy URL distinct from the next target).
+const seenProfileUrlsByRun = new Map<string, string[]>();
+
+async function fetchProfileUrlPoolForRun(runId: string): Promise<string[]> {
+  // Reuse cached pool if already populated this run.
+  const cached = seenProfileUrlsByRun.get(runId);
+  if (cached && cached.length > 0) return cached;
+  try {
+    const events = await apiClient.getRunEvents(runId, 200);
+    const collected: string[] = [];
+    for (const ev of events) {
+      if (ev.event_type !== "extraction") continue;
+      for (const rec of ev.payload?.data || []) {
+        const urls = (rec as { profile_urls?: unknown }).profile_urls;
+        if (Array.isArray(urls)) {
+          for (const u of urls) if (typeof u === "string") collected.push(u);
+        }
+      }
+    }
+    seenProfileUrlsByRun.set(runId, collected);
+    return collected;
+  } catch {
+    return [];
+  }
+}
+
+async function microScrollSeeded(tabId: number, ticks: number, rand: () => number): Promise<void> {
+  for (let i = 0; i < ticks; i++) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [(rand() > 0.3 ? 1 : -1) * (300 + Math.floor(rand() * 500))],
+        func: (dy: number) => window.scrollBy({ top: dy, behavior: "smooth" }),
+      });
+    } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 800 + Math.floor(rand() * 1700)));
+  }
+}
+
+async function executeNoiseBreak(
+  tabId: number,
+  kind: string,
+  seed: number,
+  runId: string,
+  originStep: number | undefined,
+): Promise<void> {
+  const rand = mulberry32(seed);
+  const safelyNavigate = async (url: string) => {
+    await chrome.tabs.update(tabId, { url });
+    await waitForTabLoad(tabId, 20_000).catch(() => undefined);
+  };
+  switch (kind) {
+    case "search_bounce": {
+      const searchUrl = lastSearchUrlByTab.get(tabId);
+      if (!searchUrl) {
+        // Nothing to bounce to — fall through to idle scrolling.
+        await microScrollSeeded(tabId, 2 + Math.floor(rand() * 3), rand);
+        await new Promise((r) => setTimeout(r, 5000 + Math.floor(rand() * 7000)));
+        return;
+      }
+      await safelyNavigate(searchUrl);
+      await microScrollSeeded(tabId, 2 + Math.floor(rand() * 2), rand);
+      await new Promise((r) => setTimeout(r, 5000 + Math.floor(rand() * 7000)));
+      return;
+    }
+    case "feed_scroll": {
+      await safelyNavigate("https://www.linkedin.com/feed/");
+      await microScrollSeeded(tabId, 2 + Math.floor(rand() * 3), rand);
+      await new Promise((r) => setTimeout(r, 8000 + Math.floor(rand() * 12000)));
+      return;
+    }
+    case "profile_hover": {
+      const pool = await fetchProfileUrlPoolForRun(runId);
+      // originStep is currently unused — retained on the noise step for
+      // future per-source filtering if we ever need it.
+      void originStep;
+      const candidate = pool.length > 0 ? pool[Math.floor(rand() * pool.length)] : null;
+      if (candidate) {
+        await safelyNavigate(candidate);
+        await microScrollSeeded(tabId, 1 + Math.floor(rand() * 2), rand);
+        await new Promise((r) => setTimeout(r, 3000 + Math.floor(rand() * 5000)));
+        return;
+      }
+      // Fallback to idle scroll if we couldn't get a decoy.
+      await microScrollSeeded(tabId, 2 + Math.floor(rand() * 3), rand);
+      await new Promise((r) => setTimeout(r, 5000 + Math.floor(rand() * 10000)));
+      return;
+    }
+    case "idle_scroll":
+    default: {
+      await microScrollSeeded(tabId, 2 + Math.floor(rand() * 3), rand);
+      await new Promise((r) => setTimeout(r, 5000 + Math.floor(rand() * 10000)));
+      return;
+    }
+  }
+}
+
 async function captureLinkedInDetailsViaTabNavigation(
   tabId: number,
   pageUrl: string,
 ): Promise<SavedPageSnapshot[]> {
-  // Anti-bot strategy: drive the SAME tab through /in/X → /details/skills →
-  // /details/experience → ... — exactly what a human clicking section links
-  // would do. No hidden background tabs (LinkedIn fingerprints those), no
-  // parallelism, jittered delays between section navigations.
+  // Anti-bot strategy:
+  //   1. Same tab, no hidden background tabs.
+  //   2. Inspect the current profile for which /details/ sections have
+  //      "Show all" anchors — only visit those (real readers don't click
+  //      into already-fully-inline sections).
+  //   3. Probabilistic subset of the candidates (per-section p = 0.65),
+  //      capped at max_sections_per_profile.
+  //   4. Shuffle the visit order.
+  //   5. Variable dwell (4-22 s, beta-skewed) with 1-3 micro-scrolls.
   const startedAt = Date.now();
-  const targets = getPageSnapshotTargets(pageUrl);
-  if (targets.length === 0) return [];
+  const allTargets = getPageSnapshotTargets(pageUrl);
+  if (allTargets.length === 0) return [];
+
+  const showAll = await getShowAllSections(tabId, pageUrl);
+  const SECTION_VISIT_PROBABILITY = 0.65;
+  const MAX_SECTIONS = 5;
+
+  // Filter to sections that have a Show-all link, then probabilistically include.
+  const candidates = allTargets.filter((t) => showAll.has(new URL(t.pageUrl).pathname));
+  const included = candidates.filter(() => cryptoRandom() < SECTION_VISIT_PROBABILITY);
+  // Guarantee at least one section if any are available, otherwise we'd
+  // skip the profile entirely.
+  if (included.length === 0 && candidates.length > 0) {
+    included.push(candidates[Math.floor(cryptoRandom() * candidates.length)]);
+  }
+  // Cap and shuffle.
+  shuffleInPlace(included);
+  if (included.length > MAX_SECTIONS) included.length = MAX_SECTIONS;
 
   log.log("LinkedIn in-tab capture start", {
     tab_id: tabId,
     page_url: pageUrl,
-    sections: targets.map((t) => t.sectionName),
+    total_candidates: allTargets.length,
+    show_all_present: candidates.length,
+    visiting_count: included.length,
+    visiting: included.map((t) => t.sectionName),
   });
 
   const snapshots: SavedPageSnapshot[] = [];
-  for (let i = 0; i < targets.length; i++) {
-    const target = targets[i];
+  for (let i = 0; i < included.length; i++) {
+    const target = included[i];
     try {
-      // Short jittered pre-navigation pause — looks more natural than
-      // mechanical back-to-back clicks.
+      // Short jittered pre-navigation pause — looks like reading then clicking.
       await new Promise((resolve) =>
-        setTimeout(resolve, 600 + Math.floor(Math.random() * 1400)));
+        setTimeout(resolve, 600 + Math.floor(cryptoRandom() * 1400)));
 
-      await chrome.tabs.update(tabId, { url: target.pageUrl });
+      // Prefer a trusted CDP click on the section anchor. Falls back to
+      // chrome.tabs.update if the link isn't located.
+      const sectionPath = new URL(target.pageUrl).pathname;
+      const clicked = await clickSectionLink(tabId, sectionPath);
+      if (!clicked) {
+        await chrome.tabs.update(tabId, { url: target.pageUrl });
+      }
       await waitForTabLoad(tabId, 25_000).catch(() => undefined);
-      // Let the SPA bundle fetch + render the section content.
+      // Let the SPA bundle fetch + render section content.
       await new Promise((resolve) =>
-        setTimeout(resolve, 2000 + Math.floor(Math.random() * 1200)));
+        setTimeout(resolve, 1500 + Math.floor(cryptoRandom() * 1500)));
       await prepareTabForCapture(tabId).catch(() => undefined);
 
       const ctx = await commandExecutor.captureContext(tabId);
@@ -579,6 +911,17 @@ async function captureLinkedInDetailsViaTabNavigation(
           captured_at: new Date().toISOString(),
         });
       }
+
+      // Variable dwell with micro-scrolls — looks like a person reading.
+      const dwell = pickDwellMs(4_000, 22_000);
+      const scrollTicks = 1 + Math.floor(cryptoRandom() * 3);
+      const scrollBudget = Math.min(dwell - 500, scrollTicks * 2500);
+      const scrollPromise = microScroll(tabId, scrollTicks);
+      const dwellRemain = Math.max(500, dwell - scrollBudget);
+      await Promise.all([
+        scrollPromise,
+        new Promise<void>((r) => setTimeout(r, dwellRemain)),
+      ]);
     } catch (err) {
       log.warn("LinkedIn in-tab capture per-section failed", {
         section: target.sectionName,
@@ -1729,8 +2072,50 @@ async function executeAgentRun(
 
     // Extract steps are deterministic — execute them inline without an AI poll.
     const currentStep = steps[currentStepIndex] as
-      | { action_type?: string; value?: string; intent?: string; methods?: unknown; dom_context?: Record<string, unknown> | null; _for_each_item?: string; delay_before_ms?: number }
+      | { action_type?: string; value?: string; intent?: string; methods?: unknown; dom_context?: Record<string, unknown> | null; _for_each_item?: string; delay_before_ms?: number; _noise_kind?: string; _noise_seed?: number; _for_each_origin_step?: number }
       | undefined;
+
+    // noise_break pseudo-steps — anti-bot noise injected between for_each
+    // iterations (or statically authored as pre-warm steps). Run silently
+    // without an AI poll and report success.
+    if (currentStep && currentStep.action_type === "noise_break") {
+      try {
+        if (currentStep.delay_before_ms && currentStep.delay_before_ms > 0) {
+          log.log(`[Agent] noise_break delay: ${currentStep.delay_before_ms}ms`);
+          await new Promise((r) => setTimeout(r, currentStep.delay_before_ms));
+        }
+        // for_each-expanded noise carries kind/seed as top-level fields;
+        // static pre-warm noise carries them inside a noise_config method.
+        let kind = currentStep._noise_kind;
+        let seed: number | undefined =
+          typeof currentStep._noise_seed === "number" ? currentStep._noise_seed : undefined;
+        if (!kind && Array.isArray(currentStep.methods)) {
+          for (const m of currentStep.methods as Array<Record<string, unknown>>) {
+            if (m && typeof m === "object" && m.kind === "noise_config") {
+              if (typeof m._noise_kind === "string") kind = m._noise_kind as string;
+              if (typeof m._noise_seed === "number") seed = m._noise_seed as number;
+            }
+          }
+        }
+        const resolvedKind = String(kind || "idle_scroll");
+        const resolvedSeed = typeof seed === "number" ? seed : Date.now();
+        log.log(`[Agent] noise_break kind=${resolvedKind} seed=${resolvedSeed}`);
+        await executeNoiseBreak(targetTabId, resolvedKind, resolvedSeed, runId, currentStep._for_each_origin_step);
+        await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "noise_break");
+      } catch (err) {
+        log.warn("[Agent] noise_break failed (continuing):", err);
+        try {
+          await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "noise_break");
+        } catch { /* ignore */ }
+      }
+      currentStepIndex++;
+      if (currentStepIndex >= steps.length) {
+        await apiClient.completeRun(runId);
+        finalStatus = "completed";
+        break;
+      }
+      continue;
+    }
 
     // Fast-path: for_each-expanded navigate steps have a known $item URL —
     // skip the ~5-10 s AI poll and just navigate directly. Massively cuts
@@ -1749,6 +2134,11 @@ async function executeAgentRun(
         }
         log.log(`[Agent] fast-path navigate (for_each) to ${targetUrl}`);
         await chrome.tabs.update(targetTabId, { url: targetUrl });
+        // Remember the search URL if this navigate is to a LinkedIn search
+        // results page — noise_break.search_bounce will return to it.
+        if (/linkedin\.com\/search\/results\//.test(targetUrl)) {
+          lastSearchUrlByTab.set(targetTabId, targetUrl);
+        }
         await waitForTabLoad(targetTabId, 20_000).catch(() => undefined);
         await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "navigate", undefined, targetUrl);
       } catch (err) {

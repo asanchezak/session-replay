@@ -117,6 +117,13 @@ export class ApiClient {
     }>("POST", `/runs/${runId}/expand-for-each`, { step_index: stepIndex });
   }
 
+  async getRunEvents(runId: string, limit = 200) {
+    return this.request<Array<{
+      event_type?: string;
+      payload?: { step_index?: number; data?: Array<{ profile_urls?: unknown }> };
+    }>>("GET", `/runs/${runId}/events?limit=${limit}`);
+  }
+
   async reportStepResult(
     runId: string,
     stepIndex: number,

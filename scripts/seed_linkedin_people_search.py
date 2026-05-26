@@ -111,9 +111,38 @@ def _build_steps() -> list[dict]:
         },
     ]
 
+    # Session pre-warm: land on /feed/ first (where real users start)
+    # and idle-scroll for a few seconds before navigating to the search URL.
+    # LinkedIn's behavioural analytics flags sessions that deep-link
+    # straight to /search/results/?keywords=... without any prior activity.
     return [
         {
             "step_index": 0,
+            "action_type": "navigate",
+            "value": "https://www.linkedin.com/feed/",
+            "intent": "Warm up the session by visiting the feed",
+            "methods": None,
+            "selector_chain": None,
+            "success_condition": None,
+        },
+        {
+            "step_index": 1,
+            "action_type": "noise_break",
+            "value": None,
+            "intent": "Read the feed for a moment",
+            # Static (non-for_each) noise steps encode kind/seed via methods
+            # so the data survives WorkflowStep persistence — top-level keys
+            # like _noise_kind aren't persisted columns.
+            "methods": [{
+                "kind": "noise_config",
+                "_noise_kind": "idle_scroll",
+                "_noise_seed": 13_579_246,
+            }],
+            "selector_chain": None,
+            "success_condition": None,
+        },
+        {
+            "step_index": 2,
             "action_type": "navigate",
             "value": SEARCH_URL_TEMPLATE,
             "intent": "Open LinkedIn people search",
@@ -122,7 +151,7 @@ def _build_steps() -> list[dict]:
             "success_condition": None,
         },
         {
-            "step_index": 1,
+            "step_index": 3,
             "action_type": "extract",
             "value": "Profile URLs",
             "intent": "Pull profile URLs from page 1 of search results",
@@ -131,7 +160,7 @@ def _build_steps() -> list[dict]:
             "success_condition": None,
         },
         {
-            "step_index": 2,
+            "step_index": 4,
             "action_type": "navigate",
             "value": SEARCH_URL_TEMPLATE + "&page=2",
             "intent": "Go to search results page 2",
@@ -140,7 +169,7 @@ def _build_steps() -> list[dict]:
             "success_condition": None,
         },
         {
-            "step_index": 3,
+            "step_index": 5,
             "action_type": "extract",
             "value": "Profile URLs",
             "intent": "Pull profile URLs from page 2 of search results",
@@ -149,29 +178,33 @@ def _build_steps() -> list[dict]:
             "success_condition": None,
         },
         {
-            "step_index": 4,
+            "step_index": 6,
             "action_type": "for_each",
             "value": None,
             "intent": "Iterate over top-N profile URLs and extract each profile",
             "methods": [
                 {
                     "kind": "for_each_config",
+                    # Sources shifted +2 because of the pre-warm steps.
                     "sources": [
-                        {"step_index": 1, "field": "profile_urls"},
                         {"step_index": 3, "field": "profile_urls"},
+                        {"step_index": 5, "field": "profile_urls"},
                     ],
                     "limit_param": "count",
                     "item_var": "profile_url",
                     "item_sigil": "$item",
                     "inner_failure_policy": "continue",
-                    # Anti-bot pacing: pause 20-50 s (jittered) between profile
-                    # iterations. Observed: LinkedIn triggers a login_form
-                    # blocker around the 5th rapid sequential profile visit
-                    # even with in-tab navigation + webdriver masking. The
-                    # longer the inter-profile gap, the less the pattern
-                    # looks like an automated crawl.
+                    # Anti-bot pacing: jittered inter-profile delay.
                     "iteration_delay_ms": 20000,
                     "iteration_delay_jitter_ms": 30000,
+                    # Every Nth iteration tacks on a longer "I went to make
+                    # coffee" cooldown.
+                    "extended_cooldown_every_n": 3,
+                    "extended_cooldown_ms": 45000,
+                    "extended_cooldown_jitter_ms": 45000,
+                    # Inject noise_break pseudo-steps between iterations so
+                    # the flow isn't a clean search→profile→profile ladder.
+                    "noise_navigations": True,
                     "inner_steps": inner_steps,
                 }
             ],

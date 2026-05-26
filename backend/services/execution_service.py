@@ -188,14 +188,23 @@ class ExecutionService:
         limit_param = str(config.get("limit_param") or "")
         inner_steps = config.get("inner_steps") or []
         inner_failure_policy = str(config.get("inner_failure_policy") or "continue")
+        def _int_or_zero(key: str) -> int:
+            try:
+                return int(config.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+        iteration_delay_ms = _int_or_zero("iteration_delay_ms")
+        iteration_delay_jitter_ms = _int_or_zero("iteration_delay_jitter_ms")
+        extended_cooldown_every_n = _int_or_zero("extended_cooldown_every_n")
+        extended_cooldown_ms = _int_or_zero("extended_cooldown_ms")
+        extended_cooldown_jitter_ms = _int_or_zero("extended_cooldown_jitter_ms")
+        noise_navigations = bool(config.get("noise_navigations"))
+        # random_seed for tests and stable replay; if absent, use system entropy
+        seed_raw = config.get("random_seed")
         try:
-            iteration_delay_ms = int(config.get("iteration_delay_ms") or 0)
+            random_seed = int(seed_raw) if seed_raw is not None else None
         except (TypeError, ValueError):
-            iteration_delay_ms = 0
-        try:
-            iteration_delay_jitter_ms = int(config.get("iteration_delay_jitter_ms") or 0)
-        except (TypeError, ValueError):
-            iteration_delay_jitter_ms = 0
+            random_seed = None
 
         # Resolve the iteration limit from the run's resolved parameters.
         limit = None
@@ -262,24 +271,89 @@ class ExecutionService:
 
         import random as _random
 
+        rng = _random.Random(random_seed) if random_seed is not None else _random.Random()
+
+        # Probability-weighted distribution of noise_break kinds. Keep this in
+        # sync with the extension's executeNoiseBreak implementation.
+        noise_kinds: list[tuple[str, float]] = [
+            ("search_bounce", 0.35),
+            ("feed_scroll", 0.20),
+            ("profile_hover", 0.25),
+            ("idle_scroll", 0.20),
+        ]
+
+        def _pick_noise_kind() -> str:
+            r = rng.random()
+            acc = 0.0
+            for kind, prob in noise_kinds:
+                acc += prob
+                if r <= acc:
+                    return kind
+            return noise_kinds[-1][0]
+
         materialized: list[dict] = []
         for iter_index, item in enumerate(items):
             # Optional inter-iteration jittered delay: first iteration has no
             # pre-wait. Encoded as `delay_before_ms` on the first inner step
             # so the extension's existing per-step delay path handles it.
             pre_delay = 0
+            extended = False
             if iter_index > 0 and iteration_delay_ms > 0:
-                jitter = _random.randint(0, iteration_delay_jitter_ms) if iteration_delay_jitter_ms > 0 else 0
+                jitter = rng.randint(0, iteration_delay_jitter_ms) if iteration_delay_jitter_ms > 0 else 0
                 pre_delay = iteration_delay_ms + jitter
+                # Stack the extended-cooldown pause on every Nth iteration.
+                if (
+                    extended_cooldown_every_n > 0
+                    and extended_cooldown_ms > 0
+                    and iter_index % extended_cooldown_every_n == 0
+                ):
+                    cooldown_jitter = (
+                        rng.randint(0, extended_cooldown_jitter_ms)
+                        if extended_cooldown_jitter_ms > 0
+                        else 0
+                    )
+                    pre_delay += extended_cooldown_ms + cooldown_jitter
+                    extended = True
+
+            # Insert a noise_break pseudo-step BEFORE this iteration's first
+            # inner step (except the very first iteration). The break carries
+            # the iteration's pre_delay so the existing delay_before_ms hook
+            # applies before any noise navigation.
+            if iter_index > 0 and noise_navigations:
+                noise_kind = _pick_noise_kind()
+                noise_seed = rng.randrange(2**31)
+                noise_step: dict = {
+                    "action_type": "noise_break",
+                    "value": None,
+                    "intent": f"Noise break ({noise_kind})",
+                    "_for_each_origin_step": step_index,
+                    "_for_each_iteration": iter_index,
+                    "_noise_kind": noise_kind,
+                    "_noise_seed": noise_seed,
+                    "_inner_failure_policy": inner_failure_policy,
+                }
+                if pre_delay > 0:
+                    noise_step["delay_before_ms"] = pre_delay
+                if extended:
+                    noise_step["_extended_cooldown"] = True
+                materialized.append(noise_step)
+                # Iteration's delay is now carried by the noise step; don't
+                # double-apply it on the first inner step below.
+                pre_delay = 0
+                extended = False
+
             for inner_pos, tmpl in enumerate(inner_steps):
                 if not isinstance(tmpl, dict):
                     continue
                 inner = _substitute(deepcopy(tmpl), item)
                 inner["_for_each_item"] = item
                 inner["_for_each_origin_step"] = step_index
+                inner["_for_each_iteration"] = iter_index
                 inner["_inner_failure_policy"] = inner_failure_policy
                 if inner_pos == 0 and pre_delay > 0:
                     inner["delay_before_ms"] = pre_delay
+                if inner_pos == 0 and extended:
+                    inner["_extended_cooldown"] = True
                 materialized.append(inner)
 
         # Splice: keep everything up to and including the for_each step, append
