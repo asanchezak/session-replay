@@ -552,6 +552,24 @@ class ExecutionService:
             except Exception:
                 logger.exception("RunSummary finalization failed for run %s", run_id)
 
+            if new_status == RunStatus.COMPLETED and run.origin and (
+                (run.origin or {}).get("event_kind") == "new_job_position"
+            ):
+                try:
+                    from services.linkedin_applicant_push_service import (
+                        LinkedInApplicantPushService,
+                    )
+                    push_result = await LinkedInApplicantPushService(
+                        self.session
+                    ).push_from_run(run)
+                    logger.info(
+                        "LinkedIn applicant push for run %s: %s", run_id, push_result
+                    )
+                except Exception:
+                    logger.exception(
+                        "LinkedIn applicant push failed for run %s", run_id
+                    )
+
         return run
 
     async def advance_step(self, run_id: str) -> ExecutionRun:

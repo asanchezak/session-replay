@@ -113,7 +113,7 @@ class WebhookTriggerService:
         }
         run_ids: list[str] = []
         for trigger in triggers:
-            run_id = await self._fire(trigger.workflow_id, job_data)
+            run_id = await self._fire(trigger, job_data)
             if run_id:
                 run_ids.append(run_id)
                 trigger.last_job_payload = job_data
@@ -187,7 +187,12 @@ class WebhookTriggerService:
             "employment_model": "",
             "internal_area": "",
         }
-        run_id = await self._fire(workflow_id, job_data)
+        synthetic = WebhookTrigger(
+            connector_id=connector_id,
+            workflow_id=workflow_id,
+            event_kind=EVENT_KIND_NEW_JOB_POSITION,
+        )
+        run_id = await self._fire(synthetic, job_data)
         return {"run_id": run_id, "resolved_params": job_data}
 
     async def replay_last(self, trigger_id: str) -> dict:
@@ -204,11 +209,12 @@ class WebhookTriggerService:
             raise ValueError("Trigger not found.")
         if not trigger.last_job_payload:
             raise ValueError("No previous job recorded for this trigger. Fire the webhook at least once first.")
-        run_id = await self._fire(trigger.workflow_id, trigger.last_job_payload)
+        run_id = await self._fire(trigger, trigger.last_job_payload)
         return {"run_id": run_id, "replayed_from": trigger.last_fired_at.isoformat() if trigger.last_fired_at else None, "job_data": trigger.last_job_payload}
 
-    async def _fire(self, workflow_id: str, job_data: dict) -> str | None:
+    async def _fire(self, trigger: WebhookTrigger, job_data: dict) -> str | None:
         """Render all enabled connector bindings with job_data, build plan, create and start run."""
+        workflow_id = trigger.workflow_id
         bindings = await self.wc_service.list_bindings(workflow_id)
         runtime_params: dict[str, str] = {}
         for binding in bindings:
@@ -229,6 +235,14 @@ class WebhookTriggerService:
 
         exec_svc = ExecutionService(self.session)
         run = await exec_svc.create_run(workflow_id=workflow_id, execution_plan=execution_plan)
+        run.origin = {
+            "connector_id": str(trigger.connector_id) if trigger.connector_id else None,
+            "event_kind": trigger.event_kind,
+            "trigger_id": str(trigger.id) if trigger.id else None,
+            "job_payload": job_data,
+        }
+        flag_modified(run, "origin")
+        await self.session.flush()
         from core.state_machine import RunStatus
         run = await exec_svc.transition(str(run.id), RunStatus.RUNNING)
         return str(run.id)

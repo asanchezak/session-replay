@@ -36,3 +36,7 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     # Trimmed to the last N=20 messages with image blocks stripped from prior
     # turns by `services.agent_conversation`. Bounded so it does not balloon.
     ai_conversation: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    # Provenance for runs spawned by webhook triggers: connector_id, event_kind,
+    # trigger_id, and the original job_payload that produced this run. Used by
+    # terminal-state hooks (e.g., LinkedIn applicant push to Odoo).
+    origin: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -41,6 +41,8 @@ SEARCH_URL_TEMPLATE = (
 
 
 PROFILE_EXTRACT_SHAPES = [
+    {"key": "full_name", "label": "Full Name", "kind": "scalar", "item_keys": None},
+    {"key": "headline", "label": "Headline", "kind": "scalar", "item_keys": None},
     {"key": "about", "label": "About", "kind": "scalar", "item_keys": None},
     {"key": "skills", "label": "Skills", "kind": "string_list", "item_keys": None},
     {
