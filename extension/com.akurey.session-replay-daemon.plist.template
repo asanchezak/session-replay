@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent template for driver-daemon.
+
+  Placeholders rendered by scripts/install-daemon.sh:
+    __HOME__   → $HOME
+    __REPO__   → absolute path to the session-replay repo
+    __NODE__   → absolute path to a node binary that can run the daemon
+
+  Don't load this file directly; the renderer writes the rendered copy to
+  ~/Library/LaunchAgents/com.akurey.session-replay-daemon.plist.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -10,12 +20,12 @@
         <string>/usr/bin/stdbuf</string>
         <string>-oL</string>
         <string>-eL</string>
-        <string>/opt/homebrew/bin/node</string>
-        <string>/Users/andreysanchez/Documents/session-replay/extension/driver-daemon.mjs</string>
+        <string>__NODE__</string>
+        <string>__REPO__/extension/driver-daemon.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/andreysanchez/Documents/session-replay</string>
+    <string>__REPO__</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -35,20 +45,19 @@
     <key>KeepAlive</key>
     <true/>
 
-    <!-- Don't respawn faster than every 15 s — guards against a tight crash loop
-         (e.g. if the backend is permanently down). -->
+    <!-- Don't respawn faster than every 15 s — guards against a tight crash
+         loop (e.g. if the backend is permanently down). -->
     <key>ThrottleInterval</key>
     <integer>15</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/andreysanchez/Library/Logs/session-replay/daemon.log</string>
+    <string>__HOME__/Library/Logs/session-replay/daemon.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/andreysanchez/Library/Logs/session-replay/daemon.err.log</string>
+    <string>__HOME__/Library/Logs/session-replay/daemon.err.log</string>
 
-    <!-- ProcessType=Interactive keeps the process alive even when the system
-         tries to throttle background work. Important because the daemon opens
-         Chrome (a GUI app). -->
+    <!-- Keeps macOS App Nap / power throttling off this process — important
+         because it owns Chrome, a GUI app, and needs to react within seconds. -->
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>

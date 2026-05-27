@@ -1,4 +1,5 @@
-.PHONY: setup lint typecheck test clean docker-up docker-down dev
+.PHONY: setup lint typecheck test clean docker-up docker-down dev \
+        daemon-install daemon-uninstall daemon-status daemon-logs daemon-restart
 
 # ── Setup ──────────────────────────────────────────────
 setup: setup-backend setup-extension setup-frontend
@@ -11,6 +12,24 @@ setup-extension:
 
 setup-frontend:
 	cd frontend && npm install
+
+# ── Driver daemon (LaunchAgent on macOS) ───────────────
+# Auto-starts at login, polls localhost:8081 for webhook-triggered LinkedIn
+# runs and drives Chrome through them. See CLAUDE.md for the full picture.
+
+daemon-install:
+	@./scripts/install-daemon.sh
+
+daemon-uninstall:
+	@./scripts/uninstall-daemon.sh
+
+daemon-status:
+	@launchctl list 2>/dev/null | grep session-replay || echo "daemon not loaded — run: make daemon-install"
+
+daemon-logs:
+	@tail -f $${HOME}/Library/Logs/session-replay/daemon.log
+
+daemon-restart: daemon-uninstall daemon-install
 
 # ── Lint ───────────────────────────────────────────────
 lint: lint-backend lint-extension
