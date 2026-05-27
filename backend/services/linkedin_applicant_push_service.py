@@ -21,7 +21,7 @@ from core.models.run import ExecutionRun
 
 logger = logging.getLogger(__name__)
 
-MAX_PROFILES_PER_RUN = 2
+DEFAULT_MAX_PROFILES_PER_RUN = 2
 PROFILE_URL_PREFIX = "linkedin.com/in/"
 
 
@@ -74,10 +74,22 @@ class LinkedInApplicantPushService:
 
         endpoint = f"{base_url}/akcr/api/linkedin_applicant"
         results: list[dict] = []
+
+        # Cap the number of profiles to push per run. Reads from
+        # origin.job_payload.candidate_count (set by the new-job webhook) and
+        # falls back to DEFAULT_MAX_PROFILES_PER_RUN. Clamps to [1, 25] so a
+        # bogus payload value can't run unbounded HTTP calls.
+        raw_limit = job_payload.get("candidate_count") or origin.get("candidate_count")
+        try:
+            max_profiles = int(raw_limit) if raw_limit is not None else DEFAULT_MAX_PROFILES_PER_RUN
+        except (TypeError, ValueError):
+            max_profiles = DEFAULT_MAX_PROFILES_PER_RUN
+        max_profiles = max(1, min(max_profiles, 25))
+
         # Odoo runs 8 AI agents synchronously inside _analyze_easy_recruit
         # (30-120s per applicant). httpx default 5s would always trip.
         async with httpx.AsyncClient(timeout=240.0) as client:
-            for profile in profiles[:MAX_PROFILES_PER_RUN]:
+            for profile in profiles[:max_profiles]:
                 payload = {
                     "job_id": job_id,
                     "source_run_id": str(run.id),

@@ -752,6 +752,7 @@ class ExecutionService:
                 "started_at": r.started_at.isoformat() if r.started_at else None,
                 "ended_at": r.ended_at.isoformat() if r.ended_at else None,
                 "created_at": r.created_at.isoformat(),
+                "origin": r.origin or None,
             }
             for r in runs
         ]

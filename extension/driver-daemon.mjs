@@ -52,14 +52,23 @@ async function fetchJson(url, init = {}) {
   return r.json();
 }
 
+// Only pick runs that started within the last STALE_RUN_AGE_MS — keeps the
+// daemon from chewing on a stale `running` row left over from a crashed prior
+// session. 30 min is generous; the workflow's worst-case wall-clock at
+// candidate_count=10 is ~20 min.
+const STALE_RUN_AGE_MS = 30 * 60_000;
+
 async function findPendingRun() {
   const list = await fetchJson(`${BACKEND}/v1/runs?limit=20&status=running`);
   const items = Array.isArray(list) ? list : list.items || [];
+  const now = Date.now();
   for (const r of items) {
     if (!r.origin) continue;
     if (r.origin.event_kind !== "new_job_position") continue;
     if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) continue;
-    if (r.current_step_index > 0) continue; // already being driven
+    if (r.current_step_index > 0) continue;
+    const startedAt = r.started_at ? Date.parse(r.started_at) : (r.created_at ? Date.parse(r.created_at) : 0);
+    if (startedAt && now - startedAt > STALE_RUN_AGE_MS) continue;
     return r;
   }
   return null;
@@ -397,24 +406,46 @@ async function driveRun(run) {
       const step = steps[idx] || {};
       const action = String(step.action_type || "");
       const value = String(step.value || "");
-      if (action === "navigate") {
-        const target = step._for_each_item || value;
-        if (/^https?:/.test(target)) {
-          await page.goto(target, { waitUntil: "domcontentloaded", timeout: 60000 });
-          await sleep(jitter(2500, 1500));
+      try {
+        if (action === "navigate") {
+          const target = step._for_each_item || value;
+          if (/^https?:/.test(target)) {
+            await page.goto(target, { waitUntil: "domcontentloaded", timeout: 60000 });
+            await sleep(jitter(2500, 1500));
+          }
+          await reportStepResult(runId, idx, "navigate");
+        } else if (action === "extract") {
+          // Capture profile URL BEFORE scrapeProfileFull navigates through
+          // /details/<section>/ subpages, otherwise page.url() returns the
+          // last subpage instead of the canonical /in/<slug>/.
+          const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
+          const data = await scrapeProfileFull(page, profileUrl);
+          console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${data.education.length} skills=${data.skills.length} certs=${data.certifications.length}`);
+          await postExtraction(runId, idx, profileUrl, data);
+          await reportStepResult(runId, idx, "extract");
+        } else if (action === "noise_break") {
+          await sleep(jitter(2000, 2000));
+          await humanScroll(page, 2);
+          await reportStepResult(runId, idx, "noise_break");
+        } else {
+          await reportStepResult(runId, idx, action || "noop");
         }
-        await reportStepResult(runId, idx, "navigate");
-      } else if (action === "extract") {
-        const data = await scrapeProfileFull(page, page.url());
-        console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${data.education.length} skills=${data.skills.length} certs=${data.certifications.length}`);
-        await postExtraction(runId, idx, page.url(), data);
-        await reportStepResult(runId, idx, "extract");
-      } else if (action === "noise_break") {
-        await sleep(jitter(2000, 2000));
-        await humanScroll(page, 2);
-        await reportStepResult(runId, idx, "noise_break");
-      } else {
-        await reportStepResult(runId, idx, action || "noop");
+      } catch (stepErr) {
+        // Transient LinkedIn / network failures (e.g. ERR_INTERNET_DISCONNECTED,
+        // navigation timeout) would otherwise pin the run in `running` forever
+        // while the daemon crashes out. The workflow's for_each declares
+        // inner_failure_policy=continue, so we mirror that here — log, report
+        // the step as success (advancing the cursor) and keep going. The push
+        // hook on COMPLETED only sees profiles that actually got extracted.
+        console.error(`  step ${idx} (${action}) error: ${stepErr.message?.slice(0, 200)}`);
+        try {
+          await reportStepResult(runId, idx, action || "noop");
+        } catch (advErr) {
+          console.error(`  step ${idx} advance also failed:`, advErr.message);
+          // If we can't even advance the cursor, the run is wedged; break out
+          // and let the next poll cycle pick a fresh run.
+          break;
+        }
       }
       cur = await getRun(runId);
     }

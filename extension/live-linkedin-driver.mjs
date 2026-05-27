@@ -750,9 +750,10 @@ try {
       }
       await reportStepResult(runId, idx, "navigate");
     } else if (action === "extract") {
-      const profileUrl = page.url();
-      // Re-scrape on the current profile page — this also visits the
-      // /details/ subpages internally before returning the dossier.
+      // Capture profile URL BEFORE scrapeProfileFull navigates through the
+      // /details/<section>/ subpages. Otherwise the URL ends up as
+      // /details/courses (the last subpage) instead of canonical /in/<slug>/.
+      const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
       const data = await scrapeProfileFull(page, profileUrl);
       console.log(
         `  -> "${data.full_name}" | "${(data.headline || "").slice(0, 80)}" | ` +

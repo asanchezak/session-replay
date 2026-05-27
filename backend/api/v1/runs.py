@@ -192,6 +192,7 @@ async def get_run(
         "extracted_data": run.extracted_data or [],
         "resolved_parameters": (run.workflow_snapshot or {}).get("resolved_parameters", {}),
         "connector_resolution": (run.workflow_snapshot or {}).get("connector_resolution", []),
+        "origin": run.origin or None,
     }
 
 
