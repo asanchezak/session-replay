@@ -19,12 +19,28 @@
  *   CONNECTOR_ID, JOB_ID, JOB_TITLE, PROFILE_LIMIT, BACKEND, API_KEY
  */
 import { chromium } from "@playwright/test";
+import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
+
+// Load OpenAI key from backend/.env (the same one Easy Recruit uses).
+// LinkedIn's /details/<section>/ pages outside experience render entries as
+// <div>s with hashed class names and no clean structural attributes —
+// regex/DOM parsing is brittle. Run the cleaned section textContent through
+// gpt-4o-mini with JSON Schema strict mode to extract structured records.
+function loadOpenAIKey() {
+  try {
+    const envText = fs.readFileSync(path.resolve(__dirname, "..", "backend", ".env"), "utf-8");
+    const m = envText.match(/^AI_API_KEY=(.+)$/m);
+    if (m) return m[1].trim();
+  } catch {}
+  return process.env.LINKEDIN_AI_KEY || "";
+}
+const OPENAI_API_KEY = loadOpenAIKey();
 
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
@@ -399,12 +415,200 @@ function parseCertificationItems(items) {
   return out;
 }
 
+// Get cleaned textContent of a /details/<section>/ subpage with ads/footer
+// stripped, language heading removed, and "Nothing to see for now" detected
+// as empty. Returns "" if the section is genuinely empty.
+async function scrapeSubpageText(page, profileBase, section) {
+  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch { return ""; }
+  await sleep(jitter(2500, 1200));
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 700);
+    await sleep(jitter(400, 300));
+  }
+  await sleep(jitter(1500, 800));
+
+  return await page.evaluate((sec) => {
+    const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
+    const main = document.querySelector("main") || document.body;
+    let text = clean(main.textContent || "");
+    const adIdx = text.search(/\bAd Options\b/i);
+    if (adIdx > 0) text = text.slice(0, adIdx);
+    if (/Nothing to see for now|Nothing here yet|a[uú]n no/i.test(text)) return "";
+    const STRIP = {
+      experience: /^(Experience|Experiencia)\s*/i,
+      education: /^(Education|Educaci[oó]n|Formaci[oó]n)\s*/i,
+      skills: /^(Skills|Habilidades|Aptitudes)\s*(?:All\s*Industry Knowledge\s*Tools & Technologies\s*Interpersonal Skills\s*(?:Languages\s*)?Other Skills\s*)?/i,
+      certifications: /^(Licenses\s*&\s*certifications|Licencias y certificaciones)\s*/i,
+      projects: /^(Projects|Proyectos)\s*/i,
+      courses: /^(Courses|Cursos)\s*/i,
+      honors: /^(Honors\s*&\s*awards|Honores)\s*/i,
+    };
+    if (STRIP[sec]) text = text.replace(STRIP[sec], "");
+    return text.trim();
+  }, section);
+}
+
+const AI_SCHEMAS = {
+  education: {
+    type: "object", additionalProperties: false,
+    properties: {
+      education: {
+        type: "array",
+        items: {
+          type: "object", additionalProperties: false,
+          properties: {
+            school: { type: "string" }, degree: { type: "string" },
+            field: { type: "string" }, dates: { type: "string" },
+            description: { type: "string" },
+          },
+          required: ["school", "degree", "field", "dates", "description"],
+        },
+      },
+    },
+    required: ["education"],
+  },
+  skills: {
+    type: "object", additionalProperties: false,
+    properties: { skills: { type: "array", items: { type: "string" } } },
+    required: ["skills"],
+  },
+  certifications: {
+    type: "object", additionalProperties: false,
+    properties: {
+      certifications: {
+        type: "array",
+        items: {
+          type: "object", additionalProperties: false,
+          properties: {
+            name: { type: "string" }, issuer: { type: "string" },
+            issued: { type: "string" }, credential_id: { type: "string" },
+          },
+          required: ["name", "issuer", "issued", "credential_id"],
+        },
+      },
+    },
+    required: ["certifications"],
+  },
+  projects: {
+    type: "object", additionalProperties: false,
+    properties: {
+      projects: {
+        type: "array",
+        items: {
+          type: "object", additionalProperties: false,
+          properties: {
+            name: { type: "string" }, dates: { type: "string" },
+            description: { type: "string" },
+          },
+          required: ["name", "dates", "description"],
+        },
+      },
+    },
+    required: ["projects"],
+  },
+  courses: {
+    type: "object", additionalProperties: false,
+    properties: { courses: { type: "array", items: { type: "string" } } },
+    required: ["courses"],
+  },
+};
+
+const AI_PROMPTS = {
+  education:
+    "Extract education entries from this LinkedIn /details/education/ section text. " +
+    "Copy values verbatim. School is the institution name. Degree is the degree type " +
+    "(e.g. 'Bachelor of Science', 'Master of Business Administration', 'Licenciatura'). " +
+    "Field is the field of study (e.g. 'Computer Science', 'Mathematics'). Dates is the " +
+    "year range (e.g. '2018 – 2022'). Description carries any extra notes if present, " +
+    "otherwise empty string.",
+  skills:
+    "Extract the candidate's skill NAMES from this LinkedIn /details/skills/ text. " +
+    "Skills are typically Title Case nouns or short phrases of 1-4 words such as " +
+    "'Python', 'Distributed Systems', 'Project Management', 'Drupal'. Filter the text — " +
+    "DO NOT include filter tab labels ('All', 'Industry Knowledge', 'Tools & Technologies', " +
+    "'Interpersonal Skills', 'Languages', 'Other Skills'). DO NOT include the context " +
+    "(company names, job titles like 'Senior Software Engineer at GFT Technologies') " +
+    "that follows each skill — those describe where the skill was used, not the skill " +
+    "itself. Return just the skill names.",
+  certifications:
+    "Extract certification entries from this LinkedIn /details/certifications/ text. " +
+    "Each entry has a name (e.g. 'AWS Certified Solutions Architect'), an issuer " +
+    "(e.g. 'Amazon Web Services'), an issued date (e.g. 'Issued Jan 2023' or 'Jan 2023'), " +
+    "and optionally a credential_id. If the section reads 'Nothing to see for now', return " +
+    "an empty array.",
+  projects:
+    "Extract project entries from this LinkedIn /details/projects/ text. Each entry " +
+    "has a name (the project's title), dates (e.g. 'Apr 2025 – Present'), and a " +
+    "description (the bullet list / paragraph that follows).",
+  courses:
+    "Extract course names from this LinkedIn /details/courses/ text. Return a flat list " +
+    "of strings, one per course title (include the instructor / institution in parens if " +
+    "present, exactly as written).",
+};
+
+async function aiExtractSection(section, rawText) {
+  if (!OPENAI_API_KEY) {
+    console.warn(`[ai] no OPENAI key; ${section} extraction skipped`);
+    return null;
+  }
+  if (!rawText || rawText.length < 12) return null;
+  const schema = AI_SCHEMAS[section];
+  const prompt = AI_PROMPTS[section];
+  if (!schema || !prompt) return null;
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You extract structured LinkedIn profile data from raw page text. Output strict JSON that matches the schema. Copy values verbatim from the input; do not invent fields." },
+          { role: "user", content: `${prompt}\n\n--- Input text ---\n${rawText.slice(0, 5000)}` },
+        ],
+        response_format: { type: "json_schema", json_schema: { name: section, schema, strict: true } },
+        temperature: 0,
+      }),
+    });
+    const body = await r.json();
+    if (!r.ok) {
+      console.warn(`[ai] ${section} HTTP ${r.status}: ${body.error?.message || JSON.stringify(body).slice(0, 200)}`);
+      return null;
+    }
+    return JSON.parse(body.choices[0].message.content);
+  } catch (err) {
+    console.warn(`[ai] ${section} error:`, err.message);
+    return null;
+  }
+}
+
 async function scrapeProfileFull(page, url) {
   const top = await scrapeProfileTopCard(page, url);
+
+  // Experience: UL-based, structural parser works.
   const expItems = await scrapeDetailsSubpageRaw(page, url, "experience");
-  const eduItems = await scrapeDetailsSubpageRaw(page, url, "education");
-  const skillItems = await scrapeDetailsSubpageRaw(page, url, "skills");
-  const certItems = await scrapeDetailsSubpageRaw(page, url, "certifications");
+
+  // Other sections render as <div> structures with hashed classes — get raw
+  // textContent and let an LLM extract structured records.
+  const eduText = await scrapeSubpageText(page, url, "education");
+  const skillsText = await scrapeSubpageText(page, url, "skills");
+  const certsText = await scrapeSubpageText(page, url, "certifications");
+  const projText = await scrapeSubpageText(page, url, "projects");
+  const coursesText = await scrapeSubpageText(page, url, "courses");
+
+  const [eduJson, skillsJson, certsJson, projJson, coursesJson] = await Promise.all([
+    aiExtractSection("education", eduText),
+    aiExtractSection("skills", skillsText),
+    aiExtractSection("certifications", certsText),
+    aiExtractSection("projects", projText),
+    aiExtractSection("courses", coursesText),
+  ]);
+
   return {
     page_title: top.full_name ? `${top.full_name} | LinkedIn` : "",
     full_name: top.full_name || "",
@@ -412,10 +616,11 @@ async function scrapeProfileFull(page, url) {
     location: top.location || "",
     about: top.about || "",
     experience: parseExperienceItems(expItems),
-    education: parseEducationItems(eduItems),
-    skills: parseSkillsItems(skillItems),
-    certifications: parseCertificationItems(certItems),
-    projects: [],
+    education: (eduJson && eduJson.education) || [],
+    skills: (skillsJson && skillsJson.skills) || [],
+    certifications: (certsJson && certsJson.certifications) || [],
+    projects: (projJson && projJson.projects) || [],
+    courses: (coursesJson && coursesJson.courses) || [],
   };
 }
 
