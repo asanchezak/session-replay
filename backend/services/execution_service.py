@@ -582,11 +582,21 @@ class ExecutionService:
         )
 
         async with async_session_factory() as push_session:
-            service = LinkedInApplicantPushService(push_session)
-            result = await service.push_for_origin(
-                run_id=run.id,
-                origin=run.origin or {},
-            )
+            # Re-load the run in the push session so push_from_run can
+            # persist linkedin_applicants on it.
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            push_run = (await push_session.execute(stmt)).scalar_one_or_none()
+            if push_run is None:
+                # Fall back to origin-only push without snapshot persistence.
+                service = LinkedInApplicantPushService(push_session)
+                result = await service.push_for_origin(
+                    run_id=run.id,
+                    origin=run.origin or {},
+                )
+            else:
+                service = LinkedInApplicantPushService(push_session)
+                result = await service.push_from_run(push_run)
             await push_session.commit()
             return result
 

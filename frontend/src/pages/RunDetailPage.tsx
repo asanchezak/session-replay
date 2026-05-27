@@ -188,6 +188,29 @@ interface RunDetail {
     connector?: { name?: string; type?: string };
     source_record?: { job_title?: string; job_id?: string; job_description?: string };
   }>;
+  origin?: {
+    connector_id?: string;
+    event_kind?: string;
+    trigger_id?: string;
+    job_payload?: { job_id?: number; candidate_count?: number };
+  } | null;
+  linkedin_applicants?: LinkedInApplicant[];
+}
+
+interface LinkedInApplicant {
+  id: number | null;
+  name: string;
+  profile_url?: string;
+  job_id?: number | null;
+  job_name?: string | null;
+  status?: string;
+  score?: number | null;
+  score_int?: number | null;
+  recommendation?: string | null;
+  reasoning?: string | null;
+  easy_recruit_status?: string | null;
+  odoo_url?: string | null;
+  refreshed_at?: string;
 }
 
 interface WorkflowDetail {
@@ -354,6 +377,23 @@ export default function RunDetailPage() {
       setWorkflow(data);
     } catch {}
   }, [request]);
+
+  const [refreshingApplicants, setRefreshingApplicants] = useState(false);
+  const refreshApplicants = useCallback(async () => {
+    if (!runId) return;
+    setRefreshingApplicants(true);
+    try {
+      await request<{ refreshed: number; applicants?: LinkedInApplicant[] }>(
+        "POST",
+        `/runs/${runId}/refresh-applicants`,
+      );
+      await fetchRun();
+    } catch (e) {
+      console.error("refresh applicants failed", e);
+    } finally {
+      setRefreshingApplicants(false);
+    }
+  }, [runId, request, fetchRun]);
 
   useEffect(() => {
     if (!runId) return;
@@ -843,6 +883,113 @@ export default function RunDetailPage() {
               </div>
             ))}
           </div>
+        </Card>
+      )}
+
+      {run.origin?.event_kind === "new_job_position" && (
+        <Card className="mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-medium text-text-primary">LinkedIn Applicants Pushed to Odoo</h2>
+              <p className="text-xs text-text-secondary mt-0.5">
+                Job #{run.origin?.job_payload?.job_id ?? "—"} · {(run.linkedin_applicants?.length ?? 0)} applicant{(run.linkedin_applicants?.length ?? 0) === 1 ? "" : "s"}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={refreshApplicants}
+              disabled={refreshingApplicants}
+              className="text-xs px-2 py-1 rounded-md border border-border hover:bg-bg-elevated text-text-primary disabled:opacity-50 flex items-center gap-1.5"
+            >
+              <RefreshCw size={12} className={refreshingApplicants ? "animate-spin" : ""} />
+              {refreshingApplicants ? "Refreshing…" : "Refresh from Odoo"}
+            </button>
+          </div>
+          {(run.linkedin_applicants?.length ?? 0) === 0 ? (
+            <div className="text-xs text-text-secondary py-4 text-center">
+              No applicants pushed yet. Click <span className="text-text-primary">Refresh from Odoo</span> to backfill from a prior run.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase text-text-gray border-b border-border">
+                    <th className="py-2 pr-3 font-medium">Name</th>
+                    <th className="py-2 pr-3 font-medium">Score</th>
+                    <th className="py-2 pr-3 font-medium">Recommendation</th>
+                    <th className="py-2 pr-3 font-medium">Status</th>
+                    <th className="py-2 pr-3 font-medium">Links</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(run.linkedin_applicants || []).map((a, idx) => {
+                    const scoreNum = typeof a.score === "number" ? a.score : null;
+                    const scoreColor =
+                      scoreNum == null
+                        ? "var(--color-text-gray)"
+                        : scoreNum >= 8
+                        ? "var(--color-success)"
+                        : scoreNum >= 6
+                        ? "var(--color-info)"
+                        : scoreNum >= 4
+                        ? "var(--color-warning)"
+                        : "var(--color-error)";
+                    return (
+                      <tr key={`${a.id ?? "n"}-${idx}`} className="border-b border-border/40 last:border-b-0">
+                        <td className="py-2 pr-3">
+                          <div className="text-text-primary">{a.name || <span className="text-text-gray">(unnamed)</span>}</div>
+                          {a.reasoning && (
+                            <div className="text-[11px] text-text-gray line-clamp-2 max-w-[28rem]" title={a.reasoning}>
+                              {a.reasoning}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3">
+                          {scoreNum != null ? (
+                            <span className="font-mono font-medium" style={{ color: scoreColor }}>
+                              {scoreNum}/10
+                            </span>
+                          ) : (
+                            <span className="text-text-gray text-xs">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3 text-text-secondary text-xs">
+                          {a.recommendation || "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-text-secondary">
+                          {a.easy_recruit_status || a.status || "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-xs">
+                          <div className="flex gap-2">
+                            {a.profile_url && (
+                              <a
+                                href={a.profile_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-info hover:underline"
+                              >
+                                LinkedIn
+                              </a>
+                            )}
+                            {a.odoo_url && (
+                              <a
+                                href={a.odoo_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-accent hover:underline"
+                              >
+                                View in Odoo
+                              </a>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
 

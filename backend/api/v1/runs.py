@@ -193,7 +193,67 @@ async def get_run(
         "resolved_parameters": (run.workflow_snapshot or {}).get("resolved_parameters", {}),
         "connector_resolution": (run.workflow_snapshot or {}).get("connector_resolution", []),
         "origin": run.origin or None,
+        "linkedin_applicants": run.linkedin_applicants or [],
     }
+
+
+@router.post("/{run_id}/repush-applicants")
+async def repush_run_applicants(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-run the LinkedIn applicant push hook for this run.
+
+    Useful when initial push partially failed or to backfill the
+    linkedin_applicants snapshot for runs that completed before this
+    feature existed. Reads extraction events, posts each profile to
+    Odoo's /akcr/api/linkedin_applicant, persists results on the run.
+    """
+    from services.linkedin_applicant_push_service import LinkedInApplicantPushService
+
+    svc = ExecutionService(db)
+    try:
+        run = await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    if not run.origin or (run.origin or {}).get("event_kind") != "new_job_position":
+        return _error("INVALID_RUN", "Run is not a LinkedIn new-job-position run", status=400)
+    pusher = LinkedInApplicantPushService(db)
+    try:
+        result = await pusher.push_from_run(run)
+    except Exception as e:
+        logger.exception("Repush failed for run %s", run_id)
+        return _error("PUSH_FAILED", str(e), status=502)
+    await db.commit()
+    return result
+
+
+@router.post("/{run_id}/refresh-applicants")
+async def refresh_run_applicants(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-query Odoo for the applicants created from this run.
+
+    Reads run.origin + extraction events, calls the Odoo lookup
+    controller, and persists the snapshot to run.linkedin_applicants.
+    Returns the refreshed list for immediate UI display.
+    """
+    from services.linkedin_applicant_push_service import LinkedInApplicantPushService
+
+    svc = ExecutionService(db)
+    try:
+        run = await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    pusher = LinkedInApplicantPushService(db)
+    try:
+        result = await pusher.refresh_from_run(run)
+    except Exception as e:
+        logger.exception("Failed to refresh applicants for run %s", run_id)
+        return _error("REFRESH_FAILED", str(e), status=502)
+    await db.commit()
+    return result
 
 
 @router.get("/{run_id}/events")

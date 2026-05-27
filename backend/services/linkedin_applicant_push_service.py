@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.models.connector import ConnectorConfig
 from core.models.event import EventLog
@@ -49,6 +51,49 @@ def _canonical_profile_url(url: str) -> str:
     return base
 
 
+def _summaries_from_push_results(results: list[dict]) -> list[dict]:
+    """Extract applicant snapshots from push-service per-profile results.
+
+    Each entry has shape {"profile_url": str, "odoo": <controller response>}.
+    The controller now returns a `summary` block alongside its status — we
+    pull that out, falling back to a minimal record on push error.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    out: list[dict] = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("profile_url")
+        if entry.get("error"):
+            out.append({
+                "status": "push_failed",
+                "profile_url": url,
+                "id": None,
+                "name": "",
+                "score": None,
+                "recommendation": None,
+                "odoo_url": None,
+                "refreshed_at": now_iso,
+            })
+            continue
+        odoo = entry.get("odoo") or {}
+        summary = odoo.get("summary") if isinstance(odoo, dict) else None
+        if isinstance(summary, dict):
+            out.append({**summary, "status": odoo.get("status") or summary.get("status") or "unknown", "refreshed_at": now_iso})
+        else:
+            out.append({
+                "status": (odoo.get("status") if isinstance(odoo, dict) else None) or "unknown",
+                "profile_url": url,
+                "id": odoo.get("id") if isinstance(odoo, dict) else None,
+                "name": "",
+                "score": None,
+                "recommendation": None,
+                "odoo_url": None,
+                "refreshed_at": now_iso,
+            })
+    return out
+
+
 def _build_pre_extracted(profile: dict) -> dict:
     return {
         key: profile.get(key)
@@ -62,7 +107,68 @@ class LinkedInApplicantPushService:
         self.session = session
 
     async def push_from_run(self, run: ExecutionRun) -> dict:
-        return await self.push_for_origin(run_id=run.id, origin=run.origin or {})
+        result = await self.push_for_origin(run_id=run.id, origin=run.origin or {})
+        applicants = _summaries_from_push_results(result.get("results") or [])
+        if applicants:
+            run.linkedin_applicants = applicants
+            flag_modified(run, "linkedin_applicants")
+            await self.session.flush()
+        return result
+
+    async def refresh_from_run(self, run: ExecutionRun) -> dict:
+        """Re-query Odoo for applicants tied to this run.
+
+        Used by POST /runs/{id}/refresh-applicants. Computes the set of
+        candidate profile URLs from extraction events, calls the Odoo
+        lookup endpoint, and writes the snapshot back to the run.
+        """
+        origin = run.origin or {}
+        job_payload = origin.get("job_payload") or {}
+        job_id = job_payload.get("job_id")
+        connector_id = origin.get("connector_id")
+        if not job_id or not connector_id:
+            return {"refreshed": 0, "skipped": "missing_origin"}
+
+        connector = await self._get_connector(connector_id)
+        if connector is None:
+            return {"refreshed": 0, "skipped": "connector_missing"}
+        base_url = (connector.config.get("url") or "").rstrip("/")
+        api_key = connector.config.get("linkedin_ingest_api_key") or ""
+        if not base_url or not api_key:
+            return {"refreshed": 0, "skipped": "connector_unconfigured"}
+
+        profiles = await self._collect_profiles(run.id)
+        profile_urls = [p["profile_url"] for p in profiles if p.get("profile_url")]
+        # Also include any URLs already snapshotted on the run, so a
+        # refresh after profiles have aged out of extraction events still
+        # finds them.
+        for prior in run.linkedin_applicants or []:
+            url = prior.get("profile_url") if isinstance(prior, dict) else None
+            if url and url not in profile_urls:
+                profile_urls.append(url)
+        if not profile_urls:
+            return {"refreshed": 0, "skipped": "no_profile_urls"}
+
+        endpoint = f"{base_url}/akcr/api/linkedin_applicant/lookup"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                endpoint,
+                json={"params": {"job_id": job_id, "profile_urls": profile_urls}},
+                headers={"Content-Type": "application/json", "X-API-Key": api_key},
+            )
+            body = resp.json() if resp.content else {}
+        inner = body.get("result") if isinstance(body, dict) else body
+        applicants_raw = (inner or {}).get("applicants") or []
+        now_iso = datetime.now(UTC).isoformat()
+        applicants = []
+        for a in applicants_raw:
+            if not isinstance(a, dict):
+                continue
+            applicants.append({**a, "refreshed_at": now_iso})
+        run.linkedin_applicants = applicants
+        flag_modified(run, "linkedin_applicants")
+        await self.session.flush()
+        return {"refreshed": len(applicants), "applicants": applicants}
 
     async def push_for_origin(self, *, run_id, origin: dict) -> dict:
         job_payload = origin.get("job_payload") or {}

@@ -40,3 +40,7 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     # trigger_id, and the original job_payload that produced this run. Used by
     # terminal-state hooks (e.g., LinkedIn applicant push to Odoo).
     origin: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Snapshot of applicants pushed to Odoo for this run. List of dicts with
+    # keys: id, name, profile_url, status, score, recommendation, odoo_url,
+    # refreshed_at. Populated by LinkedInApplicantPushService.
+    linkedin_applicants: Mapped[list | None] = mapped_column(JSON, nullable=True)
