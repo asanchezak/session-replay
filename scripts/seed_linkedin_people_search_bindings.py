@@ -34,7 +34,10 @@ EVENT_KIND = "new_job_position"
 
 BINDINGS = [
     {"parameter_key": "keyword", "template": "{job_title}"},
-    {"parameter_key": "count", "template": "2"},
+    # `count` reads from the webhook payload's candidate_count (resolved in
+    # fire_from_odoo_payload with a default of 2). Pass candidate_count in the
+    # incoming webhook payload to control how many profiles get scraped.
+    {"parameter_key": "count", "template": "{candidate_count}"},
 ]
 
 

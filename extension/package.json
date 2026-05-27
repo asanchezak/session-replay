@@ -12,6 +12,7 @@
     "test:e2e:local-harness": "playwright test e2e/local-cross-site-dependency.spec.ts"
   },
   "dependencies": {
+    "pg-promise": "^12.6.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

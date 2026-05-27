@@ -98,6 +98,16 @@ class WebhookTriggerService:
         if not raw_description and raw_job_id:
             raw_description = await self._fetch_job_description(connector, raw_job_id)
 
+        # candidate_count: per-fire knob. Optional in the payload; if a
+        # WorkflowConnectorBinding's template references {candidate_count},
+        # this value substitutes in. Defaults to 2 when not provided.
+        raw_count = payload.get("candidate_count") or payload.get("count")
+        try:
+            candidate_count = int(raw_count) if raw_count is not None else 2
+        except (TypeError, ValueError):
+            candidate_count = 2
+        candidate_count = max(1, min(candidate_count, 25))
+
         job_data = {
             "job_id": raw_job_id,
             "job_title": str(payload.get("job_title") or payload.get("name") or ""),
@@ -110,6 +120,7 @@ class WebhookTriggerService:
             "seniority_level": str(payload.get("seniority_level") or ""),
             "employment_model": str(payload.get("employment_model") or ""),
             "internal_area": str(payload.get("internal_area") or ""),
+            "candidate_count": str(candidate_count),
         }
         run_ids: list[str] = []
         for trigger in triggers:
