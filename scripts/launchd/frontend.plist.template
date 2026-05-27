@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent template for the session-replay Vite dashboard.
+
+  Placeholders rendered by scripts/launchd-install.sh:
+    __HOME__   → $HOME
+    __REPO__   → absolute path to the session-replay repo
+    __VITE__   → absolute path to frontend/node_modules/.bin/vite
+
+  Don't load directly — the renderer writes the rendered copy to
+  ~/Library/LaunchAgents/com.akurey.session-replay-frontend.plist.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.akurey.session-replay-frontend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/stdbuf</string>
+        <string>-oL</string>
+        <string>-eL</string>
+        <string>__VITE__</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__/frontend</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/session-replay/frontend.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/session-replay/frontend.err.log</string>
+</dict>
+</plist>

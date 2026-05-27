@@ -6,13 +6,93 @@ Autonomous browser workflow platform: record once, replay with AI-driven paramet
 
 ## Services
 
-| Service | Port | Start |
-|---------|------|-------|
-| Backend API | 8081 | `make dev-backend` |
-| Frontend dashboard | 5173 | `make dev-frontend` |
-| Both | — | `make dev` |
+| Service | Port | Start (dev) | Start (persistent) |
+|---------|------|-------------|--------------------|
+| Backend API | 8081 | `make dev-backend` | via `make all-services-install` |
+| Frontend dashboard | 5173 | `make dev-frontend` | via `make all-services-install` |
+| Both | — | `make dev` | — |
+| LinkedIn driver daemon | — | `node extension/driver-daemon.mjs` | `make daemon-install` (launchd) |
 
 Health check: `curl http://localhost:8081/v1/health`
+
+---
+
+## Quick start (fresh clone)
+
+```bash
+git clone <repo> && cd session-replay
+make setup                 # backend + extension + frontend deps
+make all-services-install  # daemon under launchd; backend + frontend in screen
+make services-status       # verify everything's up
+```
+
+Then one-time, when you'll run real LinkedIn scrapes:
+
+```bash
+node extension/prepare-stealth-profile.mjs   # snapshot your Chrome profile
+node extension/login-linkedin.mjs            # interactive LinkedIn login
+```
+
+After that, publishing a job in Odoo (with `linkedin_sync=True`) fires the
+full pipeline: webhook → backend → daemon drives LinkedIn → applicants
+land in Odoo with Easy Recruit AI scoring. Run `node extension/report.mjs <job_id>`
+to see scores.
+
+---
+
+## Persistent services (launchd / screen / restart)
+
+The daemon survives reboot via a launchd LaunchAgent. Backend + frontend stay
+in `screen` sessions by default (a macOS Privacy & Security quirk — see
+"Why backend + frontend aren't in launchd" below).
+
+```bash
+make all-services-install    # daemon (launchd) + backend + frontend (screen)
+make all-services-uninstall  # stop everything (port 8081 + 5173 freed)
+make all-services-restart    # bounce all 3
+
+make services-status         # PID / exit code / port status for all 3
+make services-logs           # tail -F all launchd logs
+
+# Per-service ops
+make daemon-install / daemon-uninstall / daemon-status / daemon-logs / daemon-restart
+make backend-install / backend-uninstall      # launchd (needs FDA — see below)
+make frontend-install / frontend-uninstall    # launchd (needs FDA — see below)
+make dev-backend / dev-frontend                # screen-based (no FDA needed)
+```
+
+After editing the daemon code:
+```bash
+make daemon-restart
+make daemon-logs   # confirm new code is running
+```
+
+After editing backend code (auto-reload is off in screen mode):
+```bash
+make all-services-uninstall && make all-services-install
+```
+
+### Why backend + frontend aren't in launchd
+
+macOS 14+ blocks launchd-spawned processes from reading files in
+`~/Documents/`, `~/Desktop/`, `~/Downloads/` unless the spawning binary has
+**Full Disk Access** granted. If you cloned this repo into `~/Documents/`,
+uvicorn + vite will EPERM-crash when launchd execs them. The driver-daemon
+happens to work because `/opt/homebrew/bin/node` is often already FDA-granted
+by another app's install.
+
+To put backend + frontend under launchd too (so they auto-start at login like
+the daemon), either:
+
+1. **Grant Full Disk Access**: System Settings → Privacy & Security → Full
+   Disk Access → add your python interpreter (`~/.local/share/uv/python/cpython-*/bin/python3`)
+   and `frontend/node_modules/.bin/vite`. Then run `make all-services-launchd-install`.
+2. **Move the repo out of `~/Documents/`** (e.g. to `~/Projects/`). Then run
+   `make all-services-launchd-install`. No FDA needed.
+
+The default `make all-services-install` skips this complexity by running
+backend + frontend in `screen` sessions, which inherit your terminal's TCC
+grants and Just Work.
 
 ---
 

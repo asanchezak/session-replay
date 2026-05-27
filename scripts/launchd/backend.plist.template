@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent template for the session-replay FastAPI backend.
+
+  Placeholders rendered by scripts/launchd-install.sh:
+    __HOME__      → $HOME
+    __REPO__      → absolute path to the session-replay repo
+    __UVICORN__   → absolute path to backend/.venv/bin/uvicorn
+
+  Don't load directly — the renderer writes the rendered copy to
+  ~/Library/LaunchAgents/com.akurey.session-replay-backend.plist.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.akurey.session-replay-backend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/stdbuf</string>
+        <string>-oL</string>
+        <string>-eL</string>
+        <string>__UVICORN__</string>
+        <string>api.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8081</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__/backend</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/session-replay/backend.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/session-replay/backend.err.log</string>
+</dict>
+</plist>

@@ -1,5 +1,8 @@
 .PHONY: setup lint typecheck test clean docker-up docker-down dev \
-        daemon-install daemon-uninstall daemon-status daemon-logs daemon-restart
+        daemon-install daemon-uninstall daemon-status daemon-logs daemon-restart \
+        backend-install backend-uninstall frontend-install frontend-uninstall \
+        all-services-install all-services-uninstall all-services-restart \
+        services-status services-logs
 
 # ── Setup ──────────────────────────────────────────────
 setup: setup-backend setup-extension setup-frontend
@@ -18,18 +21,85 @@ setup-frontend:
 # runs and drives Chrome through them. See CLAUDE.md for the full picture.
 
 daemon-install:
-	@./scripts/install-daemon.sh
+	@./scripts/launchd-install.sh daemon
 
 daemon-uninstall:
-	@./scripts/uninstall-daemon.sh
+	@./scripts/launchd-uninstall.sh daemon
 
 daemon-status:
-	@launchctl list 2>/dev/null | grep session-replay || echo "daemon not loaded — run: make daemon-install"
+	@launchctl list 2>/dev/null | grep session-replay-daemon || echo "daemon not loaded — run: make daemon-install"
 
 daemon-logs:
 	@tail -f $${HOME}/Library/Logs/session-replay/daemon.log
 
 daemon-restart: daemon-uninstall daemon-install
+
+# ── Per-service LaunchAgents ───────────────────────────
+# Backend + frontend can also be auto-started under launchd. Useful when you
+# want everything that should run on this machine to come up after a reboot.
+
+backend-install:
+	@./scripts/launchd-install.sh backend
+
+backend-uninstall:
+	@./scripts/launchd-uninstall.sh backend
+
+frontend-install:
+	@./scripts/launchd-install.sh frontend
+
+frontend-uninstall:
+	@./scripts/launchd-uninstall.sh frontend
+
+# ── All-in-one ─────────────────────────────────────────
+# `all-services-install` is the friendly default — gets a fresh clone to a
+# fully-running state with one command:
+#   - daemon runs under launchd (survives reboot, auto-restarts on crash)
+#   - backend + frontend run in `screen` sessions (matches make dev)
+#
+# Why mixed mode: macOS 14+ TCC blocks launchd-spawned processes from reading
+# files inside ~/Documents/, which is where most users have this repo cloned.
+# The daemon's binary (/opt/homebrew/bin/node) often already has Full Disk
+# Access granted, so it works. uvicorn/vite usually don't, so they EPERM.
+#
+# If you've granted Full Disk Access to your python interpreter + node + vite
+# (System Settings → Privacy & Security → Full Disk Access), or moved the
+# repo out of ~/Documents/, use `all-services-launchd-install` instead to
+# also put backend + frontend under launchd.
+
+all-services-install: daemon-install
+	@$(MAKE) dev-backend
+	@$(MAKE) dev-frontend
+	@echo ""
+	@echo "✓ all services up. Run \`make services-status\` to verify."
+
+all-services-uninstall: daemon-uninstall
+	@-screen -X -S sr-backend quit 2>/dev/null
+	@-screen -X -S sr-frontend quit 2>/dev/null
+	@-lsof -ti :8081 2>/dev/null | xargs kill 2>/dev/null || true
+	@-lsof -ti :5173 2>/dev/null | xargs kill 2>/dev/null || true
+	@echo "✓ services stopped."
+
+all-services-restart: all-services-uninstall all-services-install
+
+# Advanced: also put backend + frontend under launchd. Requires Full Disk
+# Access for the spawning binaries — see README "Persistent services" section.
+all-services-launchd-install: daemon-install backend-install frontend-install
+
+services-status:
+	@echo "── LaunchAgents ──"
+	@launchctl list 2>/dev/null | grep session-replay || echo "(none loaded)"
+	@echo ""
+	@echo "── screen sessions ──"
+	@screen -ls 2>/dev/null | grep -E "sr-(backend|frontend)" || echo "(none)"
+	@echo ""
+	@echo "── Ports ──"
+	@for p in 8081 5173 8070; do \
+	    code=$$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://localhost:$$p/" 2>/dev/null || echo "down"); \
+	    echo "  :$$p  $$code"; \
+	done
+
+services-logs:
+	@tail -F $${HOME}/Library/Logs/session-replay/*.log 2>/dev/null
 
 # ── Lint ───────────────────────────────────────────────
 lint: lint-backend lint-extension
