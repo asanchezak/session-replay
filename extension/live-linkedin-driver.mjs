@@ -231,10 +231,9 @@ async function scrapeSearchProfileUrls(page) {
   return urls.filter((u) => /linkedin\.com\/in\/[A-Za-z0-9_\-%\.]+$/.test(u));
 }
 
-async function scrapeProfile(page, url) {
+// Extract top-card data (name + headline + about) from a profile main page.
+async function scrapeProfileTopCard(page, url) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-  // Profile pages are SPAs. Wait for the top-card section to render — keyed
-  // off `data-view-name="profile-top-card"` (covers en + es + i18n variants).
   try {
     await page.waitForSelector(
       '[data-view-name="profile-top-card"], section[componentkey*="Topcard"]',
@@ -242,111 +241,267 @@ async function scrapeProfile(page, url) {
     );
   } catch {}
   await sleep(jitter(2500, 1500));
-  await humanScroll(page, 6);
+  await humanScroll(page, 7);
+  // Wait for about card OR a few seconds, whichever first.
+  try {
+    await page.waitForSelector('[data-view-name="profile-card-about"]', {
+      timeout: 6000, state: "attached",
+    });
+  } catch {}
   await sleep(jitter(1500, 1000));
 
   return await page.evaluate(() => {
     const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
     const txt = (el) => clean(el?.textContent || "");
 
-    // ── name from top-card ────────────────────────────────────────────────
     const topCard =
       document.querySelector('[data-view-name="profile-top-card"]') ||
       document.querySelector('section[componentkey*="Topcard"]');
+
+    // Name = h2 inside top card (LinkedIn moved this out of h1 in 2025).
     let full_name = "";
     if (topCard) {
       const h2 = topCard.querySelector("h2");
       if (h2) full_name = txt(h2);
     }
-    // Fall back to the first sufficiently long h2 anywhere on the page.
     if (!full_name) {
-      const headings = Array.from(document.querySelectorAll("h2")).map((h) => txt(h));
-      // Skip nav-y h2s like "0 notificaciones", "Recent entity history".
       const NAV = /^\d|notification|notificaci|history|historial|recent|opciones|gente|peopl|advert|publici/i;
-      full_name = headings.find((t) => t.length >= 3 && t.length <= 80 && !NAV.test(t)) || "";
+      full_name = Array.from(document.querySelectorAll("h2"))
+        .map((h) => txt(h))
+        .find((t) => t.length >= 3 && t.length <= 80 && !NAV.test(t)) || "";
     }
 
-    // ── headline: text element immediately below the name in top card ─────
+    // Headline = first leaf <p> in top-card that's not a degree-badge.
+    // Degree badges look like "· 1er", "• 2º", "· 3rd", etc.
+    const DEGREE_RE = /^[·•]?\s*\d+(?:er|º|st|nd|rd|th)\s*$/;
     let headline = "";
     if (topCard) {
-      // Walk siblings/descendants for a non-empty short text not equal to the name.
-      const walker = topCard.querySelectorAll("div");
-      for (const d of walker) {
-        if (d.children.length === 0) {
-          const t = clean(d.textContent);
-          if (
-            t &&
-            t !== full_name &&
-            t.length > 5 &&
-            t.length < 250 &&
-            !/^\d|see|connect|conexión|seguir|message|mensaj|opciones|notificaci/i.test(t)
-          ) {
-            headline = t;
-            break;
-          }
+      const leafPs = Array.from(topCard.querySelectorAll("p")).filter(
+        (p) => p.children.length === 0,
+      );
+      for (const p of leafPs) {
+        const t = clean(p.textContent);
+        if (!t || t === full_name) continue;
+        if (DEGREE_RE.test(t)) continue;
+        if (t.length < 5 || t.length > 250) continue;
+        if (/^[·•]/.test(t)) continue;
+        headline = t;
+        break;
+      }
+    }
+
+    // About text. Try the dedicated profile-card-about section, fall back to
+    // matching an h2 with heading text in en/es and reading its parent section.
+    let about = "";
+    const aboutEl = document.querySelector('[data-view-name="profile-card-about"]');
+    if (aboutEl) about = clean(aboutEl.textContent);
+    if (!about) {
+      const want = ["about", "acerca de", "sobre"];
+      const h2 = Array.from(document.querySelectorAll("h2")).find(
+        (h) => want.includes((h.textContent || "").trim().toLowerCase()),
+      );
+      if (h2) {
+        const sec = h2.closest("section") || h2.parentElement;
+        if (sec) about = clean(sec.textContent);
+      }
+    }
+    // Strip the leading section title ("About"/"Acerca de") possibly
+    // duplicated for screen-reader twin.
+    about = about
+      .replace(/^(About|Acerca de|Sobre)(?:\s*\1)?/i, "")
+      .trim()
+      .slice(0, 4000);
+
+    // Location: line 4-5 in the topcard leaf list, after the company/school chips.
+    let location = "";
+    if (topCard) {
+      const leafPs = Array.from(topCard.querySelectorAll("p")).filter((p) => p.children.length === 0);
+      // The location often contains words like "Area", "Region", "City", "Metropolitan",
+      // or a country/state name. Heuristic: pick the leaf <p> that's not the name,
+      // not a degree, not the headline, and not the chip-row (contains " · " separator).
+      for (const p of leafPs) {
+        const t = clean(p.textContent);
+        if (!t || t === full_name || t === headline) continue;
+        if (DEGREE_RE.test(t)) continue;
+        if (/[·•]/.test(t) && t.split(/[·•]/).length > 2) continue;
+        if (/Area|Region|City|Metropolitan|País|Country|Greater/i.test(t)) {
+          location = t;
+          break;
         }
       }
     }
 
-    // ── sections: by data-view-name AND by heading text ───────────────────
-    function sectionByView(name) {
-      const el = document.querySelector(`[data-view-name="${name}"]`);
-      if (!el) return "";
-      return clean(el.textContent).slice(0, 3500);
-    }
-    function sectionByHeading(...candidates) {
-      const want = candidates.map((s) => s.toLowerCase());
-      const h2s = Array.from(document.querySelectorAll("h2"));
-      for (const h of h2s) {
-        const t = (h.textContent || "").trim().toLowerCase();
-        if (want.includes(t)) {
-          const sec = h.closest("section") || h.parentElement;
-          if (sec) return clean(sec.textContent).slice(0, 3500);
-        }
-      }
-      return "";
-    }
-
-    const about =
-      sectionByView("profile-card-about") ||
-      sectionByHeading("about", "acerca de", "sobre");
-    const experienceText =
-      sectionByView("profile-card-experience") ||
-      sectionByHeading("experience", "experiencia");
-    const educationText =
-      sectionByView("profile-card-education") ||
-      sectionByHeading("education", "educación", "formación");
-    const skillsText =
-      sectionByView("profile-card-skills") ||
-      sectionByHeading("skills", "aptitudes");
-
-    function parseExperienceRecords(raw) {
-      if (!raw) return [];
-      const out = [];
-      const seen = new Set();
-      const re = /([A-Z][^·\n]{1,60})\s+(?:at|@)\s+([A-Z][^·\n]{1,60})/g;
-      let m;
-      while ((m = re.exec(raw)) !== null && out.length < 4) {
-        const key = m[1] + "|" + m[2];
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ title: m[1].trim(), company: m[2].trim(), dates: "", description: "" });
-      }
-      return out;
-    }
-
-    return {
-      page_title: document.title || "",
-      full_name,
-      headline,
-      about,
-      skills: skillsText ? skillsText.split(/\s+/).filter((w) => w.length > 2).slice(0, 12) : [],
-      experience: parseExperienceRecords(experienceText),
-      education: educationText ? [{ school: educationText.slice(0, 160), degree: "", field: "", dates: "" }] : [],
-      certifications: [],
-      projects: [],
-    };
+    return { full_name, headline, about, location };
   });
+}
+
+// Extract <li>-based records from a /details/<section>/ subpage.
+async function scrapeDetailsSubpage(page, profileBase, section) {
+  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch {
+    return [];
+  }
+  await sleep(jitter(2500, 1200));
+  // Scroll deep so all lazy-loaded entries render before we read them.
+  for (let i = 0; i < 8; i++) {
+    await page.mouse.wheel(0, 700);
+    await sleep(jitter(500, 300));
+  }
+  await sleep(jitter(1500, 800));
+
+  return await page.evaluate(() => {
+    const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
+
+    // /details/ pages render entries as <li> inside <ul>. Each entry contains
+    // multiple <span> chunks; LinkedIn historically used aria-hidden="true"
+    // spans for the visible text + a screen-reader twin, but the newer SDUI
+    // layout uses plain <span> nodes. Try aria-hidden first; fall back to
+    // all leaf <span> nodes if none. Last resort: split li.textContent by
+    // line breaks / multiple spaces.
+    function chunksFromLi(li) {
+      const ariaSpans = li.querySelectorAll('span[aria-hidden="true"]');
+      const candidates = ariaSpans.length > 0
+        ? Array.from(ariaSpans)
+        : Array.from(li.querySelectorAll("span")).filter((s) => s.children.length === 0);
+      let chunks = candidates
+        .map((s) => clean(s.textContent))
+        .filter((t) => t && t.length < 800);
+      if (chunks.length === 0) {
+        // Final fallback: split by newline-equivalent boundaries.
+        chunks = clean(li.textContent || "")
+          .split(/\s{2,}|·{1,}|·/)
+          .map((s) => s.trim())
+          .filter((t) => t.length > 1 && t.length < 800);
+      }
+      const seen = new Set();
+      const ordered = [];
+      for (const c of chunks) {
+        if (seen.has(c)) continue;
+        seen.add(c);
+        ordered.push(c);
+      }
+      return ordered;
+    }
+
+    // Find the actual content list. The /details/skills/ page has a tab nav
+    // ("All", "Industry Knowledge", "Tools & Technologies") that's also a
+    // <ul>, and its li count rivals the content list. Pick the <ul> whose
+    // direct <li> children carry the most total text (content > nav). Also
+    // skip lists with role=tablist or inside <nav>.
+    const main = document.querySelector("main") || document.body;
+    const candidates = Array.from(main.querySelectorAll("ul"))
+      .filter((ul) => {
+        if (ul.closest("nav")) return false;
+        if (ul.getAttribute("role") === "tablist") return false;
+        return true;
+      });
+    let bestUl = null;
+    let bestScore = 0;
+    candidates.forEach((ul) => {
+      const direct = Array.from(ul.children).filter((c) => c.tagName === "LI");
+      if (direct.length === 0) return;
+      // Score: total textContent length across direct li children; if the
+      // average per-li text is < 10 (tab nav with single-word labels), drop.
+      const total = direct.reduce((acc, li) => acc + (li.textContent || "").length, 0);
+      const avg = total / direct.length;
+      if (avg < 20) return; // filter tab navs / short-label lists
+      if (total > bestScore) {
+        bestScore = total;
+        bestUl = ul;
+      }
+    });
+    if (!bestUl) return [];
+
+    const items = Array.from(bestUl.children).filter((c) => c.tagName === "LI");
+    return items.map(chunksFromLi).filter((row) => row.length > 0);
+  });
+}
+
+// Compose structured records from the raw chunk arrays of a /details/ subpage.
+function parseExperienceChunks(chunkRows) {
+  // Per row, the first chunk is typically the title, the second the company
+  // (sometimes followed by " · Full-time"), the third the date range, the
+  // fourth a duration, the fifth the location, the rest description bullets.
+  const out = [];
+  for (const row of chunkRows) {
+    if (!row || row.length === 0) continue;
+    const [title = "", company = "", dates = "", duration = "", location = "", ...rest] = row;
+    out.push({
+      title,
+      company: (company || "").split(" · ")[0],
+      employment_type: (company || "").includes(" · ") ? company.split(" · ").slice(1).join(" · ") : "",
+      dates,
+      duration,
+      location,
+      description: rest.join("\n").slice(0, 1500),
+    });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+function parseEducationChunks(chunkRows) {
+  const out = [];
+  for (const row of chunkRows) {
+    if (!row || row.length === 0) continue;
+    const [school = "", field = "", dates = "", ...rest] = row;
+    out.push({
+      school,
+      field,
+      degree: rest.find((s) => /degree|grado|bachiller|master|maestría/i.test(s)) || "",
+      dates,
+      description: rest.join("\n").slice(0, 800),
+    });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+function parseSkillsChunks(chunkRows) {
+  // Skills are usually one chunk per row (the skill name), occasionally
+  // followed by a small "endorsement" subchunk.
+  const out = [];
+  for (const row of chunkRows) {
+    if (!row || row.length === 0) continue;
+    const name = row[0];
+    if (name && name.length < 80) out.push(name);
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+function parseCertificationChunks(chunkRows) {
+  const out = [];
+  for (const row of chunkRows) {
+    if (!row || row.length === 0) continue;
+    const [name = "", issuer = "", issued = "", ...rest] = row;
+    out.push({ name, issuer, issued, credential_id: rest.join(" ").slice(0, 200) });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+async function scrapeProfile(page, url) {
+  // 1) Top card → name, headline, about, location.
+  const top = await scrapeProfileTopCard(page, url);
+
+  // 2) Visit each /details/ subpage. LinkedIn 200s these even when empty.
+  const expChunks = await scrapeDetailsSubpage(page, url, "experience");
+  const eduChunks = await scrapeDetailsSubpage(page, url, "education");
+  const skillsChunks = await scrapeDetailsSubpage(page, url, "skills");
+  const certsChunks = await scrapeDetailsSubpage(page, url, "certifications");
+
+  return {
+    page_title: top.full_name ? `${top.full_name} | LinkedIn` : "",
+    full_name: top.full_name || "",
+    headline: top.headline || "",
+    location: top.location || "",
+    about: top.about || "",
+    experience: parseExperienceChunks(expChunks),
+    education: parseEducationChunks(eduChunks),
+    skills: parseSkillsChunks(skillsChunks),
+    certifications: parseCertificationChunks(certsChunks),
+    projects: [],
+  };
 }
 
 async function waitForChallengeClear(page, timeoutMs) {
@@ -439,7 +594,14 @@ try {
     try {
       const data = await scrapeProfile(page, url);
       console.log(`  -> "${data.full_name}" | "${(data.headline || "").slice(0, 80)}"`);
-      console.log(`     about=${(data.about || "").length}ch experience=${data.experience.length}`);
+      console.log(
+        `     about=${(data.about || "").length}ch ` +
+          `experience=${data.experience.length} ` +
+          `education=${data.education.length} ` +
+          `skills=${data.skills.length} ` +
+          `certs=${data.certifications.length} ` +
+          `location="${data.location || ""}"`,
+      );
       await postExtraction(runId, stepIndex++, url, data);
     } catch (err) {
       console.error(`  ! scrape failed:`, err?.message || err);

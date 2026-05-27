@@ -74,7 +74,9 @@ class LinkedInApplicantPushService:
 
         endpoint = f"{base_url}/akcr/api/linkedin_applicant"
         results: list[dict] = []
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # Odoo runs 8 AI agents synchronously inside _analyze_easy_recruit
+        # (30-120s per applicant). httpx default 5s would always trip.
+        async with httpx.AsyncClient(timeout=240.0) as client:
             for profile in profiles[:MAX_PROFILES_PER_RUN]:
                 payload = {
                     "job_id": job_id,

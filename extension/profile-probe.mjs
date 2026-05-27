@@ -44,25 +44,45 @@ await page.waitForTimeout(2000);
 console.log("Final URL:", page.url());
 
 const dom = await page.evaluate(() => {
-  const out = { h1: [], headings: [], mainPreview: "", anchors: [] };
-  document.querySelectorAll("h1").forEach((h) => out.h1.push((h.textContent || "").trim().slice(0, 200)));
-  document.querySelectorAll("h2").forEach((h) => out.headings.push((h.textContent || "").trim().slice(0, 100)));
-  const main = document.querySelector("main") || document.body;
-  out.mainPreview = (main.innerHTML || "").slice(0, 5000);
-  // Anchor candidates for profile sections.
-  const ids = ["about","experience","education","skills","certifications","projects","volunteer"];
-  ids.forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) out.anchors.push(id + " present");
+  const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
+  const out = {
+    h2_all: [],
+    dataViewNames: [],
+    sections_by_h2: {},
+    topcard_dump: "",
+  };
+  document.querySelectorAll("h2").forEach((h) => out.h2_all.push(clean(h.textContent)));
+  // Every element carrying data-view-name (the new LinkedIn structural hook).
+  const dvSet = new Set();
+  document.querySelectorAll("[data-view-name]").forEach((el) => dvSet.add(el.getAttribute("data-view-name")));
+  out.dataViewNames = Array.from(dvSet);
+  // Pull text under each h2 in profile sections.
+  document.querySelectorAll("h2").forEach((h) => {
+    const heading = clean(h.textContent);
+    const section = h.closest("section") || h.parentElement;
+    if (section) {
+      out.sections_by_h2[heading] = clean(section.textContent).slice(0, 800);
+    }
   });
+  const tc = document.querySelector('[data-view-name="profile-top-card"]') ||
+             document.querySelector('section[componentkey*="Topcard"]');
+  if (tc) {
+    out.topcard_dump = clean(tc.textContent).slice(0, 1500);
+  }
   return out;
 });
-console.log("h1 texts:", dom.h1);
-console.log("h2 first 15:", dom.headings.slice(0, 15));
-console.log("section anchors:", dom.anchors);
+console.log("h2 (all):", dom.h2_all);
 console.log("");
-console.log("main innerHTML preview (5KB):");
-console.log(dom.mainPreview.replace(/\s+/g, " ").slice(0, 3000));
+console.log("data-view-names:", dom.dataViewNames);
+console.log("");
+console.log("topcard textContent:");
+console.log(dom.topcard_dump);
+console.log("");
+for (const [h, txt] of Object.entries(dom.sections_by_h2)) {
+  console.log(`---- h2="${h}" ----`);
+  console.log(txt.slice(0, 600));
+  console.log("");
+}
 
 await page.screenshot({ path: "profile-probe.png", fullPage: false });
 console.log("Screenshot: profile-probe.png");
