@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.akurey.session-replay-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/stdbuf</string>
+        <string>-oL</string>
+        <string>-eL</string>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/andreysanchez/Documents/session-replay/extension/driver-daemon.mjs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andreysanchez/Documents/session-replay</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>BACKEND</key>
+        <string>http://localhost:8081</string>
+        <key>API_KEY</key>
+        <string>dev-api-key-change-in-production</string>
+        <key>POLL_INTERVAL_MS</key>
+        <string>5000</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't respawn faster than every 15 s — guards against a tight crash loop
+         (e.g. if the backend is permanently down). -->
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andreysanchez/Library/Logs/session-replay/daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/andreysanchez/Library/Logs/session-replay/daemon.err.log</string>
+
+    <!-- ProcessType=Interactive keeps the process alive even when the system
+         tries to throttle background work. Important because the daemon opens
+         Chrome (a GUI app). -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
