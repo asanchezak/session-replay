@@ -19,8 +19,10 @@
  */
 import { chromium } from "@playwright/test";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { defaultEmptyValue, readExtractShapes, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,10 +31,12 @@ const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || "5000");
+const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 
 const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
+let drivingRunId = null;
 
 function loadOpenAIKey() {
   try {
@@ -50,6 +54,13 @@ async function fetchJson(url, init = {}) {
   const r = await fetch(url, { ...init, headers: { ...HEADERS, ...(init.headers || {}) } });
   if (!r.ok) throw new Error(`${init.method || "GET"} ${url} → ${r.status}: ${await r.text()}`);
   return r.json();
+}
+
+async function postHeartbeat({ worker_id, polling, driving_run_id }) {
+  await fetchJson(`${BACKEND}/v1/daemon/heartbeat`, {
+    method: "POST",
+    body: JSON.stringify({ worker_id, polling, driving_run_id }),
+  });
 }
 
 // Only pick runs that started within the last STALE_RUN_AGE_MS — keeps the
@@ -281,22 +292,7 @@ async function scrapeSubpageText(page, profileBase, section) {
   }, section);
 }
 
-const AI_SCHEMAS = {
-  education: { type: "object", additionalProperties: false, properties: { education: { type: "array", items: { type: "object", additionalProperties: false, properties: { school: { type: "string" }, degree: { type: "string" }, field: { type: "string" }, dates: { type: "string" }, description: { type: "string" } }, required: ["school", "degree", "field", "dates", "description"] } } }, required: ["education"] },
-  skills: { type: "object", additionalProperties: false, properties: { skills: { type: "array", items: { type: "string" } } }, required: ["skills"] },
-  certifications: { type: "object", additionalProperties: false, properties: { certifications: { type: "array", items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, issuer: { type: "string" }, issued: { type: "string" }, credential_id: { type: "string" } }, required: ["name", "issuer", "issued", "credential_id"] } } }, required: ["certifications"] },
-  projects: { type: "object", additionalProperties: false, properties: { projects: { type: "array", items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, dates: { type: "string" }, description: { type: "string" } }, required: ["name", "dates", "description"] } } }, required: ["projects"] },
-  courses: { type: "object", additionalProperties: false, properties: { courses: { type: "array", items: { type: "string" } } }, required: ["courses"] },
-};
-const AI_PROMPTS = {
-  education: "Extract education entries from this LinkedIn /details/education/ section text. Copy verbatim.",
-  skills: "Extract skill NAMES only. Skip filter tabs ('All','Industry Knowledge','Tools & Technologies','Interpersonal Skills','Languages','Other Skills') and skip company/job context.",
-  certifications: "Extract certifications: name, issuer, issued date.",
-  projects: "Extract projects: name, dates, description.",
-  courses: "Extract course names as a list of strings.",
-};
-
-async function aiExtract(section, rawText) {
+async function aiExtractByShape(shape, rawText) {
   if (!OPENAI_API_KEY || !rawText || rawText.length < 12) return null;
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -306,52 +302,82 @@ async function aiExtract(section, rawText) {
         model: "gpt-4o-mini",
         messages: [
           { role: "system", content: "Extract structured LinkedIn profile data. Output strict JSON. Copy values verbatim." },
-          { role: "user", content: `${AI_PROMPTS[section]}\n\n--- Input ---\n${rawText.slice(0, 5000)}` },
+          { role: "user", content: `${shapeToPrompt(shape)}\n\n--- Input ---\n${rawText.slice(0, 5000)}` },
         ],
-        response_format: { type: "json_schema", json_schema: { name: section, schema: AI_SCHEMAS[section], strict: true } },
+        response_format: { type: "json_schema", json_schema: { name: shape.key, schema: shapeToSchema(shape), strict: true } },
         temperature: 0,
       }),
     });
     const b = await r.json();
-    if (!r.ok) { console.warn(`[ai] ${section} HTTP ${r.status}`); return null; }
+    if (!r.ok) { console.warn(`[ai] ${shape.key} HTTP ${r.status}`); return null; }
     return JSON.parse(b.choices[0].message.content);
-  } catch (err) { console.warn(`[ai] ${section} err`, err.message); return null; }
+  } catch (err) { console.warn(`[ai] ${shape.key} err`, err.message); return null; }
 }
 
-async function scrapeProfileFull(page, url) {
+function defaultProfileShapes() {
+  return [
+    { key: "about", label: "About", kind: "scalar", item_keys: null },
+    { key: "experience", label: "Experience", kind: "record_list", item_keys: ["title", "company", "employment_type", "dates", "duration", "location", "description"] },
+    { key: "education", label: "Education", kind: "record_list", item_keys: ["school", "degree", "field", "dates"] },
+    { key: "skills", label: "Skills", kind: "string_list", item_keys: null, extract_hints: "Extract skill names only. Skip filter tabs and company/job context." },
+    { key: "certifications", label: "Certifications", kind: "record_list", item_keys: ["name", "issuer", "issued"] },
+    { key: "projects", label: "Projects", kind: "record_list", item_keys: ["name", "dates", "description"] },
+    { key: "courses", label: "Courses", kind: "string_list", item_keys: null },
+    { key: "languages", label: "Languages", kind: "string_list", item_keys: null },
+  ];
+}
+
+async function scrapeProfileFull(page, url, extractShapes = []) {
   const top = await scrapeProfileTopCard(page, url);
-  const expItems = await scrapeExperienceItems(page, url);
-  const eduText = await scrapeSubpageText(page, url, "education");
-  const skillsText = await scrapeSubpageText(page, url, "skills");
-  const certsText = await scrapeSubpageText(page, url, "certifications");
-  const projText = await scrapeSubpageText(page, url, "projects");
-  const coursesText = await scrapeSubpageText(page, url, "courses");
-  const [edu, skills, certs, proj, courses] = await Promise.all([
-    aiExtract("education", eduText),
-    aiExtract("skills", skillsText),
-    aiExtract("certifications", certsText),
-    aiExtract("projects", projText),
-    aiExtract("courses", coursesText),
-  ]);
-  return {
+  const requestedShapes = extractShapes.length > 0 ? extractShapes : defaultProfileShapes();
+  const result = {
     page_title: top.full_name ? `${top.full_name} | LinkedIn` : "",
     full_name: top.full_name || "",
     headline: top.headline || "",
     location: top.location || "",
     about: top.about || "",
-    experience: parseExperienceItems(expItems),
-    education: edu?.education || [],
-    skills: skills?.skills || [],
-    certifications: certs?.certifications || [],
-    projects: proj?.projects || [],
-    courses: courses?.courses || [],
   };
+  const subpageTextCache = new Map();
+  for (const shape of requestedShapes) {
+    if (!shape?.key) continue;
+    if (shape.key === "about") {
+      result.about = top.about || defaultEmptyValue(shape);
+      continue;
+    }
+    if (shape.key === "experience") {
+      const expItems = await scrapeExperienceItems(page, url);
+      result.experience = parseExperienceItems(expItems);
+      continue;
+    }
+    if (shape.key === "full_name") {
+      result.full_name = top.full_name || defaultEmptyValue(shape);
+      continue;
+    }
+    if (shape.key === "headline") {
+      result.headline = top.headline || defaultEmptyValue(shape);
+      continue;
+    }
+    if (shape.key === "location") {
+      result.location = top.location || defaultEmptyValue(shape);
+      continue;
+    }
+    const sectionKey = shape.key === "top_skills" ? "skills" : shape.key;
+    let rawText = subpageTextCache.get(sectionKey);
+    if (rawText === undefined) {
+      rawText = await scrapeSubpageText(page, url, sectionKey);
+      subpageTextCache.set(sectionKey, rawText);
+    }
+    const parsed = await aiExtractByShape(shape, rawText);
+    result[shape.key] = parsed?.[shape.key] ?? defaultEmptyValue(shape);
+  }
+  return result;
 }
 
 // ── Run driver ──────────────────────────────────────────────────────────────
 
 async function driveRun(run) {
   const runId = run.id;
+  drivingRunId = runId;
   const jobTitle = run.origin?.job_payload?.job_title || "Software Engineer";
   const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(jobTitle)}&origin=SWITCH_SEARCH_VERTICAL`;
   const searchUrlP2 = `${searchUrl}&page=2`;
@@ -419,7 +445,7 @@ async function driveRun(run) {
           // /details/<section>/ subpages, otherwise page.url() returns the
           // last subpage instead of the canonical /in/<slug>/.
           const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
-          const data = await scrapeProfileFull(page, profileUrl);
+          const data = await scrapeProfileFull(page, profileUrl, readExtractShapes(step));
           console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${data.education.length} skills=${data.skills.length} certs=${data.certifications.length}`);
           await postExtraction(runId, idx, profileUrl, data);
           await reportStepResult(runId, idx, "extract");
@@ -451,6 +477,7 @@ async function driveRun(run) {
     }
     console.log(`  done: status=${cur.status} step=${cur.current_step_index}/${cur.total_steps}`);
   } finally {
+    drivingRunId = null;
     await ctx.close().catch(() => {});
   }
 }
@@ -460,8 +487,23 @@ async function driveRun(run) {
 console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
 console.log(`[daemon] watching for runs with origin.event_kind=new_job_position`);
 
+setInterval(() => {
+  postHeartbeat({
+    worker_id: WORKER_ID,
+    polling: drivingRunId === null,
+    driving_run_id: drivingRunId,
+  }).catch((err) => {
+    console.error("[daemon] heartbeat error:", err.message);
+  });
+}, POLL_INTERVAL_MS);
+
 while (true) {
   try {
+    await postHeartbeat({
+      worker_id: WORKER_ID,
+      polling: drivingRunId === null,
+      driving_run_id: drivingRunId,
+    });
     const run = await findPendingRun();
     if (run) {
       try {

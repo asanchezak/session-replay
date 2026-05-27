@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.exceptions import NotFoundError, StateTransitionError
+from core.models.run import ExecutionRun
 from core.models.workflow import Workflow
 from core.state_machine import RunStatus
 from services.execution_service import ExecutionService
@@ -110,6 +111,42 @@ async def test_complete_run(db_session: AsyncSession):
     completed = await svc.complete(str(run.id))
     assert completed.status == "completed"
     assert completed.ended_at is not None
+
+
+@pytest.mark.asyncio
+async def test_complete_run_triggers_linkedin_push_with_fresh_session(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="LinkedIn WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.origin = {
+        "event_kind": "new_job_position",
+        "connector_id": "connector-1",
+        "job_payload": {"job_id": "13"},
+    }
+    run.total_steps = 1
+    run.current_step_index = 1
+    await db_session.flush()
+    await svc.transition(str(run.id), RunStatus.RUNNING)
+
+    called: dict[str, str] = {}
+
+    async def fake_push(completed_run: ExecutionRun) -> dict:
+        called["run_id"] = str(completed_run.id)
+        called["job_id"] = str((completed_run.origin or {}).get("job_payload", {}).get("job_id"))
+        return {"pushed": 1}
+
+    monkeypatch.setattr(svc, "_push_linkedin_applicants_after_completion", fake_push)
+
+    completed = await svc.complete(str(run.id))
+
+    assert completed.status == "completed"
+    assert called == {"run_id": str(run.id), "job_id": "13"}
 
 
 @pytest.mark.asyncio

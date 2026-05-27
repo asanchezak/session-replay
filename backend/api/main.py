@@ -18,6 +18,7 @@ from api.v1.artifacts import router as artifacts_router
 from api.v1.audit import router as audit_router
 from api.v1.client_logs import router as client_logs_router
 from api.v1.connectors import router as connectors_router
+from api.v1.daemon import router as daemon_router
 from api.v1.debug import router as debug_router
 from api.v1.events import router as events_router
 from api.v1.integrations import router as integrations_router
@@ -239,6 +240,7 @@ app.include_router(workflows_router, prefix="/v1")
 app.include_router(runs_router, prefix="/v1")
 app.include_router(audit_router, prefix="/v1")
 app.include_router(connectors_router, prefix="/v1")
+app.include_router(daemon_router, prefix="/v1")
 app.include_router(debug_router, prefix="/v1")
 app.include_router(ai_router, prefix="/v1")
 app.include_router(settings_router, prefix="/v1")

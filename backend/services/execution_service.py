@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from core.database import async_session_factory
 from core.exceptions import NotFoundError, StateTransitionError
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus, WorkflowStateMachine
@@ -556,12 +557,7 @@ class ExecutionService:
                 (run.origin or {}).get("event_kind") == "new_job_position"
             ):
                 try:
-                    from services.linkedin_applicant_push_service import (
-                        LinkedInApplicantPushService,
-                    )
-                    push_result = await LinkedInApplicantPushService(
-                        self.session
-                    ).push_from_run(run)
+                    push_result = await self._push_linkedin_applicants_after_completion(run)
                     logger.info(
                         "LinkedIn applicant push for run %s: %s", run_id, push_result
                     )
@@ -571,6 +567,28 @@ class ExecutionService:
                     )
 
         return run
+
+    async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:
+        """Run post-completion Odoo applicant push in a fresh session.
+
+        Completion-time learning/finalization hooks are best-effort and may
+        leave the request session in a failed transaction state even when the
+        run itself legitimately completes. Use an independent session for the
+        external Odoo push so applicant ingestion is not coupled to that ORM
+        state.
+        """
+        from services.linkedin_applicant_push_service import (
+            LinkedInApplicantPushService,
+        )
+
+        async with async_session_factory() as push_session:
+            service = LinkedInApplicantPushService(push_session)
+            result = await service.push_for_origin(
+                run_id=run.id,
+                origin=run.origin or {},
+            )
+            await push_session.commit()
+            return result
 
     async def advance_step(self, run_id: str) -> ExecutionRun:
         """Advance the current step index by one."""

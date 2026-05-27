@@ -21,6 +21,7 @@ FieldKind = Literal["scalar", "string_list", "record_list", "unknown"]
 class FieldShape:
     kind: FieldKind
     item_keys: tuple[str, ...] | None = None
+    extract_hints: str | None = None
 
 
 FIELD_SHAPES: dict[str, FieldShape] = {
@@ -32,18 +33,34 @@ FIELD_SHAPES: dict[str, FieldShape] = {
     "education": FieldShape(
         "record_list",
         ("school", "degree", "field", "dates"),
+        "Extract one record per education entry. Preserve school, degree, field, and dates verbatim when present.",
     ),
-    "skills": FieldShape("string_list"),
-    "top_skills": FieldShape("string_list"),
+    "skills": FieldShape(
+        "string_list",
+        extract_hints="Extract skill names only. Skip filter tabs, endorsements counts, and company/job context.",
+    ),
+    "top_skills": FieldShape(
+        "string_list",
+        extract_hints="Extract only the skill names shown as top skills.",
+    ),
     "certifications": FieldShape(
         "record_list",
         ("name", "issuer", "issued"),
+        "Extract certification name, issuer, and issued date. Ignore CTA labels and credential-share controls.",
     ),
     "projects": FieldShape(
         "record_list",
         ("name", "description", "dates"),
+        "Extract project name, dates, and summary. Ignore surrounding navigation text.",
     ),
-    "languages": FieldShape("string_list"),
+    "languages": FieldShape(
+        "string_list",
+        extract_hints="Extract language names only. Skip proficiency badges unless they are part of the visible label.",
+    ),
+    "courses": FieldShape(
+        "string_list",
+        extract_hints="Extract course names only.",
+    ),
 }
 
 
@@ -57,6 +74,7 @@ def shape_to_dict(shape: FieldShape) -> dict[str, object]:
     return {
         "kind": shape.kind,
         "item_keys": list(shape.item_keys) if shape.item_keys else None,
+        "extract_hints": shape.extract_hints,
     }
 
 

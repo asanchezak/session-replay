@@ -23,6 +23,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PROFILES_PER_RUN = 2
 PROFILE_URL_PREFIX = "linkedin.com/in/"
+CANONICAL_PROFILE_FIELDS = (
+    "full_name",
+    "headline",
+    "about",
+    "location",
+    "skills",
+    "experience",
+    "education",
+    "certifications",
+    "projects",
+    "courses",
+    "languages",
+)
 
 
 def _is_profile_url(url: str | None) -> bool:
@@ -36,21 +49,31 @@ def _canonical_profile_url(url: str) -> str:
     return base
 
 
+def _build_pre_extracted(profile: dict) -> dict:
+    return {
+        key: profile.get(key)
+        for key in CANONICAL_PROFILE_FIELDS
+        if profile.get(key) not in (None, "", [], {})
+    }
+
+
 class LinkedInApplicantPushService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
     async def push_from_run(self, run: ExecutionRun) -> dict:
-        origin = run.origin or {}
+        return await self.push_for_origin(run_id=run.id, origin=run.origin or {})
+
+    async def push_for_origin(self, *, run_id, origin: dict) -> dict:
         job_payload = origin.get("job_payload") or {}
         job_id = job_payload.get("job_id")
         connector_id = origin.get("connector_id")
 
         if not job_id:
-            logger.warning("push_from_run: no job_id in origin for run %s", run.id)
+            logger.warning("push_from_run: no job_id in origin for run %s", run_id)
             return {"pushed": 0, "skipped": "no_job_id"}
         if not connector_id:
-            logger.warning("push_from_run: no connector_id in origin for run %s", run.id)
+            logger.warning("push_from_run: no connector_id in origin for run %s", run_id)
             return {"pushed": 0, "skipped": "no_connector_id"}
 
         connector = await self._get_connector(connector_id)
@@ -67,9 +90,9 @@ class LinkedInApplicantPushService:
             )
             return {"pushed": 0, "skipped": "connector_unconfigured"}
 
-        profiles = await self._collect_profiles(run.id)
+        profiles = await self._collect_profiles(run_id)
         if not profiles:
-            logger.info("push_from_run: no LinkedIn profiles in run %s", run.id)
+            logger.info("push_from_run: no LinkedIn profiles in run %s", run_id)
             return {"pushed": 0, "skipped": "no_profiles"}
 
         endpoint = f"{base_url}/akcr/api/linkedin_applicant"
@@ -92,7 +115,7 @@ class LinkedInApplicantPushService:
             for profile in profiles[:max_profiles]:
                 payload = {
                     "job_id": job_id,
-                    "source_run_id": str(run.id),
+                    "source_run_id": str(run_id),
                     "profile_url": profile["profile_url"],
                     "full_name": profile.get("full_name") or "",
                     "headline": profile.get("headline") or "",
@@ -102,6 +125,9 @@ class LinkedInApplicantPushService:
                     "education": profile.get("education") or [],
                     "certifications": profile.get("certifications") or [],
                     "projects": profile.get("projects") or [],
+                    "courses": profile.get("courses") or [],
+                    "languages": profile.get("languages") or [],
+                    "pre_extracted": _build_pre_extracted(profile),
                 }
                 try:
                     resp = await client.post(

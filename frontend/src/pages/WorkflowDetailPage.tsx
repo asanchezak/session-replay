@@ -340,7 +340,7 @@ export default function WorkflowDetailPage() {
   const applyEditedExtractStep = async (
     targetStepIndex: number,
     nextValue: string,
-    nextShapes: Array<{ key: string; label: string; kind: string; item_keys: string[] | null }>,
+    nextShapes: Array<{ key: string; label: string; kind: string; item_keys: string[] | null; extract_hints?: string | null }>,
   ) => {
     if (!workflowId || !data) return;
     const nextSteps = data.steps.map((step) => ({
@@ -1208,6 +1208,7 @@ interface EditableShape {
   label: string;
   kind: "scalar" | "string_list" | "record_list" | "unknown";
   item_keys: string[] | null;
+  extract_hints?: string | null;
 }
 
 interface ExtractStepView {
@@ -1325,7 +1326,7 @@ function EditExtractFieldsModal({
         suggested_fields: Array<{
           key: string;
           label: string;
-          shape?: { kind: EditableShape["kind"]; item_keys: string[] | null };
+          shape?: { kind: EditableShape["kind"]; item_keys: string[] | null; extract_hints?: string | null };
         }>;
       };
       const have = new Set(shapes.map((s) => s.key));
@@ -1336,6 +1337,7 @@ function EditExtractFieldsModal({
           label: f.label,
           kind: f.shape?.kind || "unknown",
           item_keys: f.shape?.item_keys || null,
+          extract_hints: f.shape?.extract_hints || null,
         }));
       if (additions.length === 0) {
         setError("No new fields suggested. The current list already covers what the saved page contains.");
@@ -1407,6 +1409,11 @@ function EditExtractFieldsModal({
                       <span className="rounded bg-bg-elevated px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">auto</span>
                     )}
                   </div>
+                  {s.extract_hints ? (
+                    <span className="max-w-md truncate text-[11px] text-text-secondary" title={s.extract_hints}>
+                      {s.extract_hints}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     onClick={() => removeAt(idx)}

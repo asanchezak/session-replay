@@ -4,6 +4,7 @@ import { LayoutDashboard, GitBranch, Play, ScrollText, Cable, Settings, Search, 
 import ErrorBoundary from "./components/ErrorBoundary";
 import InterventionModal from "./components/InterventionModal";
 import Breadcrumbs from "./components/Breadcrumbs";
+import DaemonStatusPill from "./components/DaemonStatusPill";
 import { useApi } from "./hooks/useApi";
 import { logger } from "./lib/logger";
 
@@ -308,6 +309,7 @@ function TopBar({ waitingRun }: { waitingRun: boolean }) {
         <span className={`w-2 h-2 rounded-full ${waitingRun ? "bg-[#FDCB6E] animate-pulse" : "bg-[#00B894]"}`} />
         <span className="text-[#9AA0B0]">{waitingRun ? "Needs Attention" : "All Systems"}</span>
       </div>
+      <DaemonStatusPill />
       <a
         href="http://localhost:8082"
         target="_blank"

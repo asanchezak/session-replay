@@ -359,7 +359,7 @@ describe("WorkflowDetailPage", () => {
             {
               kind: "extract_shapes",
               shapes: [
-                { key: "about", label: "About", kind: "scalar", item_keys: null },
+                { key: "about", label: "About", kind: "scalar", item_keys: null, extract_hints: "Keep only the summary paragraph." },
                 { key: "skills", label: "Skills", kind: "string_list", item_keys: null },
               ],
             },
@@ -406,7 +406,7 @@ describe("WorkflowDetailPage", () => {
       expect.objectContaining({
         action_type: "extract",
         value: "About",
-        methods: [expect.objectContaining({ kind: "extract_shapes", shapes: [expect.objectContaining({ key: "about" })] })],
+        methods: [expect.objectContaining({ kind: "extract_shapes", shapes: [expect.objectContaining({ key: "about", extract_hints: "Keep only the summary paragraph." })] })],
       }),
     );
   });

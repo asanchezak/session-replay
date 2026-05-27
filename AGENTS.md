@@ -1,5 +1,11 @@
 # AGENTS.md — session-replay
 
+## Read first
+
+- `docs/recruitment-automation-flow.md` — source-of-truth runbook for the publish → daemon drive → applicant push → Easy Recruit scoring loop
+- `docs/next-iteration-plan.md` — ordered plan for daemon visibility, Odoo sync visibility, schema-driven extraction, and canonical structured applicant ingestion
+- `claude.md` — supplemental shorthand for operational traps that are easy to miss from code alone
+
 ## What this is
 
 Browser extension + Python backend that records, replays, self-heals, and syncs browser workflows with backend systems (first adapter: Odoo).
@@ -31,6 +37,41 @@ make dev-frontend     # Start just the frontend (port 5173)
 ```
 
 Port 8000 conflict: `easy-recruit-workflow` Docker project uses 8000. If `make dev` fails or routes show `/api/v1/job-requests`, stop it with `docker compose -p easy-recruit-workflow down` first.
+
+## LinkedIn integration
+
+- Flow: Odoo publish webhook → `POST /v1/webhooks/incoming/odoo/{connector_id}` → run `origin` metadata → daemon drives LinkedIn → run completes → `LinkedInApplicantPushService.push_from_run` POSTs to Odoo → `hr.applicant` created → Easy Recruit scores synchronously
+- Only runs with `origin.event_kind == "new_job_position"` trigger the LinkedIn applicant push hook
+- Odoo dedup is by `(job_id, profile_url)`; duplicate pushes return an exists response and do not overwrite the first applicant row
+- `backend/services/linkedin_applicant_push_service.py` uses long HTTP timeouts because Odoo scoring is synchronous
+
+## LinkedIn scraping
+
+- Current DOM assumption: profile top card name is in `h2` under `[data-view-name="profile-top-card"]`; section anchor ids like `#about` are not reliable
+- Experience, skills, education, certifications, projects, and similar sections may require visiting `/in/<slug>/details/<section>/`
+- LinkedIn labels are locale-dependent; English-only heading matching is brittle
+- Extension/browser E2E that loads the unpacked extension should prefer Playwright `channel: "chromium"`; recent Chrome builds can reject `--load-extension`
+
+## Easy Recruit / Odoo
+
+- Easy Recruit lives inside the Odoo `akodoo/akcr` module, not in a separate service
+- Odoo-side OpenAI config is separate from `session-replay`; inherited shell `OPENAI_*` vars can misroute Odoo calls
+- `linkedin_applicant_push_service.py` intentionally uses long timeouts because `_analyze_easy_recruit(force=True)` is synchronous per applicant
+
+## Services / operations
+
+- Installed-services mode is mixed: daemon under launchd, backend/frontend commonly under `screen`
+- Common ops: `make all-services-install`, `make all-services-uninstall`, `make all-services-restart`, `make services-status`, `make services-logs`
+- Restart discipline:
+  - daemon code change → `make daemon-restart`
+  - backend/frontend code change in installed-services mode → reinstall or restart those services; screen mode does not auto-reload
+- Browser-facing changes need live proof or E2E; API-only validation is not final acceptance
+
+## Config / keys
+
+- Backend gateway API key default: `dev-api-key-change-in-production` via `X-API-Key`
+- Frontend dashboard calls need `frontend/.env` with `VITE_API_KEY`; missing it produces auth failures in the UI
+- Odoo-side OpenAI settings live in Odoo config/parameters and should be treated independently from backend `AI_API_KEY`
 
 ## Centralized logging (Seq)
 
