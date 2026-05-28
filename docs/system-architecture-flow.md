@@ -108,6 +108,7 @@ flowchart TB
     %% ═══════════════════════════════════════════════
     SVC -.->|"step fail → heal"| AI
     AI -.->|"new selector"| DB
+```
 
 ## Flow Paths Summary
 
