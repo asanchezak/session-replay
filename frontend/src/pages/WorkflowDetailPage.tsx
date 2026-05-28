@@ -774,15 +774,17 @@ export default function WorkflowDetailPage() {
             setSavingTemplate(false);
           }
         };
+        const previewLen = preview.length;
+        const tooLong = previewLen > 300;
         return (
           <Card className="mb-4">
             <div className="flex items-start justify-between mb-3 gap-3">
               <div>
                 <h2 className="text-sm font-medium text-text-primary flex items-center gap-2">
-                  <MessageSquare size={14} /> Message Template
+                  <MessageSquare size={14} /> Outreach Message Template
                 </h2>
                 <p className="text-xs text-text-secondary mt-0.5">
-                  Used by step #{draftStepIndex} (open_message_drafts). Rendered per candidate at run time.
+                  Used by step #{draftStepIndex} — pastes a personalized Connect-with-note draft on each candidate's LinkedIn profile. LinkedIn caps the invitation note at 300 chars.
                 </p>
               </div>
               <div className="text-xs text-text-gray">
@@ -819,10 +821,22 @@ export default function WorkflowDetailPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] uppercase text-text-gray mb-1">
-                  Preview · synthetic candidate
-                </label>
-                <div className="w-full bg-bg-elevated border border-border rounded-md p-2.5 text-xs text-text-primary whitespace-pre-wrap min-h-[14rem]">
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[11px] uppercase text-text-gray">
+                    Preview · synthetic candidate
+                  </label>
+                  <span
+                    className="text-[11px] font-mono"
+                    style={{ color: tooLong ? "var(--color-error)" : "var(--color-text-gray)" }}
+                    title="LinkedIn caps connection-request notes at 300 chars. Drafts longer than this are truncated when pasted."
+                  >
+                    {previewLen}/300{tooLong ? " · will truncate" : ""}
+                  </span>
+                </div>
+                <div
+                  className="w-full bg-bg-elevated border rounded-md p-2.5 text-xs text-text-primary whitespace-pre-wrap min-h-[14rem]"
+                  style={{ borderColor: tooLong ? "var(--color-error)" : "var(--color-border)" }}
+                >
                   {preview || <span className="text-text-gray italic">(empty template)</span>}
                 </div>
               </div>

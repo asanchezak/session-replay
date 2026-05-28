@@ -197,6 +197,23 @@ interface RunDetail {
   linkedin_applicants?: LinkedInApplicant[];
 }
 
+interface OutreachTarget {
+  profile_url: string;
+  name: string;
+  headline?: string;
+  score?: number | null;
+  recommendation?: string | null;
+  odoo_url?: string | null;
+  rendered_message: string;
+}
+
+interface MessageTargetsResponse {
+  targets: OutreachTarget[];
+  template: string;
+  count: number;
+  skipped?: string;
+}
+
 interface LinkedInApplicant {
   id: number | null;
   name: string;
@@ -378,6 +395,21 @@ export default function RunDetailPage() {
     } catch {}
   }, [request]);
 
+  const [outreach, setOutreach] = useState<MessageTargetsResponse | null>(null);
+  const [outreachLoading, setOutreachLoading] = useState(false);
+  const fetchOutreach = useCallback(async () => {
+    if (!runId) return;
+    setOutreachLoading(true);
+    try {
+      const data = await request<MessageTargetsResponse>("GET", `/runs/${runId}/message-targets`);
+      setOutreach(data);
+    } catch (e) {
+      console.error("fetch message-targets failed", e);
+    } finally {
+      setOutreachLoading(false);
+    }
+  }, [runId, request]);
+
   const [refreshingApplicants, setRefreshingApplicants] = useState(false);
   const refreshApplicants = useCallback(async () => {
     if (!runId) return;
@@ -407,6 +439,12 @@ export default function RunDetailPage() {
     setLoading(true);
     Promise.all([fetchRun(), fetchEvents(), fetchOutcomes()]).finally(() => setLoading(false));
   }, [runId]);
+
+  useEffect(() => {
+    if (run?.origin?.event_kind === "new_job_position" && !outreach) {
+      fetchOutreach();
+    }
+  }, [run?.origin?.event_kind, outreach, fetchOutreach]);
 
   useEffect(() => {
     if (run?.workflow_id && !workflow) {
@@ -988,6 +1026,107 @@ export default function RunDetailPage() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {run.origin?.event_kind === "new_job_position" && (
+        <Card className="mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-medium text-text-primary">Outreach Drafts</h2>
+              <p className="text-xs text-text-secondary mt-0.5">
+                Per-candidate LinkedIn Connect-with-note text rendered from the workflow's template
+                {outreach?.count ? ` · ${outreach.count} draft${outreach.count === 1 ? "" : "s"}` : ""}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={fetchOutreach}
+              disabled={outreachLoading}
+              className="text-xs px-2 py-1 rounded-md border border-border hover:bg-bg-elevated text-text-primary disabled:opacity-50 flex items-center gap-1.5"
+            >
+              <RefreshCw size={12} className={outreachLoading ? "animate-spin" : ""} />
+              {outreachLoading ? "Loading…" : "Reload"}
+            </button>
+          </div>
+          {outreach?.skipped === "no_template" ? (
+            <div className="text-xs text-text-secondary py-4 text-center">
+              This workflow has no message template configured.{" "}
+              <a href={`/workflows/${run.workflow_id}`} className="text-info hover:underline">
+                Configure template →
+              </a>
+            </div>
+          ) : !outreach || outreach.targets.length === 0 ? (
+            <div className="text-xs text-text-secondary py-4 text-center">
+              {outreachLoading ? "Fetching drafts…" : "No drafts yet — drafts appear once profiles are extracted."}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              {outreach.targets.map((t, idx) => {
+                const tooLong = t.rendered_message.length > 300;
+                return (
+                  <div
+                    key={`${t.profile_url}-${idx}`}
+                    className="rounded-md border border-border bg-bg-elevated p-3"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <div>
+                        <div className="text-sm text-text-primary font-medium">{t.name || "(unnamed)"}</div>
+                        {t.headline && (
+                          <div className="text-[11px] text-text-gray line-clamp-1 max-w-[24rem]" title={t.headline}>
+                            {t.headline}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col items-end gap-0.5">
+                        {typeof t.score === "number" && (
+                          <span
+                            className="text-[11px] font-mono"
+                            style={{
+                              color:
+                                t.score >= 8 ? "var(--color-success)" :
+                                t.score >= 6 ? "var(--color-info)" :
+                                t.score >= 4 ? "var(--color-warning)" :
+                                "var(--color-error)",
+                            }}
+                          >
+                            {t.score}/10
+                          </span>
+                        )}
+                        {t.recommendation && (
+                          <span className="text-[11px] text-text-secondary">{t.recommendation}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-xs text-text-primary whitespace-pre-wrap mb-2 border border-border/60 rounded bg-bg p-2 font-mono">
+                      {t.rendered_message || <span className="text-text-gray italic">(empty)</span>}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span
+                        className="font-mono"
+                        style={{ color: tooLong ? "var(--color-error)" : "var(--color-text-gray)" }}
+                        title="LinkedIn note limit is 300 chars; longer notes are truncated when pasted."
+                      >
+                        {t.rendered_message.length}/300 chars{tooLong ? " · truncated on paste" : ""}
+                      </span>
+                      <div className="flex gap-2">
+                        {t.profile_url && (
+                          <a href={t.profile_url} target="_blank" rel="noreferrer" className="text-info hover:underline">
+                            LinkedIn
+                          </a>
+                        )}
+                        {t.odoo_url && (
+                          <a href={t.odoo_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                            Odoo
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </Card>

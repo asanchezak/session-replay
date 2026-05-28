@@ -36,6 +36,8 @@ async function fetchMessageTargets(id) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Connection-Request-with-Note flow — see live-linkedin-driver.mjs for
+// the canonical comment.
 async function composeDraftInPage(page, message) {
   try {
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
@@ -47,83 +49,106 @@ async function composeDraftInPage(page, message) {
   } catch {
     return { ok: false, reason: "top_card_not_found" };
   }
-  const clicked = await page.evaluate(() => {
-    const tokens = ["message", "mensaje", "send a message", "enviar mensaje", "inmail"];
-    const lower = (s) => (s || "").trim().toLowerCase();
-    const inGlobalNav = (el) => {
+  const trimmed = (message || "").slice(0, 300);
+  return page.evaluate(async (msg) => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function inGlobalNav(el) {
       if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
-      // The /messaging/ anchor IS the navbar messaging link (no role=button,
-      // navigates away). Skip any anchor whose href points there.
       if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
       return false;
-    };
-    const scopes = [];
-    const top = document.querySelector('[data-view-name="profile-top-card"]');
-    if (top) scopes.push(top);
-    const main = document.querySelector("main");
-    if (main) scopes.push(main);
-    if (!scopes.length) scopes.push(document.body);
-    for (const scope of scopes) {
-      const aria = Array.from(scope.querySelectorAll('button[aria-label], a[aria-label]'));
+    }
+    // CRITICAL scoping: only the profile's own top-card. "main" includes
+    // the "People you may know" sidebar, whose Connect buttons fire
+    // invitations INSTANTLY (no modal) — clicking those would send
+    // unintended connection requests to the wrong people.
+    const topCard = document.querySelector('[data-view-name="profile-top-card"]');
+    function findActionButton(tokens, scope) {
+      if (!scope) return null;
+      const aria = Array.from(scope.querySelectorAll("button[aria-label], a[aria-label]"));
       for (const el of aria) {
         if (inGlobalNav(el)) continue;
-        const l = lower(el.getAttribute("aria-label"));
+        const l = (el.getAttribute("aria-label") || "").toLowerCase().trim();
         if (!l) continue;
         for (const t of tokens) {
-          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…")) {
-            el.scrollIntoView({ block: "center" }); el.click(); return true;
-          }
+          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…") || l.includes(" " + t + " ")) return el;
         }
       }
-      const buttons = Array.from(scope.querySelectorAll('button, a[role="button"]'));
-      for (const el of buttons) {
+      const others = Array.from(scope.querySelectorAll('button, a[role="button"], div[role="button"], li[role="menuitem"]'));
+      for (const el of others) {
         if (inGlobalNav(el)) continue;
-        const t = lower(el.innerText || el.textContent);
+        const t = (el.innerText || el.textContent || "").trim().toLowerCase();
         if (!t) continue;
         for (const tok of tokens) {
-          if (t === tok || t.startsWith(tok)) {
-            el.scrollIntoView({ block: "center" }); el.click(); return true;
-          }
+          if (t === tok || t.startsWith(tok)) return el;
         }
       }
+      return null;
     }
-    return false;
-  });
-  if (!clicked) return { ok: false, reason: "no_message_button" };
-  try {
-    await page.waitForFunction(() => {
-      const dialogs = document.querySelectorAll('[role="dialog"]');
-      for (const d of dialogs) if (d.querySelector('[contenteditable="true"]')) return true;
-      return false;
-    }, { timeout: 10000 });
-  } catch {
-    return { ok: false, reason: "dialog_did_not_open" };
-  }
-  return page.evaluate((msg) => {
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-    let editor = null;
-    for (const d of dialogs) {
-      const e = d.querySelector('.msg-form__contenteditable[contenteditable="true"], [contenteditable="true"]');
-      if (e) { editor = e; break; }
+    function findInOpenMenus(tokens) {
+      // After clicking "More", LinkedIn renders a [role="menu"] or
+      // [aria-expanded] dropdown. Look in any open one.
+      const menus = Array.from(document.querySelectorAll('[role="menu"], [aria-expanded="true"] + *, .artdeco-dropdown__content'));
+      for (const m of menus) {
+        const found = findActionButton(tokens, m);
+        if (found) return found;
+      }
+      return null;
     }
-    if (!editor) return { ok: false, reason: "editor_missing" };
-    editor.focus();
-    try {
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-    } catch {}
-    let inserted = false;
-    try { inserted = document.execCommand("insertText", false, msg); } catch { inserted = false; }
-    if (!inserted) {
-      editor.textContent = msg;
-      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    async function waitFor(fn, timeoutMs, poll = 200) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const v = fn();
+        if (v) return v;
+        await sleep(poll);
+      }
+      return null;
     }
-    editor.dispatchEvent(new Event("change", { bubbles: true }));
+    if (!topCard) return { ok: false, reason: "top_card_not_found" };
+    // Detect already-sent invitations so we don't try to re-connect.
+    const pendingTokens = ["pending", "pendiente", "invitation sent", "invitación enviada"];
+    if (findActionButton(pendingTokens, topCard)) return { ok: false, reason: "already_pending" };
+
+    const connectTokens = ["connect", "conectar", "invitar", "invite", "vincular"];
+    const moreTokens = ["more", "más", "mas"];
+    let connectBtn = findActionButton(connectTokens, topCard);
+    if (!connectBtn) {
+      const more = findActionButton(moreTokens, topCard);
+      if (more) {
+        try { more.scrollIntoView({ block: "center" }); more.click(); } catch {}
+        await sleep(600);
+        connectBtn = await waitFor(() => findInOpenMenus(connectTokens), 5000);
+      }
+    }
+    if (!connectBtn) return { ok: false, reason: "no_connect_button" };
+    try { connectBtn.scrollIntoView({ block: "center" }); connectBtn.click(); } catch {}
+    const dialog = await waitFor(() => {
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      for (const d of dialogs) {
+        const txt = (d.innerText || "").toLowerCase();
+        if (/invit|connect|conectar|personaliz/.test(txt)) return d;
+      }
+      return null;
+    }, 8000);
+    if (!dialog) return { ok: false, reason: "connect_modal_did_not_open" };
+    const addNote = Array.from(dialog.querySelectorAll('button, a[role="button"]')).find((b) => {
+      const t = (b.innerText || b.textContent || "").trim().toLowerCase();
+      return t.includes("add a note") || t.includes("añadir nota") || t.includes("personalizar") || t.includes("personalize");
+    });
+    if (addNote) { try { addNote.click(); } catch {} await sleep(400); }
+    const textarea = await waitFor(() => dialog.querySelector(
+      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i], textarea'
+    ), 6000);
+    if (!textarea) return { ok: false, reason: "note_textarea_missing" };
+    textarea.focus();
+    textarea.value = "";
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    if (setter) setter.call(textarea, msg);
+    else textarea.value = msg;
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(200);
     return { ok: true };
-  }, message);
+  }, trimmed);
 }
 
 async function main() {

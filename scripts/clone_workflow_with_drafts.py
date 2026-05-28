@@ -32,15 +32,13 @@ from core.models.workflow import Workflow, WorkflowStep  # noqa: E402
 # still report a clear error if the column layout drifts.
 
 
-DEFAULT_MESSAGE_TEMPLATE = """\
-Hi {{candidate_name}},
-
-I came across your profile — {{candidate_headline}} — and your background looks like a strong match for our {{job_title}} role at {{company}}, {{job_location}}.
-
-Here are the details if you'd like to take a look: {{job_url}}
-
-Would you be open to a quick conversation?
-"""
+# LinkedIn caps connection-request notes at 300 chars. Keep the default
+# well under that so candidate name + headline substitutions still fit.
+DEFAULT_MESSAGE_TEMPLATE = (
+    "Hi {{candidate_name}}, your background ({{candidate_headline}}) looks "
+    "like a strong match for our {{job_title}} role at {{company}}. "
+    "Open to a quick chat?"
+)
 
 
 def _build_open_message_drafts_step(step_index: int) -> dict:

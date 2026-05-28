@@ -146,11 +146,12 @@ async function fetchMessageTargets(runId) {
  * compose dialog, and types the rendered draft into the contenteditable.
  * Does NOT click send.
  */
+// Connection-Request-with-Note flow. LinkedIn's direct Message button
+// is gated on 1st-degree connections / InMail; Connect is available on
+// almost any profile and exposes an "Add a note" textarea (300-char
+// limit) that the recipient sees when accepting. Open the modal, paste
+// the rendered outreach text, do NOT click Send.
 async function composeDraftInPage(page, message) {
-  // Wait for the profile top card. LinkedIn 2025 sometimes uses
-  // `data-view-name="profile-top-card"`, older renders use
-  // `section[componentkey*="Topcard"]`. Hydration is slow on a fresh
-  // tab — give it 35s and nudge with a scroll.
   try {
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
     await page.evaluate(() => window.scrollTo(0, 200)).catch(() => {});
@@ -162,100 +163,108 @@ async function composeDraftInPage(page, message) {
     return { ok: false, reason: "top_card_not_found" };
   }
 
-  // Find and click the Message button (aria-label or text, locale-aware).
-  const clicked = await page.evaluate(() => {
-    const tokens = ["message", "mensaje", "send a message", "enviar mensaje", "inmail"];
-    const lower = (s) => (s || "").trim().toLowerCase();
-    const inGlobalNav = (el) => {
+  const trimmed = (message || "").slice(0, 300);
+  return page.evaluate(async (msg) => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function inGlobalNav(el) {
       if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
       if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
       return false;
-    };
-    const scopes = [];
-    const top = document.querySelector('[data-view-name="profile-top-card"]');
-    if (top) scopes.push(top);
-    const main = document.querySelector("main");
-    if (main) scopes.push(main);
-    if (!scopes.length) scopes.push(document.body);
-    for (const scope of scopes) {
-      const aria = Array.from(scope.querySelectorAll('button[aria-label], a[aria-label]'));
+    }
+    // CRITICAL: scope only to the profile's own top-card. "main"
+    // includes "People you may know" whose Connect buttons fire
+    // invitations INSTANTLY (no modal) — wrong people would be invited.
+    const topCard = document.querySelector('[data-view-name="profile-top-card"]');
+    function findActionButton(tokens, scope) {
+      if (!scope) return null;
+      const aria = Array.from(scope.querySelectorAll("button[aria-label], a[aria-label]"));
       for (const el of aria) {
         if (inGlobalNav(el)) continue;
-        const l = lower(el.getAttribute("aria-label"));
+        const l = (el.getAttribute("aria-label") || "").toLowerCase().trim();
         if (!l) continue;
         for (const t of tokens) {
-          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…")) {
-            el.scrollIntoView({ block: "center" });
-            el.click();
-            return true;
-          }
+          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…") || l.includes(" " + t + " ")) return el;
         }
       }
-      const buttons = Array.from(scope.querySelectorAll('button, a[role="button"]'));
-      for (const el of buttons) {
+      const others = Array.from(scope.querySelectorAll('button, a[role="button"], div[role="button"], li[role="menuitem"]'));
+      for (const el of others) {
         if (inGlobalNav(el)) continue;
-        const t = lower(el.innerText || el.textContent);
+        const t = (el.innerText || el.textContent || "").trim().toLowerCase();
         if (!t) continue;
         for (const tok of tokens) {
-          if (t === tok || t.startsWith(tok)) {
-            el.scrollIntoView({ block: "center" });
-            el.click();
-            return true;
-          }
+          if (t === tok || t.startsWith(tok)) return el;
         }
       }
+      return null;
     }
-    return false;
-  });
-  if (!clicked) return { ok: false, reason: "no_message_button" };
+    function findInOpenMenus(tokens) {
+      const menus = Array.from(document.querySelectorAll('[role="menu"], [aria-expanded="true"] + *, .artdeco-dropdown__content'));
+      for (const m of menus) {
+        const f = findActionButton(tokens, m);
+        if (f) return f;
+      }
+      return null;
+    }
+    async function waitFor(fn, timeoutMs, poll = 200) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const v = fn();
+        if (v) return v;
+        await sleep(poll);
+      }
+      return null;
+    }
+    if (!topCard) return { ok: false, reason: "top_card_not_found" };
+    const pendingTokens = ["pending", "pendiente", "invitation sent", "invitación enviada"];
+    if (findActionButton(pendingTokens, topCard)) return { ok: false, reason: "already_pending" };
 
-  // Wait for the compose dialog (any [role=dialog] that contains a contenteditable).
-  try {
-    await page.waitForFunction(() => {
-      const dialogs = document.querySelectorAll('[role="dialog"]');
+    const connectTokens = ["connect", "conectar", "invitar", "invite", "vincular"];
+    const moreTokens = ["more", "más", "mas"];
+    let connectBtn = findActionButton(connectTokens, topCard);
+    if (!connectBtn) {
+      const more = findActionButton(moreTokens, topCard);
+      if (more) {
+        try { more.scrollIntoView({ block: "center" }); more.click(); } catch {}
+        await sleep(600);
+        connectBtn = await waitFor(() => findInOpenMenus(connectTokens), 5000);
+      }
+    }
+    if (!connectBtn) return { ok: false, reason: "no_connect_button" };
+    try { connectBtn.scrollIntoView({ block: "center" }); connectBtn.click(); } catch {}
+
+    const dialog = await waitFor(() => {
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
       for (const d of dialogs) {
-        if (d.querySelector('[contenteditable="true"]')) return true;
+        const txt = (d.innerText || "").toLowerCase();
+        if (/invit|connect|conectar|personaliz/.test(txt)) return d;
       }
-      return false;
-    }, { timeout: 8000 });
-  } catch {
-    return { ok: false, reason: "dialog_did_not_open" };
-  }
+      return null;
+    }, 8000);
+    if (!dialog) return { ok: false, reason: "connect_modal_did_not_open" };
 
-  const typed = await page.evaluate((msg) => {
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-    let editor = null;
-    for (const d of dialogs) {
-      const e = d.querySelector('.msg-form__contenteditable[contenteditable="true"], [contenteditable="true"]');
-      if (e) {
-        editor = e;
-        break;
-      }
-    }
-    if (!editor) return { ok: false, reason: "editor_missing" };
-    editor.focus();
-    try {
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-    } catch {}
-    let inserted = false;
-    try {
-      inserted = document.execCommand("insertText", false, msg);
-    } catch {
-      inserted = false;
-    }
-    if (!inserted) {
-      editor.textContent = msg;
-      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
-    }
-    editor.dispatchEvent(new Event("change", { bubbles: true }));
+    const addNote = Array.from(dialog.querySelectorAll('button, a[role="button"]')).find((b) => {
+      const t = (b.innerText || b.textContent || "").trim().toLowerCase();
+      return t.includes("add a note") || t.includes("añadir nota") || t.includes("personalizar") || t.includes("personalize");
+    });
+    if (addNote) { try { addNote.click(); } catch {} await sleep(400); }
+
+    const textarea = await waitFor(() => dialog.querySelector(
+      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i], textarea'
+    ), 6000);
+    if (!textarea) return { ok: false, reason: "note_textarea_missing" };
+
+    textarea.focus();
+    textarea.value = "";
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    if (setter) setter.call(textarea, msg);
+    else textarea.value = msg;
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(200);
     return { ok: true };
-  }, message);
-  return typed;
+  }, trimmed);
 }
+
 
 // ── Stealth init script ─────────────────────────────────────────────────────
 

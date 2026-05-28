@@ -1,15 +1,24 @@
 /**
  * Function injected via chrome.scripting.executeScript into a LinkedIn
- * profile page. Locates the "Message" / "Mensaje" button, opens the
- * compose dialog, and pastes the rendered outreach message into the
- * contenteditable. DOES NOT click send.
+ * profile page. Opens a Connection-Request-with-Note draft for the
+ * candidate, pastes the rendered outreach text into the note textarea,
+ * and STOPS — it never clicks Send.
  *
- * Returned shape: {ok: true} on success; {ok: false, reason: string}
- * on graceful failure (e.g., not a 1st-degree connection, button
- * missing, dialog never opened).
+ * Why Connect-with-Note instead of direct Message: LinkedIn only exposes
+ * the Message button to 1st-degree connections (or paid InMail). Connect
+ * is available on almost any profile, and the optional "Add a note"
+ * textarea (300-char limit) carries a personalized message that the
+ * recipient sees when accepting the invitation.
  *
- * Must be pure (no closures over module state) — executeScript serializes
- * it before injection.
+ * Return shape:
+ *   {ok: true}                              — note pasted, awaiting Send
+ *   {ok: false, reason: "<short token>"}    — graceful failure (no
+ *                                              Connect button, modal
+ *                                              didn't open, textarea
+ *                                              missing, etc.)
+ *
+ * Pure (no closures over module state) — executeScript serializes the
+ * function before injection.
  */
 export async function openMessageComposerAndType(
   message: string,
@@ -26,124 +35,152 @@ export async function openMessageComposerAndType(
     return null;
   }
 
-  // 1) Wait for the profile to land. LinkedIn 2025 puts the top card
-  //    under [data-view-name="profile-top-card"] regardless of locale.
-  const topCard = await waitFor(
-    () => document.querySelector<HTMLElement>('[data-view-name="profile-top-card"]'),
-    15000,
+  function inGlobalNav(el: Element): boolean {
+    if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
+    if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
+    return false;
+  }
+
+  function findActionButton(tokens: string[], scope: Element | null): HTMLElement | null {
+    if (!scope) return null;
+    const ariaEls = Array.from(
+      scope.querySelectorAll<HTMLElement>("button[aria-label], a[aria-label]"),
+    );
+    for (const el of ariaEls) {
+      if (inGlobalNav(el)) continue;
+      const label = (el.getAttribute("aria-label") || "").toLowerCase().trim();
+      if (!label) continue;
+      for (const tok of tokens) {
+        if (label === tok || label.startsWith(tok + " ") || label.startsWith(tok + "…") || label.includes(" " + tok + " ")) {
+          return el;
+        }
+      }
+    }
+    const textEls = Array.from(
+      scope.querySelectorAll<HTMLElement>('button, a[role="button"], div[role="button"], li[role="menuitem"]'),
+    );
+    for (const el of textEls) {
+      if (inGlobalNav(el)) continue;
+      const t = (el.innerText || el.textContent || "").trim().toLowerCase();
+      if (!t) continue;
+      for (const tok of tokens) {
+        if (t === tok || t.startsWith(tok)) {
+          return el;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findInOpenMenus(tokens: string[]): HTMLElement | null {
+    const menus = Array.from(document.querySelectorAll<HTMLElement>('[role="menu"], [aria-expanded="true"] + *, .artdeco-dropdown__content'));
+    for (const m of menus) {
+      const found = findActionButton(tokens, m);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // 1) Wait for profile to render.
+  const topCard = await waitFor<HTMLElement>(
+    () =>
+      document.querySelector<HTMLElement>('[data-view-name="profile-top-card"]')
+      || document.querySelector<HTMLElement>('section[componentkey*="Topcard"]')
+      || document.querySelector<HTMLElement>('main h1, main h2'),
+    20000,
   );
   if (!topCard) return { ok: false, reason: "top_card_not_found" };
 
-  // 2) Locate the Message button. Restrict to the profile <main>/top-card
-  //    region so we don't click LinkedIn's global navbar "Messaging" link,
-  //    which navigates to /messaging/ and never opens the compose dialog.
-  //    "Message" / "Mensaje" / "Send a message" / "Enviar mensaje".
-  const localeTokens = ["message", "mensaje", "send a message", "enviar mensaje", "inmail"];
-  function findMessageButton(): HTMLElement | null {
-    const profileScopes: Element[] = [];
-    const topCardScope = document.querySelector('[data-view-name="profile-top-card"]');
-    if (topCardScope) profileScopes.push(topCardScope);
-    const mainScope = document.querySelector("main");
-    if (mainScope) profileScopes.push(mainScope);
-    if (!profileScopes.length) profileScopes.push(document.body);
-    function inGlobalNav(el: Element): boolean {
-      if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
-      // The persistent "/messaging/" anchor in the navbar matches our text
-      // tokens — exclude it explicitly so we don't navigate away.
-      if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
-      return false;
+  // 2) Find Connect button — strictly scoped to the profile's top-card
+  //    so we don't trip the "People you may know" sidebar Connect buttons
+  //    (those fire invitations INSTANTLY, no modal, wrong recipient).
+  const profileTopCard = document.querySelector<HTMLElement>(
+    '[data-view-name="profile-top-card"]',
+  );
+  if (!profileTopCard) return { ok: false, reason: "top_card_not_found" };
+
+  const pendingTokens = ["pending", "pendiente", "invitation sent", "invitación enviada"];
+  if (findActionButton(pendingTokens, profileTopCard)) return { ok: false, reason: "already_pending" };
+
+  const connectTokens = ["connect", "conectar", "invitar", "invite", "vincular"];
+  const moreTokens = ["more", "más", "mas"];
+
+  let connectBtn = findActionButton(connectTokens, profileTopCard);
+  if (!connectBtn) {
+    const more = findActionButton(moreTokens, profileTopCard);
+    if (more) {
+      try {
+        more.scrollIntoView({ block: "center" });
+        more.click();
+      } catch {}
+      await sleep(600);
+      connectBtn = await waitFor<HTMLElement>(() => findInOpenMenus(connectTokens), 5000);
     }
-    for (const scope of profileScopes) {
-      const ariaCandidates = Array.from(
-        scope.querySelectorAll<HTMLElement>("button[aria-label], a[aria-label]"),
-      );
-      for (const el of ariaCandidates) {
-        if (inGlobalNav(el)) continue;
-        const label = (el.getAttribute("aria-label") || "").toLowerCase().trim();
-        if (!label) continue;
-        for (const tok of localeTokens) {
-          if (label === tok || label.startsWith(tok + " ") || label.startsWith(tok + "…")) {
-            return el;
-          }
-        }
-      }
-      const textCandidates = Array.from(
-        scope.querySelectorAll<HTMLElement>(
-          'button, a[role="button"], .pvs-profile-actions button',
-        ),
-      );
-      for (const el of textCandidates) {
-        if (inGlobalNav(el)) continue;
-        const t = (el.innerText || el.textContent || "").trim().toLowerCase();
-        if (!t) continue;
-        for (const tok of localeTokens) {
-          if (t === tok || t.startsWith(tok)) {
-            return el;
-          }
-        }
-      }
-    }
-    return null;
   }
+  if (!connectBtn) return { ok: false, reason: "no_connect_button" };
 
-  const button = await waitFor(findMessageButton, 8000);
-  if (!button) return { ok: false, reason: "no_message_button" };
-
-  // Scroll into view and click. Some LinkedIn buttons require a real
-  // PointerEvent; .click() works in our manual tests but fall back if not.
   try {
-    button.scrollIntoView({ block: "center" });
-    button.click();
-  } catch {
-    /* ignore */
-  }
+    connectBtn.scrollIntoView({ block: "center" });
+    connectBtn.click();
+  } catch {}
 
-  // 3) Wait for the compose dialog to render. LinkedIn uses role=dialog
-  //    with a msg-form contenteditable inside.
+  // 3) Wait for the invitation modal. LinkedIn renders it as
+  //    role="dialog" with a heading "Add a note to your invitation"
+  //    (or the Spanish equivalent "Personaliza tu invitación").
   const dialog = await waitFor<HTMLElement>(() => {
     const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'));
     for (const d of dialogs) {
-      if (d.querySelector('[contenteditable="true"]')) return d;
+      const txt = (d.innerText || "").toLowerCase();
+      if (/invit|connect|conectar|personaliz/i.test(txt)) return d;
     }
     return null;
   }, 8000);
-  if (!dialog) return { ok: false, reason: "dialog_did_not_open" };
+  if (!dialog) return { ok: false, reason: "connect_modal_did_not_open" };
 
-  const editor =
-    dialog.querySelector<HTMLElement>(".msg-form__contenteditable[contenteditable='true']") ||
-    dialog.querySelector<HTMLElement>('[contenteditable="true"]');
-  if (!editor) return { ok: false, reason: "editor_missing" };
-
-  // 4) Focus + type. Mirrors extension/src/content/replay.ts:simulateType
-  //    contenteditable branch. execCommand still works in Chrome despite
-  //    being legacy — it's the only API that fires React synthetic input
-  //    events correctly for LinkedIn's framework.
-  editor.focus();
-  // Clear any auto-filled placeholder or stale draft via select-all.
-  try {
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-  } catch {
-    /* ignore */
+  // 4) If a "Send without a note" / "Add a note" toggle is present, click
+  //    "Add a note" to reveal the textarea. The textarea is sometimes
+  //    visible immediately; in that case the click is a no-op.
+  const addNote = Array.from(
+    dialog.querySelectorAll<HTMLElement>('button, a[role="button"]'),
+  ).find((b) => {
+    const t = (b.innerText || b.textContent || "").trim().toLowerCase();
+    return t.includes("add a note")
+      || t.includes("añadir nota")
+      || t.includes("personalizar")
+      || t.includes("personalize")
+      || t === "add a note";
+  });
+  if (addNote) {
+    try { addNote.click(); } catch {}
+    await sleep(400);
   }
 
-  let inserted = false;
-  try {
-    inserted = document.execCommand("insertText", false, message);
-  } catch {
-    inserted = false;
-  }
-  if (!inserted) {
-    // Fallback: textContent + InputEvent dispatch.
-    editor.textContent = message;
-    editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
-  }
-  editor.dispatchEvent(new Event("change", { bubbles: true }));
+  // 5) Locate the textarea. LinkedIn uses <textarea id="custom-message">
+  //    historically, but the id changes; selector falls back to any
+  //    visible <textarea> inside the dialog.
+  const textarea = await waitFor<HTMLTextAreaElement>(() => {
+    const t = dialog.querySelector<HTMLTextAreaElement>(
+      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i], textarea',
+    );
+    return t || null;
+  }, 6000);
+  if (!textarea) return { ok: false, reason: "note_textarea_missing" };
 
-  // Tiny settle so React commits the new value before the next tab opens.
+  // 6) Paste the message. Cap at 300 chars (LinkedIn's hard limit on
+  //    invitation notes).
+  const trimmed = (message || "").slice(0, 300);
+  textarea.focus();
+  textarea.value = "";
+  // Use the native setter so React/Vue see the change.
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  if (nativeSetter) nativeSetter.call(textarea, trimmed);
+  else textarea.value = trimmed;
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.dispatchEvent(new Event("change", { bubbles: true }));
+
   await sleep(250);
 
   return { ok: true };
