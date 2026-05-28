@@ -299,9 +299,7 @@ flowchart TB
                 validate connection"]
         end
 
-        DB[(("PostgreSQL
-            JSONB columns
-            Alembic migrations"))]
+        DB[("PostgreSQL<br/>JSONB columns<br/>Alembic migrations")]
         ART_STORE[("Artifact Store
             fsspec abstraction
             S3/MinIO/local disk")]
