@@ -9,7 +9,10 @@
  *   logger.userAction("WorkflowsPage", "click_row", { workflowId: "wf-1" });
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || "/v1";
+const API_BASE =
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  "/v1";
 const API_KEY = import.meta.env.VITE_API_KEY;
 
 type LogLevel = "verbose" | "debug" | "info" | "warn" | "error" | "fatal";

@@ -87,6 +87,39 @@ async def test_expand_for_each_basic(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_expand_for_each_uses_origin_candidate_count_when_param_unresolved(
+    db_session: AsyncSession,
+):
+    inner = [
+        {"action_type": "navigate", "value": "$item", "intent": "Open profile"},
+        {"action_type": "extract", "value": "About", "methods": [{"kind": "extract_shapes", "shapes": []}]},
+    ]
+    snapshot_steps = [
+        {"step_index": 0, "action_type": "navigate", "value": "https://x/search?keywords=js"},
+        {"step_index": 1, "action_type": "extract", "value": "profile_urls", "methods": []},
+        {**_for_each_step([{"step_index": 1, "field": "profile_urls"}], inner), "step_index": 2},
+    ]
+    svc, run_id = await _seed_run_with_snapshot(db_session, snapshot_steps, resolved_params={})
+    run = await svc.get_run(run_id)
+    run.origin = {"job_payload": {"candidate_count": "3"}}
+    flag_modified(run, "origin")
+    await db_session.flush()
+
+    audit = AuditService(db_session)
+    await audit.append(AppendEvent(
+        event_type="extraction",
+        payload={"step_index": 1, "data": [{"profile_urls": ["A", "B", "C", "D"]}]},
+        run_id=run_id,
+    ))
+    await db_session.flush()
+
+    result = await svc.expand_for_each(run_id, 2)
+    assert result["items"] == ["A", "B", "C"]
+    assert result["iterations"] == 3
+    assert len(result["steps"]) == 9
+
+
+@pytest.mark.asyncio
 async def test_expand_for_each_multiple_sources_dedupes(db_session: AsyncSession):
     inner = [{"action_type": "navigate", "value": "$item"}]
     snapshot_steps = [

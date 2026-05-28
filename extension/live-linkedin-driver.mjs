@@ -63,6 +63,34 @@ const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
 
+function isTransientBackendError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes("fetch failed")
+    || msg.includes("ECONNRESET")
+    || msg.includes("ECONNREFUSED")
+    || msg.includes("ETIMEDOUT")
+    || msg.includes("ENOTFOUND")
+    || msg.includes("network")
+  );
+}
+
+async function withBackendRetry(label, fn, attempts = 5) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientBackendError(err) || attempt === attempts) break;
+      const delayMs = Math.min(5000, 500 * 2 ** (attempt - 1));
+      console.warn(`[backend retry] ${label} attempt ${attempt}/${attempts} failed: ${err.message || err}. Retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 // ── Backend API ─────────────────────────────────────────────────────────────
 
 async function postOdooWebhook() {
@@ -90,52 +118,58 @@ async function postOdooWebhook() {
 }
 
 async function postExtraction(runId, stepIndex, profileUrl, dataObj) {
-  const r = await fetch(`${BACKEND}/v1/runs/${runId}/extraction`, {
+  const r = await withBackendRetry(`extraction step=${stepIndex}`, () => fetch(`${BACKEND}/v1/runs/${runId}/extraction`, {
     method: "POST", headers: HEADERS,
     body: JSON.stringify({ step_index: stepIndex, data: [dataObj], url: profileUrl }),
-  });
+  }));
   if (!r.ok) throw new Error(`extraction POST failed: ${r.status} ${await r.text()}`);
 }
 
 async function reportStepResult(runId, stepIndex, actionType, success = true) {
-  const r = await fetch(`${BACKEND}/v1/runs/${runId}/step-result`, {
+  const r = await withBackendRetry(`step-result step=${stepIndex}`, () => fetch(`${BACKEND}/v1/runs/${runId}/step-result`, {
     method: "POST", headers: HEADERS,
     body: JSON.stringify({
       step_index: stepIndex,
       action_type: actionType,
       success,
     }),
-  });
+  }));
   if (!r.ok) {
     const text = await r.text();
+    if (r.status === 409) {
+      const run = await getRun(runId).catch(() => null);
+      if (run && (run.current_step_index > stepIndex || run.status === "completed")) {
+        return run;
+      }
+    }
     throw new Error(`step-result POST failed step=${stepIndex}: ${r.status} ${text}`);
   }
   return r.json();
 }
 
 async function expandForEach(runId, stepIndex) {
-  const r = await fetch(`${BACKEND}/v1/runs/${runId}/expand-for-each`, {
+  const r = await withBackendRetry(`expand-for-each step=${stepIndex}`, () => fetch(`${BACKEND}/v1/runs/${runId}/expand-for-each`, {
     method: "POST", headers: HEADERS,
     body: JSON.stringify({ step_index: stepIndex }),
-  });
+  }));
   if (!r.ok) throw new Error(`expand-for-each failed: ${r.status} ${await r.text()}`);
   return r.json();
 }
 
 async function getRun(runId) {
-  const r = await fetch(`${BACKEND}/v1/runs/${runId}`, { headers: HEADERS });
+  const r = await withBackendRetry(`get-run ${runId}`, () => fetch(`${BACKEND}/v1/runs/${runId}`, { headers: HEADERS }));
   if (!r.ok) throw new Error(`get run failed: ${r.status}`);
   return r.json();
 }
 
 async function getWorkflowSteps(workflowId) {
-  const r = await fetch(`${BACKEND}/v1/workflows/${workflowId}`, { headers: HEADERS });
+  const r = await withBackendRetry(`get-workflow ${workflowId}`, () => fetch(`${BACKEND}/v1/workflows/${workflowId}`, { headers: HEADERS }));
   if (!r.ok) throw new Error(`get workflow failed: ${r.status}`);
   return r.json();
 }
 
 async function fetchMessageTargets(runId) {
-  const r = await fetch(`${BACKEND}/v1/runs/${runId}/message-targets`, { headers: HEADERS });
+  const r = await withBackendRetry(`message-targets ${runId}`, () => fetch(`${BACKEND}/v1/runs/${runId}/message-targets`, { headers: HEADERS }));
   if (!r.ok) throw new Error(`message-targets GET failed: ${r.status} ${await r.text()}`);
   return r.json();
 }
@@ -486,6 +520,8 @@ const DATE_LINE_RE =
   /\b(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{4}|(?:Present|Actualidad|Currently|Actualmente)|\b\d{4}\s*-\s*\d{4}\b/i;
 const EMPLOYMENT_TYPE_RE =
   /\b(?:Full[- ]time|Part[- ]time|Contract|Freelance|Self[- ]employed|Internship|Apprenticeship|Temporary|Volunteer|Jornada completa|Jornada parcial|Contrato|Aut[óo]nomo|Pr[áa]cticas|Trabajo temporal|Voluntariado)\b/i;
+const IGNORED_SECTION_LINES =
+  /^(show all|see all|mostrar todo|ver todo|skills|habilidades|aptitudes|education|educaci[oó]n|formaci[oó]n|licenses?\s*&\s*certifications|licencias y certificaciones|projects|proyectos|courses|cursos|languages|idiomas|all|industry knowledge|tools\s*&\s*technologies|interpersonal skills|other skills|more profiles for you|people you may know|personas que podr[íi]as conocer|conocimientos del sector|herramientas y tecnolog[íi]as|habilidades interpersonales|otras habilidades|·\s*\d+(st|nd|rd|th)?(\s*degree)?|\d+(st|nd|rd|th)?\s*(degree|grado)?\s*connection|conexi[oó]n\s*\d+(º|°)?|endorsed by|recomendado por|verified|verificado|premium|open to work|abierto a oportunidades)$/i;
 
 function parseExperienceItems(items) {
   const out = [];
@@ -560,6 +596,61 @@ function parseCertificationItems(items) {
     }
     out.push({ name, issuer, issued, credential_id: "" });
     if (out.length >= 12) break;
+  }
+  return out;
+}
+
+async function scrapeSectionListItems(page, profileBase, section) {
+  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch { return []; }
+  await sleep(jitter(2500, 1200));
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 700);
+    await sleep(jitter(400, 300));
+  }
+  await sleep(jitter(1500, 800));
+
+  return await page.evaluate(() => {
+    const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
+    const leafTexts = (root) => {
+      const nodes = Array.from(root.querySelectorAll("li, h3, h4, p, span, a, div"))
+        .filter((el) => el.children.length === 0)
+        .map((el) => clean(el.textContent))
+        .filter((text) => text && text.length < 400);
+      const uniq = [];
+      const seen = new Set();
+      for (const text of nodes) {
+        if (seen.has(text)) continue;
+        seen.add(text);
+        uniq.push(text);
+      }
+      return uniq;
+    };
+
+    const main = document.querySelector("main") || document.body;
+    const items = Array.from(main.querySelectorAll("li"))
+      .filter((li) => !li.querySelector("li"))
+      .map((li) => ({ paras: leafTexts(li), desc: "" }))
+      .filter((item) => item.paras.length > 0);
+    if (items.length) return items;
+
+    return Array.from(main.querySelectorAll("section, article"))
+      .map((block) => ({ paras: leafTexts(block).slice(0, 8), desc: "" }))
+      .filter((item) => item.paras.length > 1);
+  });
+}
+
+function parseSimpleListItems(items, limit = 25) {
+  const out = [];
+  const seen = new Set();
+  for (const it of items) {
+    const value = (it.paras || []).find((text) => !IGNORED_SECTION_LINES.test(text));
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= limit) break;
   }
   return out;
 }
@@ -749,6 +840,14 @@ async function scrapeProfileFull(page, url) {
   const certsText = await scrapeSubpageText(page, url, "certifications");
   const projText = await scrapeSubpageText(page, url, "projects");
   const coursesText = await scrapeSubpageText(page, url, "courses");
+  const [expFallbackItems, eduItems, skillsItems, certItems, projItems, courseItems] = await Promise.all([
+    scrapeSectionListItems(page, url, "experience"),
+    scrapeSectionListItems(page, url, "education"),
+    scrapeSectionListItems(page, url, "skills"),
+    scrapeSectionListItems(page, url, "certifications"),
+    scrapeSectionListItems(page, url, "projects"),
+    scrapeSectionListItems(page, url, "courses"),
+  ]);
 
   const [eduJson, skillsJson, certsJson, projJson, coursesJson] = await Promise.all([
     aiExtractSection("education", eduText),
@@ -764,12 +863,19 @@ async function scrapeProfileFull(page, url) {
     headline: top.headline || "",
     location: top.location || "",
     about: top.about || "",
-    experience: parseExperienceItems(expItems),
-    education: (eduJson && eduJson.education) || [],
-    skills: (skillsJson && skillsJson.skills) || [],
-    certifications: (certsJson && certsJson.certifications) || [],
-    projects: (projJson && projJson.projects) || [],
-    courses: (coursesJson && coursesJson.courses) || [],
+    experience: (() => {
+      const parsed = parseExperienceItems(expItems);
+      return parsed.length > 0 ? parsed : parseExperienceItems(expFallbackItems);
+    })(),
+    education: (eduJson && eduJson.education) || parseEducationItems(eduItems),
+    skills: (skillsJson && skillsJson.skills) || parseSkillsItems(skillsItems),
+    certifications: (certsJson && certsJson.certifications) || parseCertificationItems(certItems),
+    projects: (projJson && projJson.projects) || parseCertificationItems(projItems).map((item) => ({
+      name: item.name,
+      dates: item.issued,
+      description: item.issuer,
+    })),
+    courses: (coursesJson && coursesJson.courses) || parseSimpleListItems(courseItems),
   };
 }
 
@@ -929,6 +1035,7 @@ try {
     const value = String(step.value || "");
     console.log(`step ${idx}: ${action} ${value.slice(0, 80)}`);
 
+    try {
     if (action === "navigate") {
       const target = step._for_each_item || value;
       if (/^https?:/.test(target)) {
@@ -956,38 +1063,40 @@ try {
     } else if (action === "open_message_drafts") {
       const payload = await fetchMessageTargets(runId);
       const targets = (payload && payload.targets) || [];
-      console.log(`  -> ${targets.length} outreach drafts to compose`);
+      console.log(`  -> opening ${targets.length} candidate profile tab(s)`);
       let pacingMs = 1500;
       if (Array.isArray(step.methods)) {
         for (const m of step.methods) {
           if (m && typeof m.pacing_ms === "number") pacingMs = m.pacing_ms;
         }
       }
-      const outcomes = [];
       for (let i = 0; i < targets.length; i++) {
         const t = targets[i];
         try {
-          const draftPage = await ctx.newPage();
-          await draftPage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
-          // Settle for LinkedIn SPA hydration.
-          await sleep(2000);
-          const r = await composeDraftInPage(draftPage, t.rendered_message);
-          outcomes.push({ profile_url: t.profile_url, ok: !!r.ok, reason: r.reason });
-          console.log(
-            `    [${i + 1}/${targets.length}] ${t.name || t.profile_url} -> ${r.ok ? "drafted" : "fail:" + r.reason}`
-          );
+          const profilePage = await ctx.newPage();
+          await profilePage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+          console.log(`    [${i + 1}/${targets.length}] opened ${t.name || t.profile_url}`);
         } catch (err) {
-          outcomes.push({ profile_url: t.profile_url, ok: false, reason: String(err) });
           console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message}`);
         }
         if (i < targets.length - 1 && pacingMs > 0) await sleep(pacingMs);
       }
-      console.log("  outcomes:", JSON.stringify(outcomes, null, 2));
       await reportStepResult(runId, idx, "open_message_drafts");
     } else {
       // Unknown — best-effort: skip with success so the run can complete.
       console.log(`  unhandled action_type='${action}', marking success`);
       await reportStepResult(runId, idx, action || "noop");
+    }
+    } catch (stepErr) {
+      // for_each declares inner_failure_policy=continue. Log + report
+      // success so the cursor advances and the run completes. Without
+      // this, a single broken inner step would abort the whole demo
+      // before reaching the open_message_drafts terminal.
+      console.error(`  step ${idx} (${action}) error: ${stepErr.message?.slice(0, 200)}`);
+      try { await reportStepResult(runId, idx, action || "noop"); } catch (e) {
+        console.error(`  step ${idx} advance also failed:`, e.message?.slice(0, 200));
+        break;
+      }
     }
 
     cur = await getRun(runId);

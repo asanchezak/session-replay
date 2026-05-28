@@ -781,10 +781,10 @@ export default function WorkflowDetailPage() {
             <div className="flex items-start justify-between mb-3 gap-3">
               <div>
                 <h2 className="text-sm font-medium text-text-primary flex items-center gap-2">
-                  <MessageSquare size={14} /> Outreach Message Template
+                  <MessageSquare size={14} /> Candidate Tabs Template
                 </h2>
                 <p className="text-xs text-text-secondary mt-0.5">
-                  Used by step #{draftStepIndex} — pastes a personalized Connect-with-note draft on each candidate's LinkedIn profile. LinkedIn caps the invitation note at 300 chars.
+                  Used by step #{draftStepIndex} — resolves the final candidate list and opens each LinkedIn profile in its own tab. No message is composed or sent.
                 </p>
               </div>
               <div className="text-xs text-text-gray">

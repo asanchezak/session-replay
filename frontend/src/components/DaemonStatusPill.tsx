@@ -34,7 +34,7 @@ export default function DaemonStatusPill() {
         const next = await request<DaemonStatusResponse>("GET", "/daemon/status");
         if (!cancelled) setStatus(next);
       } catch {
-        if (!cancelled) setStatus({ workers: [], any_up: false });
+        // Preserve the last known daemon state on transient fetch failures.
       }
     };
 

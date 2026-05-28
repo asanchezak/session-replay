@@ -38,6 +38,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
 let drivingRunId = null;
 
+function isTransientBackendError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes("fetch failed")
+    || msg.includes("ECONNRESET")
+    || msg.includes("ECONNREFUSED")
+    || msg.includes("ETIMEDOUT")
+    || msg.includes("ENOTFOUND")
+    || msg.includes("network")
+  );
+}
+
+async function withBackendRetry(label, fn, attempts = 5) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientBackendError(err) || attempt === attempts) break;
+      const delayMs = Math.min(5000, 500 * 2 ** (attempt - 1));
+      console.warn(`[backend retry] ${label} attempt ${attempt}/${attempts} failed: ${err.message || err}. Retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 function loadOpenAIKey() {
   try {
     const t = fs.readFileSync(path.resolve(__dirname, "..", "backend", ".env"), "utf-8");
@@ -51,7 +79,10 @@ const OPENAI_API_KEY = loadOpenAIKey();
 // ── Backend client ──────────────────────────────────────────────────────────
 
 async function fetchJson(url, init = {}) {
-  const r = await fetch(url, { ...init, headers: { ...HEADERS, ...(init.headers || {}) } });
+  const r = await withBackendRetry(
+    `${init.method || "GET"} ${url}`,
+    () => fetch(url, { ...init, headers: { ...HEADERS, ...(init.headers || {}) } }),
+  );
   if (!r.ok) throw new Error(`${init.method || "GET"} ${url} → ${r.status}: ${await r.text()}`);
   return r.json();
 }
@@ -101,10 +132,20 @@ async function postExtraction(runId, stepIndex, profileUrl, data) {
 }
 
 async function reportStepResult(runId, stepIndex, actionType) {
-  await fetchJson(`${BACKEND}/v1/runs/${runId}/step-result`, {
-    method: "POST",
-    body: JSON.stringify({ step_index: stepIndex, action_type: actionType, success: true }),
-  });
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/step-result`, {
+      method: "POST",
+      body: JSON.stringify({ step_index: stepIndex, action_type: actionType, success: true }),
+    });
+  } catch (err) {
+    if (String(err).includes("409")) {
+      const run = await getRun(runId).catch(() => null);
+      if (run && (run.current_step_index > stepIndex || run.status === "completed")) {
+        return;
+      }
+    }
+    throw err;
+  }
 }
 
 async function fetchMessageTargets(runId) {
@@ -361,6 +402,7 @@ async function scrapeExperienceItems(page, base) {
 
 const DATE_LINE_RE = /\b(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{4}|(?:Present|Actualidad|Currently|Actualmente)|\b\d{4}\s*-\s*\d{4}\b/i;
 const EMPLOYMENT_TYPE_RE = /\b(?:Full[- ]time|Part[- ]time|Contract|Freelance|Self[- ]employed|Internship|Apprenticeship|Temporary|Volunteer|Jornada completa|Jornada parcial|Contrato|Aut[óo]nomo|Pr[áa]cticas|Trabajo temporal|Voluntariado)\b/i;
+const IGNORED_SECTION_LINES = /^(show all|see all|mostrar todo|ver todo|skills|habilidades|aptitudes|education|educaci[oó]n|formaci[oó]n|licenses?\s*&\s*certifications|licencias y certificaciones|projects|proyectos|courses|cursos|languages|idiomas|all|industry knowledge|tools\s*&\s*technologies|interpersonal skills|other skills|more profiles for you|people you may know|personas que podr[íi]as conocer|conocimientos del sector|herramientas y tecnolog[íi]as|habilidades interpersonales|otras habilidades|·\s*\d+(st|nd|rd|th)?(\s*degree)?|\d+(st|nd|rd|th)?\s*(degree|grado)?\s*connection|conexi[oó]n\s*\d+(º|°)?|endorsed by|recomendado por|verified|verificado|premium|open to work|abierto a oportunidades)$/i;
 
 function parseExperienceItems(items) {
   const out = [];
@@ -377,6 +419,140 @@ function parseExperienceItems(items) {
     }
     out.push({ title, company, employment_type, dates, duration: "", location: "", description: (it.desc || "").slice(0, 1500) });
     if (out.length >= 12) break;
+  }
+  return out;
+}
+
+async function scrapeSectionListItems(page, profileBase, section) {
+  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
+  try { await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }); } catch { return []; }
+  await sleep(jitter(2500, 1200));
+  for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, 700); await sleep(jitter(400, 300)); }
+  await sleep(jitter(1500, 800));
+  return await page.evaluate(() => {
+    const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
+    const leafTexts = (root) => {
+      const nodes = Array.from(root.querySelectorAll("li, h3, h4, p, span, a, div"))
+        .filter((el) => el.children.length === 0)
+        .map((el) => clean(el.textContent))
+        .filter((text) => text && text.length < 400);
+      const uniq = [];
+      const seen = new Set();
+      for (const text of nodes) {
+        if (seen.has(text)) continue;
+        seen.add(text);
+        uniq.push(text);
+      }
+      return uniq;
+    };
+
+    const main = document.querySelector("main") || document.body;
+    const items = Array.from(main.querySelectorAll("li"))
+      .filter((li) => !li.querySelector("li"))
+      .map((li) => ({ texts: leafTexts(li) }))
+      .filter((item) => item.texts.length > 0);
+    if (items.length) return items;
+
+    const blocks = Array.from(main.querySelectorAll("section, article"))
+      .map((block) => ({ texts: leafTexts(block).slice(0, 8) }))
+      .filter((item) => item.texts.length > 1);
+    return blocks;
+  });
+}
+
+function parseSkillItems(items) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const name = (item.texts || []).find((text) => !IGNORED_SECTION_LINES.test(text) && text.length <= 80);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+function parseEducationItems(items) {
+  const out = [];
+  for (const item of items) {
+    const texts = (item.texts || []).filter((text) => !IGNORED_SECTION_LINES.test(text));
+    if (!texts.length) continue;
+    const school = texts[0] || "";
+    if (!school) continue;
+    let degree = "";
+    let field = "";
+    let dates = "";
+    for (const text of texts.slice(1)) {
+      if (!dates && DATE_LINE_RE.test(text)) {
+        dates = text;
+        continue;
+      }
+      if (!degree) {
+        degree = text;
+        continue;
+      }
+      if (!field) field = text;
+    }
+    out.push({ school, degree, field, dates });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function parseCertificationItems(items) {
+  const out = [];
+  for (const item of items) {
+    const texts = (item.texts || []).filter((text) => !IGNORED_SECTION_LINES.test(text));
+    if (!texts.length) continue;
+    const name = texts[0] || "";
+    if (!name) continue;
+    let issuer = "";
+    let issued = "";
+    for (const text of texts.slice(1)) {
+      if (!issued && DATE_LINE_RE.test(text)) {
+        issued = text;
+        continue;
+      }
+      if (!issuer) issuer = text;
+    }
+    out.push({ name, issuer, issued });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function parseProjectItems(items) {
+  const out = [];
+  for (const item of items) {
+    const texts = (item.texts || []).filter((text) => !IGNORED_SECTION_LINES.test(text));
+    if (!texts.length) continue;
+    const name = texts[0] || "";
+    if (!name) continue;
+    let dates = "";
+    const descParts = [];
+    for (const text of texts.slice(1)) {
+      if (!dates && DATE_LINE_RE.test(text)) {
+        dates = text;
+        continue;
+      }
+      descParts.push(text);
+    }
+    out.push({ name, dates, description: descParts.join(" ").slice(0, 1500) });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function parseSimpleListItems(items, limit = 25) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const value = (item.texts || []).find((text) => !IGNORED_SECTION_LINES.test(text));
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= limit) break;
   }
   return out;
 }
@@ -452,6 +628,7 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
     about: top.about || "",
   };
   const subpageTextCache = new Map();
+  const sectionItemsCache = new Map();
   for (const shape of requestedShapes) {
     if (!shape?.key) continue;
     if (shape.key === "about") {
@@ -460,7 +637,15 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
     }
     if (shape.key === "experience") {
       const expItems = await scrapeExperienceItems(page, url);
-      result.experience = parseExperienceItems(expItems);
+      const parsedExperience = parseExperienceItems(expItems);
+      if (parsedExperience.length > 0) {
+        result.experience = parsedExperience;
+      } else {
+        const listItems = await scrapeSectionListItems(page, url, "experience");
+        result.experience = parseExperienceItems(
+          listItems.map((item) => ({ paras: item.texts || [], desc: "" })),
+        );
+      }
       continue;
     }
     if (shape.key === "full_name") {
@@ -476,13 +661,42 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
       continue;
     }
     const sectionKey = shape.key === "top_skills" ? "skills" : shape.key;
+    let sectionItems = sectionItemsCache.get(sectionKey);
+    if (sectionItems === undefined) {
+      sectionItems = await scrapeSectionListItems(page, url, sectionKey);
+      sectionItemsCache.set(sectionKey, sectionItems);
+    }
     let rawText = subpageTextCache.get(sectionKey);
     if (rawText === undefined) {
       rawText = await scrapeSubpageText(page, url, sectionKey);
       subpageTextCache.set(sectionKey, rawText);
     }
     const parsed = await aiExtractByShape(shape, rawText);
-    result[shape.key] = parsed?.[shape.key] ?? defaultEmptyValue(shape);
+    if (parsed?.[shape.key]) {
+      result[shape.key] = parsed[shape.key];
+      continue;
+    }
+    if (sectionKey === "skills") {
+      result[shape.key] = parseSkillItems(sectionItems);
+      continue;
+    }
+    if (sectionKey === "education") {
+      result[shape.key] = parseEducationItems(sectionItems);
+      continue;
+    }
+    if (sectionKey === "certifications") {
+      result[shape.key] = parseCertificationItems(sectionItems);
+      continue;
+    }
+    if (sectionKey === "projects") {
+      result[shape.key] = parseProjectItems(sectionItems);
+      continue;
+    }
+    if (sectionKey === "courses" || sectionKey === "languages") {
+      result[shape.key] = parseSimpleListItems(sectionItems);
+      continue;
+    }
+    result[shape.key] = defaultEmptyValue(shape);
   }
   return result;
 }
@@ -570,7 +784,7 @@ async function driveRun(run) {
         } else if (action === "open_message_drafts") {
           const payload = await fetchMessageTargets(runId);
           const targets = (payload && payload.targets) || [];
-          console.log(`  step ${idx}: open_message_drafts — ${targets.length} outreach drafts`);
+          console.log(`  step ${idx}: open_message_drafts — opening ${targets.length} candidate profile tab(s)`);
           let pacingMs = 1500;
           if (Array.isArray(step.methods)) {
             for (const m of step.methods) {
@@ -580,11 +794,9 @@ async function driveRun(run) {
           for (let i = 0; i < targets.length; i++) {
             const t = targets[i];
             try {
-              const draftPage = await ctx.newPage();
-              await draftPage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
-              await sleep(2000);
-              const r = await composeDraftInPage(draftPage, t.rendered_message);
-              console.log(`    [${i + 1}/${targets.length}] ${t.name || t.profile_url} -> ${r.ok ? "drafted" : "fail:" + r.reason}`);
+              const profilePage = await ctx.newPage();
+              await profilePage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+              console.log(`    [${i + 1}/${targets.length}] opened ${t.name || t.profile_url}`);
             } catch (err) {
               console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message?.slice(0, 200)}`);
             }

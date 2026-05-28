@@ -2119,10 +2119,9 @@ async function executeAgentRun(
     }
 
     // open_message_drafts — terminal step on outreach workflows.
-    // Fetches the per-candidate rendered messages from the backend,
-    // opens a new tab per target, and pastes the draft via an injected
-    // script. Does NOT click send. Tabs are left open for the demo so
-    // the recruiter can review and send manually.
+    // Fetches the per-candidate targets from the backend and opens a new
+    // tab per profile. We intentionally stop there: no compose UI is
+    // triggered and nothing is typed or sent.
     if (currentStep && currentStep.action_type === "open_message_drafts") {
       let pacingMs = 1500;
       if (Array.isArray(currentStep.methods)) {
@@ -2134,7 +2133,7 @@ async function executeAgentRun(
       try {
         const payload = await apiClient.fetchMessageTargets(runId);
         const targets = payload?.targets || [];
-        log.log(`[Agent] open_message_drafts: ${targets.length} drafts to compose`);
+        log.log(`[Agent] open_message_drafts: opening ${targets.length} candidate profile tab(s)`);
         for (let i = 0; i < targets.length; i++) {
           const t = targets[i];
           try {
@@ -2144,21 +2143,11 @@ async function executeAgentRun(
               continue;
             }
             await waitForTabLoadBestEffort(tab.id, 30000);
-            // Small extra settle for LinkedIn SPA hydration.
-            await new Promise((r) => setTimeout(r, 1500));
-            const results = await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              world: "MAIN",
-              args: [t.rendered_message],
-              func: openMessageComposerAndType,
-            });
-            const r = results?.[0]?.result as { ok?: boolean; reason?: string } | undefined;
             outcomes.push({
               profile_url: t.profile_url,
-              ok: !!r?.ok,
-              reason: r?.reason,
+              ok: true,
             });
-            // Activate the last tab so the demo lands on a visible draft.
+            // Activate the last tab so the demo lands on a visible profile.
             if (i === targets.length - 1) {
               await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
             }

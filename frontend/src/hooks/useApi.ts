@@ -1,7 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { logger } from "../lib/logger";
 
-const API_BASE = import.meta.env.VITE_API_URL || "/v1";
+const API_BASE =
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  "/v1";
 const API_KEY = import.meta.env.VITE_API_KEY;
 const LOADING_TIMEOUT_MS = 15000;
 

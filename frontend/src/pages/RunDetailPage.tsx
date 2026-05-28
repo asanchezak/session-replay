@@ -657,6 +657,8 @@ export default function RunDetailPage() {
   const isCancelable = CANCELABLE_STATUSES.includes(run.status);
   const isTerminal = ["completed", "failed", "canceled"].includes(run.status);
   const progressPct = run.total_steps > 0 ? Math.round((run.current_step_index / run.total_steps) * 100) : 0;
+  const pushedApplicants = run.linkedin_applicants || [];
+  const displayedApplicants = pushedApplicants;
 
   const interventionStep = run.status === "waiting_for_user" ? currentStep : null;
   const interventionReason = run.pause_reason || run.error_summary || "The workflow was paused";
@@ -930,7 +932,7 @@ export default function RunDetailPage() {
             <div>
               <h2 className="text-sm font-medium text-text-primary">LinkedIn Applicants Pushed to Odoo</h2>
               <p className="text-xs text-text-secondary mt-0.5">
-                Job #{run.origin?.job_payload?.job_id ?? "—"} · {(run.linkedin_applicants?.length ?? 0)} applicant{(run.linkedin_applicants?.length ?? 0) === 1 ? "" : "s"}
+                Job #{run.origin?.job_payload?.job_id ?? "—"} · {displayedApplicants.length} applicant{displayedApplicants.length === 1 ? "" : "s"}
               </p>
             </div>
             <button
@@ -943,7 +945,7 @@ export default function RunDetailPage() {
               {refreshingApplicants ? "Refreshing…" : "Refresh from Odoo"}
             </button>
           </div>
-          {(run.linkedin_applicants?.length ?? 0) === 0 ? (
+          {displayedApplicants.length === 0 ? (
             <div className="text-xs text-text-secondary py-4 text-center">
               No applicants pushed yet. Click <span className="text-text-primary">Refresh from Odoo</span> to backfill from a prior run.
             </div>
@@ -960,7 +962,7 @@ export default function RunDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(run.linkedin_applicants || []).map((a, idx) => {
+                  {displayedApplicants.map((a, idx) => {
                     const scoreNum = typeof a.score === "number" ? a.score : null;
                     const scoreColor =
                       scoreNum == null

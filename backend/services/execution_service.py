@@ -207,16 +207,32 @@ class ExecutionService:
         except (TypeError, ValueError):
             random_seed = None
 
-        # Resolve the iteration limit from the run's resolved parameters.
+        # Resolve the iteration limit from runtime parameters first, then
+        # fall back to webhook origin payload for connector-triggered runs.
         limit = None
+        raw_limit = None
         if limit_param:
             analysis = snapshot.get("analysis") or {}
             execution_plan = analysis.get("execution_plan") or {}
             resolved = execution_plan.get("resolved_parameters") or {}
-            raw = resolved.get(limit_param)
-            if raw is not None:
+            raw_limit = resolved.get(limit_param)
+
+            if raw_limit is None:
+                origin = run.origin or {}
+                job_payload = origin.get("job_payload") or {}
+                fallback_keys = [limit_param]
+                if limit_param == "count":
+                    fallback_keys.extend(["candidate_count", "count"])
+                for key in fallback_keys:
+                    raw_limit = job_payload.get(key)
+                    if raw_limit is None:
+                        raw_limit = origin.get(key)
+                    if raw_limit is not None:
+                        break
+
+            if raw_limit is not None:
                 try:
-                    limit = int(raw)
+                    limit = int(raw_limit)
                 except (TypeError, ValueError):
                     limit = None
 
@@ -556,6 +572,19 @@ class ExecutionService:
             if new_status == RunStatus.COMPLETED and run.origin and (
                 (run.origin or {}).get("event_kind") == "new_job_position"
             ):
+                # The push hook makes a synchronous HTTP call to Odoo that can
+                # take 30–240s per applicant (8 AI agents serially). Commit
+                # the outer session first so we release the SELECT FOR UPDATE
+                # row lock on this run + any pending UPDATEs against it;
+                # otherwise concurrent daemon/heartbeat/step updates queue
+                # behind the lock and produce a "idle in transaction" chain.
+                # The push hook uses its own session via async_session_factory.
+                try:
+                    await self.session.commit()
+                except Exception:
+                    logger.exception(
+                        "Pre-push session commit failed for run %s", run_id
+                    )
                 try:
                     push_result = await self._push_linkedin_applicants_after_completion(run)
                     logger.info(
