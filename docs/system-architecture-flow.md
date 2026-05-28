@@ -2,112 +2,78 @@
 
 > A flow-oriented view of the session-replay system. Components are organized by layer; numbered paths show how data moves between them during each operation mode.
 
+## 1. System Layers
+
 ```mermaid
 flowchart TB
-    %% ─── Styles ───
-    classDef ext fill:#1A1D27,stroke:#6C5CE7,color:#E8EAED,stroke-width:2
-    classDef be  fill:#1A1D27,stroke:#00B894,color:#E8EAED,stroke-width:2
-    classDef fe  fill:#1A1D27,stroke:#74B9FF,color:#E8EAED,stroke-width:2
-    classDef extSys fill:#1A1D27,stroke:#FDCB6E,color:#E8EAED,stroke-width:2
-    classDef store fill:#1A1D27,stroke:#74B9FF,color:#E8EAED,stroke-width:2
-
-    %% ═══════════════════════════════════════════════
-    %% LAYER 1: BROWSER EXTENSION
-    %% ═══════════════════════════════════════════════
-    subgraph EXT["🌐 BROWSER EXTENSION"]
-        CS["Content Script<br/>capture · replay · extraction<br/>challenge detection"]
-        SW["Service Worker<br/>poll loop · orchestrator<br/>executor · healer"]
-        UI["Popup / Panel<br/>React 19"]
+    subgraph EXT["BROWSER EXTENSION"]
+        CS["Content Script<br/>capture · replay · extraction"]
+        SW["Service Worker<br/>poll loop · orchestrator · executor"]
+        UI["Popup / Panel (React 19)"]
     end
-
-    %% ═══════════════════════════════════════════════
-    %% LAYER 2: BACKEND
-    %% ═══════════════════════════════════════════════
-    subgraph BE["⚙️ BACKEND (FastAPI · port 8081)"]
-        API["API Layer<br/>15 route modules"]
-        SVC["Services<br/>AgentService · ExecutionService<br/>HealingService · RecoverySupervisor<br/>WebhookTrigger · ApplicantPush<br/>AuditService · LearningService"]
-        AI["AI Layer<br/>LLM client · prompt builders<br/>tool-use · PlanUpdate"]
-        DB[("PostgreSQL<br/>JSONB · Alembic")]
+    subgraph BE["BACKEND (FastAPI)"]
+        API["API Layer"]
+        SVC["Services<br/>Agent · Execution · Healing<br/>ApplicantPush · Audit"]
+        AI["AI Layer<br/>LLM client · PlanUpdate"]
+        DB[("PostgreSQL")]
     end
-
-    %% ═══════════════════════════════════════════════
-    %% LAYER 3: FRONTEND
-    %% ═══════════════════════════════════════════════
-    subgraph FE["🖥️ FRONTEND (React 19)"]
-        PAGES["Pages<br/>Dashboard · Workflows · Runs<br/>Audit · Connectors · Settings"]
-        COMP["Components<br/>StatusBadge · DataTable · Timeline<br/>InterventionModal · Cards"]
-        HOOKS["Hooks<br/>useApi · useApiData · useRuns"]
+    subgraph FE["FRONTEND (React 19)"]
+        PAGES["Pages<br/>Dashboard · Workflows · Runs"]
     end
-
-    %% ═══════════════════════════════════════════════
-    %% LAYER 4: EXTERNAL SYSTEMS
-    %% ═══════════════════════════════════════════════
-    subgraph EXT_SYS["🔗 EXTERNAL"]
-        ODOO["Odoo ERP<br/>webhooks · Easy Recruit<br/>hr.applicant"]
-        PAGE["Target Page<br/>LinkedIn / jobs<br/>content script injected"]
-        DAEMON["Driver Daemon<br/>Node + Playwright<br/>polls 5s · drives Chrome"]
-        SEQ["Seq<br/>centralized logging<br/>all layers"]
+    subgraph EXT_SYS["EXTERNAL"]
+        ODOO["Odoo ERP"]
+        PAGE["Target Page<br/>LinkedIn / jobs"]
+        DAEMON["Driver Daemon"]
+        SEQ["Seq (logging)"]
     end
+```
 
-    %% ═══════════════════════════════════════════════
-    %% FLOW ❶ — RECORDING
-    %% ═══════════════════════════════════════════════
-    L1["❶ RECORDING"]:::store
-    PAGE -->|"user actions"| CS
-    CS -->|"ActionEvent"| SW
-    SW -->|"POST /v1/events"| API
-    API -->|"EventLog.append"| DB
+## 2. Recording
 
-    %% ═══════════════════════════════════════════════
-    %% FLOW ❷ — REPLAY (AI poll loop)
-    %% ═══════════════════════════════════════════════
-    L2["❷ REPLAY (AI poll loop ~2-5s/step)"]:::store
-    UI -.->|"▶ Run"| SW
-    SW -->|"1. capture page context"| CS
-    CS -->|"PageContext"| SW
-    SW -->|"2. POST /agent/{id}/poll"| API
-    API -->|"3. LLM decision"| AI
-    AI -->|"4. AgentDecision"| SVC
-    SVC -->|"5. return command"| API
-    API -->|"6. command"| SW
-    SW -->|"execute step"| CS
-    CS -.->|"CDP / Playwright"| PAGE
-    SW -->|"7. POST /agent/{id}/result"| API
-    API -->|"8. advance + log"| DB
-    SW -->|"9. loop"| SW
+```mermaid
+flowchart LR
+    PAGE["Target Page"] -->|"user clicks / inputs"| CS["Content Script"]
+    CS -->|"ActionEvent"| SW["Service Worker"]
+    SW -->|"POST /v1/events"| API["API Layer"]
+    API -->|"EventLog.append"| DB[("PostgreSQL")]
+```
 
-    %% ═══════════════════════════════════════════════
-    %% FLOW ❸ — RECRUITMENT AUTOMATION
-    %% ═══════════════════════════════════════════════
-    L3["❸ RECRUITMENT AUTOMATION (4-18 min)"]:::store
-    ODOO -->|"publish job · webhook"| API
-    API -->|"create run + origin"| SVC
-    DB -->|"poll 5s"| DAEMON
-    DAEMON -->|"drive Chrome"| PAGE
+## 3. Replay (AI Poll Loop)
+
+```mermaid
+flowchart TD
+    subgraph loop["Replay Cycle (~2-5s per step)"]
+        direction TB
+        SW0["Service Worker"] -->|"1. capture page state"| CS0["Content Script"]
+        CS0 -->|"PageContext"| SW0
+        SW0 -->|"2. POST /agent/{id}/poll"| API0["API Layer"]
+        API0 -->|"3. LLM decision"| AI0["AI Layer"]
+        AI0 -->|"4. AgentDecision"| SVC0["Services"]
+        SVC0 -->|"5. return command"| API0
+        API0 -->|"6. execute step"| SW0
+        SW0 -->|"7. POST /agent/{id}/result"| API0
+        API0 -->|"8. advance + log"| DB0[("PostgreSQL")]
+        SW0 -.->|"9. loop"| SW0
+    end
+    SVC0 -.->|"on step fail → heal"| AI0
+    AI0 -.->|"new selector"| DB0
+```
+
+## 4. Recruitment Automation
+
+```mermaid
+flowchart LR
+    ODOO["Odoo ERP"] -->|"publish job · webhook"| API["API Layer"]
+    API --> SVC["Services<br/>create run with origin"]
+    SVC --> DB[("PostgreSQL")]
+    DAEMON["Driver Daemon"] -->|"poll 5s"| API
+    DAEMON -->|"drive Chrome"| PAGE["Target Page"]
     PAGE -->|"scrape profiles"| DAEMON
     DAEMON -->|"POST extraction"| API
-    API -->|"store + complete run"| DB
-    SVC -.->|"on COMPLETED · origin=new_job_position"| LABEL["push applicants"]
-    LABEL -->|"POST /akcr/api/linkedin_applicant"| ODOO
-    ODOO -->|"dedup + Easy Recruit"| ODOO
-
-    %% ═══════════════════════════════════════════════
-    %% FRONTEND → API
-    %% ═══════════════════════════════════════════════
-    PAGES -.->|"HTTPS + X-API-Key"| API
-
-    %% ═══════════════════════════════════════════════
-    %% LOGGING
-    %% ═══════════════════════════════════════════════
-    API -.->|"Layer='backend'"| SEQ
-    HOOKS -.->|"POST /v1/logs/client"| SEQ
-    SW -.->|"POST /v1/debug/log"| API
-
-    %% ═══════════════════════════════════════════════
-    %% HEALING (triggered within replay flow)
-    %% ═══════════════════════════════════════════════
-    SVC -.->|"step fail → heal"| AI
-    AI -.->|"new selector"| DB
+    API -->|"complete run"| DB
+    SVC ==>|"on COMPLETED + origin=new_job_position"| LAPS["ApplicantPush<br/>Service"]
+    LAPS -->|"POST /akcr/api/linkedin_applicant"| ODOO
+    ODOO -->|"Easy Recruit scoring"| ODOO
 ```
 
 ## Flow Paths Summary
