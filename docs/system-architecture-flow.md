@@ -458,7 +458,8 @@ flowchart TB
     AS -->|"5. return AgentDecision"| AGENT_API
     AGENT_API --> API_CLIENT
     API_CLIENT --> SW
-    SW -->|"6. dispatch command"| {EXEC, CMD}
+    SW -->|"6. dispatch command"| EXEC
+    SW -->|"6. dispatch command"| CMD
     CMD -.->|"CDP trusted input"| TARGET_PAGE
     CMD -->|"content script fallback"| MSG
     MSG -->|"EXECUTE_STEP"| REPLAY
