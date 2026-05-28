@@ -48,6 +48,15 @@ const CONNECTOR_ID = process.env.CONNECTOR_ID || "5dd56944-daee-4674-9ca5-3b55a6
 const JOB_ID = Number(process.env.JOB_ID || "4");
 const JOB_TITLE = process.env.JOB_TITLE || "Software Engineer";
 const PROFILE_LIMIT = Number(process.env.PROFILE_LIMIT || "2");
+const KEEP_OPEN = process.env.KEEP_OPEN === "1" || process.argv.includes("--keep-open");
+const RUN_ID_ARG = (() => {
+  const i = process.argv.indexOf("--run-id");
+  return i >= 0 ? process.argv[i + 1] : null;
+})();
+const WORKFLOW_ID_ARG = (() => {
+  const i = process.argv.indexOf("--workflow-id");
+  return i >= 0 ? process.argv[i + 1] : null;
+})();
 
 const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
 
@@ -60,6 +69,14 @@ async function postOdooWebhook() {
   const payload = {
     job_id: JOB_ID, name: JOB_TITLE, job_title: JOB_TITLE,
     job_description: `Live E2E test driver for job ${JOB_ID}.`,
+    job_description_short: process.env.JOB_DESCRIPTION_SHORT
+      || "Help us build the platform — see details inside.",
+    company: process.env.COMPANY || "Akurey",
+    job_location: process.env.JOB_LOCATION || "Costa Rica",
+    job_url: process.env.JOB_URL || `http://localhost:8070/web#action=recruitment&id=${JOB_ID}`,
+    seniority_level: process.env.SENIORITY_LEVEL || "Senior",
+    employment_model: process.env.EMPLOYMENT_MODEL || "Remote",
+    candidate_count: String(process.env.PROFILE_LIMIT || PROFILE_LIMIT),
   };
   const r = await fetch(`${BACKEND}/v1/webhooks/incoming/odoo/${CONNECTOR_ID}`, {
     method: "POST", headers: HEADERS, body: JSON.stringify(payload),
@@ -115,6 +132,129 @@ async function getWorkflowSteps(workflowId) {
   const r = await fetch(`${BACKEND}/v1/workflows/${workflowId}`, { headers: HEADERS });
   if (!r.ok) throw new Error(`get workflow failed: ${r.status}`);
   return r.json();
+}
+
+async function fetchMessageTargets(runId) {
+  const r = await fetch(`${BACKEND}/v1/runs/${runId}/message-targets`, { headers: HEADERS });
+  if (!r.ok) throw new Error(`message-targets GET failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+/**
+ * Mirror of the extension's openMessageComposerAndType — locates the
+ * "Message"/"Mensaje" button on the candidate profile, opens the
+ * compose dialog, and types the rendered draft into the contenteditable.
+ * Does NOT click send.
+ */
+async function composeDraftInPage(page, message) {
+  // Wait for the profile top card. LinkedIn 2025 sometimes uses
+  // `data-view-name="profile-top-card"`, older renders use
+  // `section[componentkey*="Topcard"]`. Hydration is slow on a fresh
+  // tab — give it 35s and nudge with a scroll.
+  try {
+    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+    await page.evaluate(() => window.scrollTo(0, 200)).catch(() => {});
+    await page.waitForSelector(
+      '[data-view-name="profile-top-card"], section[componentkey*="Topcard"], main h1, main h2',
+      { timeout: 35000 },
+    );
+  } catch {
+    return { ok: false, reason: "top_card_not_found" };
+  }
+
+  // Find and click the Message button (aria-label or text, locale-aware).
+  const clicked = await page.evaluate(() => {
+    const tokens = ["message", "mensaje", "send a message", "enviar mensaje", "inmail"];
+    const lower = (s) => (s || "").trim().toLowerCase();
+    const inGlobalNav = (el) => {
+      if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
+      if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
+      return false;
+    };
+    const scopes = [];
+    const top = document.querySelector('[data-view-name="profile-top-card"]');
+    if (top) scopes.push(top);
+    const main = document.querySelector("main");
+    if (main) scopes.push(main);
+    if (!scopes.length) scopes.push(document.body);
+    for (const scope of scopes) {
+      const aria = Array.from(scope.querySelectorAll('button[aria-label], a[aria-label]'));
+      for (const el of aria) {
+        if (inGlobalNav(el)) continue;
+        const l = lower(el.getAttribute("aria-label"));
+        if (!l) continue;
+        for (const t of tokens) {
+          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…")) {
+            el.scrollIntoView({ block: "center" });
+            el.click();
+            return true;
+          }
+        }
+      }
+      const buttons = Array.from(scope.querySelectorAll('button, a[role="button"]'));
+      for (const el of buttons) {
+        if (inGlobalNav(el)) continue;
+        const t = lower(el.innerText || el.textContent);
+        if (!t) continue;
+        for (const tok of tokens) {
+          if (t === tok || t.startsWith(tok)) {
+            el.scrollIntoView({ block: "center" });
+            el.click();
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  });
+  if (!clicked) return { ok: false, reason: "no_message_button" };
+
+  // Wait for the compose dialog (any [role=dialog] that contains a contenteditable).
+  try {
+    await page.waitForFunction(() => {
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      for (const d of dialogs) {
+        if (d.querySelector('[contenteditable="true"]')) return true;
+      }
+      return false;
+    }, { timeout: 8000 });
+  } catch {
+    return { ok: false, reason: "dialog_did_not_open" };
+  }
+
+  const typed = await page.evaluate((msg) => {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+    let editor = null;
+    for (const d of dialogs) {
+      const e = d.querySelector('.msg-form__contenteditable[contenteditable="true"], [contenteditable="true"]');
+      if (e) {
+        editor = e;
+        break;
+      }
+    }
+    if (!editor) return { ok: false, reason: "editor_missing" };
+    editor.focus();
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch {}
+    let inserted = false;
+    try {
+      inserted = document.execCommand("insertText", false, msg);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted) {
+      editor.textContent = msg;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    }
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true };
+  }, message);
+  return typed;
 }
 
 // ── Stealth init script ─────────────────────────────────────────────────────
@@ -640,8 +780,46 @@ async function waitForChallengeClear(page, timeoutMs) {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
-const runId = await postOdooWebhook();
-console.log(`Webhook fired. Run: ${runId}`);
+async function createRunDirectly(workflowId) {
+  const r = await fetch(`${BACKEND}/v1/runs`, {
+    method: "POST", headers: HEADERS,
+    body: JSON.stringify({ workflow_id: workflowId, user_id: "live-driver" }),
+  });
+  if (!r.ok) throw new Error(`create run failed: ${r.status} ${await r.text()}`);
+  const body = await r.json();
+  return body.id;
+}
+
+let runId;
+if (RUN_ID_ARG) {
+  runId = RUN_ID_ARG;
+  console.log(`Using --run-id ${runId}`);
+} else if (WORKFLOW_ID_ARG) {
+  runId = await createRunDirectly(WORKFLOW_ID_ARG);
+  console.log(`Created run ${runId} for workflow ${WORKFLOW_ID_ARG}`);
+} else {
+  runId = await postOdooWebhook();
+  console.log(`Webhook fired. Run: ${runId}`);
+}
+
+// Inject resolved_parameters into the run so the for_each step's
+// `limit_param` lookup returns our PROFILE_LIMIT. Source connectors
+// (odoo_latest_job) may not populate this for synthetic webhook calls.
+// Done via direct psql so we don't need a new backend endpoint just for
+// the demo driver.
+try {
+  const { execSync } = await import("node:child_process");
+  const pgPwd = process.env.WORKFLOW_DB_PASSWORD || "workflow";
+  const pgUser = process.env.WORKFLOW_DB_USER || "workflow";
+  const pgDb = process.env.WORKFLOW_DB_NAME || "workflow";
+  const params = JSON.stringify({ keyword: JOB_TITLE, count: String(PROFILE_LIMIT) });
+  // expand_for_each reads workflow_snapshot.analysis.execution_plan.resolved_parameters
+  const sql = `UPDATE execution_runs SET workflow_snapshot = jsonb_set(workflow_snapshot::jsonb, '{analysis,execution_plan,resolved_parameters}', '${params.replace(/'/g, "''")}'::jsonb, true) WHERE id='${runId}';`;
+  execSync(`PGPASSWORD=${pgPwd} psql -h localhost -U ${pgUser} -d ${pgDb} -c "${sql.replace(/"/g, '\\"')}"`, { stdio: "ignore" });
+  console.log(`Injected resolved_parameters: count=${PROFILE_LIMIT}, keyword="${JOB_TITLE}"`);
+} catch (e) {
+  console.warn(`parameter inject failed: ${e.message}`);
+}
 
 const run = await getRun(runId);
 const workflowId = run.workflow_id;
@@ -766,6 +944,37 @@ try {
       await sleep(jitter(2000, 2000));
       await humanScroll(page, 2);
       await reportStepResult(runId, idx, "noise_break");
+    } else if (action === "open_message_drafts") {
+      const payload = await fetchMessageTargets(runId);
+      const targets = (payload && payload.targets) || [];
+      console.log(`  -> ${targets.length} outreach drafts to compose`);
+      let pacingMs = 1500;
+      if (Array.isArray(step.methods)) {
+        for (const m of step.methods) {
+          if (m && typeof m.pacing_ms === "number") pacingMs = m.pacing_ms;
+        }
+      }
+      const outcomes = [];
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i];
+        try {
+          const draftPage = await ctx.newPage();
+          await draftPage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+          // Settle for LinkedIn SPA hydration.
+          await sleep(2000);
+          const r = await composeDraftInPage(draftPage, t.rendered_message);
+          outcomes.push({ profile_url: t.profile_url, ok: !!r.ok, reason: r.reason });
+          console.log(
+            `    [${i + 1}/${targets.length}] ${t.name || t.profile_url} -> ${r.ok ? "drafted" : "fail:" + r.reason}`
+          );
+        } catch (err) {
+          outcomes.push({ profile_url: t.profile_url, ok: false, reason: String(err) });
+          console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message}`);
+        }
+        if (i < targets.length - 1 && pacingMs > 0) await sleep(pacingMs);
+      }
+      console.log("  outcomes:", JSON.stringify(outcomes, null, 2));
+      await reportStepResult(runId, idx, "open_message_drafts");
     } else {
       // Unknown — best-effort: skip with success so the run can complete.
       console.log(`  unhandled action_type='${action}', marking success`);
@@ -777,7 +986,13 @@ try {
 
   console.log(`Final status: ${cur.status} (step ${cur.current_step_index}/${cur.total_steps})`);
 } finally {
-  await ctx.close().catch(() => {});
+  if (KEEP_OPEN) {
+    console.log("--keep-open: leaving browser context open. Ctrl+C to exit.");
+    // Block indefinitely so the context (and all draft tabs) stay visible.
+    await new Promise(() => {});
+  } else {
+    await ctx.close().catch(() => {});
+  }
 }
 
 console.log("");

@@ -68,6 +68,7 @@ class UpdateWorkflowRequest(BaseModel):
     description: str | None = None
     prompt: str | None = None
     target_url: str | None = None
+    config: dict[str, Any] | None = None
 
 
 class UpdateStepRequest(BaseModel):
@@ -557,6 +558,7 @@ async def get_workflow(
         "status": workflow.status,
         "workflow_type": workflow.workflow_type,
         "version": workflow.version,
+        "config": workflow.config or {},
         "created_at": workflow.created_at.isoformat(),
         "steps": [
             {
@@ -827,6 +829,7 @@ async def update_workflow(
             description=req.description,
             prompt=req.prompt,
             target_url=req.target_url,
+            config=req.config,
         )
     except NotFoundError:
         return _not_found("Workflow not found")
@@ -839,6 +842,7 @@ async def update_workflow(
         "status": workflow.status,
         "workflow_type": workflow.workflow_type,
         "version": workflow.version,
+        "config": workflow.config or {},
     }
 
 

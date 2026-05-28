@@ -39,6 +39,10 @@ class Workflow(Base, TimestampMixin, UUIDMixin):
         String(20), nullable=False, default="user", index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Per-workflow configuration (e.g., LinkedIn outreach message_template).
+    # Not used by core execution; consumed by action_type handlers that need
+    # workflow-level state (today: open_message_drafts).
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class WorkflowStep(Base, TimestampMixin, UUIDMixin):

@@ -124,6 +124,23 @@ export class ApiClient {
     }>>("GET", `/runs/${runId}/events?limit=${limit}`);
   }
 
+  async fetchMessageTargets(runId: string) {
+    return this.request<{
+      targets: Array<{
+        profile_url: string;
+        name: string;
+        headline: string;
+        score: number | null;
+        recommendation: string | null;
+        odoo_url: string | null;
+        rendered_message: string;
+      }>;
+      template: string;
+      count: number;
+      skipped?: string;
+    }>("GET", `/runs/${runId}/message-targets`);
+  }
+
   async reportStepResult(
     runId: string,
     stepIndex: number,

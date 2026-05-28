@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
@@ -15,7 +15,7 @@ import {
   parameterConsumerSteps,
 } from "./viewmodels/workflowDetailViewModel";
 import type { ConnectorBindingDraft, WebhookTrigger } from "./viewmodels/workflowDetailViewModel";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database, MessageSquare } from "lucide-react";
 
 interface Step {
   step_index: number;
@@ -75,6 +75,40 @@ interface WorkflowDetail {
   steps: Step[];
   analysis: Analysis | null;
   connector_bindings?: ConnectorBinding[];
+  config?: { message_template?: string; message_template_updated_at?: string };
+}
+
+const MESSAGE_TEMPLATE_VARIABLES = [
+  "candidate_name",
+  "candidate_headline",
+  "candidate_score",
+  "job_title",
+  "company",
+  "job_url",
+  "job_location",
+  "job_description_short",
+  "seniority_level",
+  "employment_model",
+] as const;
+
+const PREVIEW_CTX_SAMPLE: Record<string, string> = {
+  candidate_name: "María Pérez",
+  candidate_headline: "Senior .NET Developer at Acme",
+  candidate_score: "7/10",
+  job_title: ".Net/Azure Developer",
+  company: "Akurey",
+  job_url: "https://example.com/jobs/76",
+  job_location: "Costa Rica",
+  job_description_short: "Build the platform. Review PRs. Ship.",
+  seniority_level: "Senior",
+  employment_model: "Remote",
+};
+
+function renderTemplatePreview(template: string, ctx: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, key) => {
+    const v = ctx[key as string];
+    return v ?? m;
+  });
 }
 
 interface ConnectorSummary {
@@ -116,6 +150,10 @@ export default function WorkflowDetailPage() {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [promoting, setPromoting] = useState(false);
+  const [messageTemplateDraft, setMessageTemplateDraft] = useState<string | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [templateSavedAt, setTemplateSavedAt] = useState<string | null>(null);
+  const messageTemplateRef = useRef<HTMLTextAreaElement | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   // Edit-fields modal state: which extract step is being edited (by step_index).
   const [editingExtractStep, setEditingExtractStep] = useState<Step | null>(null);
@@ -698,6 +736,120 @@ export default function WorkflowDetailPage() {
           </button>
         </div>
       )}
+
+      {/* Message Template — visible whenever the workflow has an open_message_drafts step,
+          independent of literal/semantic view mode (clones won't have analysis yet). */}
+      {data.steps.some((s) => s.action_type === "open_message_drafts") && (() => {
+        const stored = data.config?.message_template ?? "";
+        const value = messageTemplateDraft ?? stored;
+        const draftStepIndex = data.steps.find((s) => s.action_type === "open_message_drafts")?.step_index;
+        const dirty = messageTemplateDraft !== null && messageTemplateDraft !== stored;
+        const insertToken = (token: string) => {
+          const ta = messageTemplateRef.current;
+          if (!ta) {
+            setMessageTemplateDraft((value || "") + ` {{${token}}}`);
+            return;
+          }
+          const start = ta.selectionStart ?? value.length;
+          const end = ta.selectionEnd ?? value.length;
+          const next = value.slice(0, start) + `{{${token}}}` + value.slice(end);
+          setMessageTemplateDraft(next);
+          requestAnimationFrame(() => {
+            ta.focus();
+            const pos = start + `{{${token}}}`.length;
+            ta.setSelectionRange(pos, pos);
+          });
+        };
+        const preview = renderTemplatePreview(value, PREVIEW_CTX_SAMPLE);
+        const onSave = async () => {
+          setSavingTemplate(true);
+          try {
+            await request<unknown>("PUT", `/workflows/${data.id}`, {
+              config: { message_template: value, message_template_updated_at: new Date().toISOString() },
+            });
+            setTemplateSavedAt(new Date().toISOString());
+            setMessageTemplateDraft(null);
+            fetchData("GET", `/workflows/${data.id}`);
+          } finally {
+            setSavingTemplate(false);
+          }
+        };
+        return (
+          <Card className="mb-4">
+            <div className="flex items-start justify-between mb-3 gap-3">
+              <div>
+                <h2 className="text-sm font-medium text-text-primary flex items-center gap-2">
+                  <MessageSquare size={14} /> Message Template
+                </h2>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Used by step #{draftStepIndex} (open_message_drafts). Rendered per candidate at run time.
+                </p>
+              </div>
+              <div className="text-xs text-text-gray">
+                {templateSavedAt && !dirty && "saved"}
+                {!templateSavedAt && data.config?.message_template_updated_at &&
+                  `last updated ${new Date(data.config.message_template_updated_at).toLocaleString()}`}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {MESSAGE_TEMPLATE_VARIABLES.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => insertToken(v)}
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:bg-bg-elevated transition-colors font-mono"
+                  title={`Insert {{${v}}}`}
+                >
+                  {`{{${v}}}`}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[11px] uppercase text-text-gray mb-1">Template</label>
+                <textarea
+                  ref={messageTemplateRef}
+                  rows={10}
+                  value={value}
+                  onChange={(e) => setMessageTemplateDraft(e.target.value)}
+                  className="w-full bg-bg-elevated border border-border rounded-md p-2.5 text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  spellCheck={false}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase text-text-gray mb-1">
+                  Preview · synthetic candidate
+                </label>
+                <div className="w-full bg-bg-elevated border border-border rounded-md p-2.5 text-xs text-text-primary whitespace-pre-wrap min-h-[14rem]">
+                  {preview || <span className="text-text-gray italic">(empty template)</span>}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center justify-end gap-2">
+              {dirty && (
+                <button
+                  type="button"
+                  onClick={() => setMessageTemplateDraft(null)}
+                  className="text-xs px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary"
+                >
+                  Discard
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={!dirty || savingTemplate}
+                onClick={onSave}
+                className="text-xs px-3 py-1.5 rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingTemplate ? "Saving…" : dirty ? "Save template" : "Saved"}
+              </button>
+            </div>
+          </Card>
+        );
+      })()}
 
       {viewMode === "semantic" && analysis ? (
         <div className="grid grid-cols-2 gap-6">

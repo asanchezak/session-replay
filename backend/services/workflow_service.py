@@ -162,6 +162,7 @@ class WorkflowService:
         description: str | None = None,
         prompt: str | None = None,
         target_url: str | None = None,
+        config: dict | None = None,
     ) -> Workflow:
         """Update workflow metadata."""
         workflow = await self.get(workflow_id)
@@ -173,6 +174,13 @@ class WorkflowService:
             workflow.prompt = prompt
         if target_url is not None:
             workflow.target_url = target_url
+        if config is not None:
+            # Whole-object replacement. Callers merge upstream when partial.
+            merged = dict(workflow.config or {})
+            merged.update(config)
+            workflow.config = merged
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(workflow, "config")
         await self.session.flush()
         return workflow
 

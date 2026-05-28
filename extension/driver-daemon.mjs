@@ -107,6 +107,98 @@ async function reportStepResult(runId, stepIndex, actionType) {
   });
 }
 
+async function fetchMessageTargets(runId) {
+  return fetchJson(`${BACKEND}/v1/runs/${runId}/message-targets`);
+}
+
+async function composeDraftInPage(page, message) {
+  try {
+    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+    await page.evaluate(() => window.scrollTo(0, 200)).catch(() => {});
+    await page.waitForSelector(
+      '[data-view-name="profile-top-card"], section[componentkey*="Topcard"], main h1, main h2',
+      { timeout: 35000 },
+    );
+  } catch {
+    return { ok: false, reason: "top_card_not_found" };
+  }
+  const clicked = await page.evaluate(() => {
+    const tokens = ["message", "mensaje", "send a message", "enviar mensaje", "inmail"];
+    const lower = (s) => (s || "").trim().toLowerCase();
+    const inGlobalNav = (el) => {
+      if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
+      if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
+      return false;
+    };
+    const scopes = [];
+    const top = document.querySelector('[data-view-name="profile-top-card"]');
+    if (top) scopes.push(top);
+    const main = document.querySelector("main");
+    if (main) scopes.push(main);
+    if (!scopes.length) scopes.push(document.body);
+    for (const scope of scopes) {
+      const aria = Array.from(scope.querySelectorAll('button[aria-label], a[aria-label]'));
+      for (const el of aria) {
+        if (inGlobalNav(el)) continue;
+        const l = lower(el.getAttribute("aria-label"));
+        if (!l) continue;
+        for (const t of tokens) {
+          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…")) {
+            el.scrollIntoView({ block: "center" }); el.click(); return true;
+          }
+        }
+      }
+      const buttons = Array.from(scope.querySelectorAll('button, a[role="button"]'));
+      for (const el of buttons) {
+        if (inGlobalNav(el)) continue;
+        const t = lower(el.innerText || el.textContent);
+        if (!t) continue;
+        for (const tok of tokens) {
+          if (t === tok || t.startsWith(tok)) {
+            el.scrollIntoView({ block: "center" }); el.click(); return true;
+          }
+        }
+      }
+    }
+    return false;
+  });
+  if (!clicked) return { ok: false, reason: "no_message_button" };
+  try {
+    await page.waitForFunction(() => {
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      for (const d of dialogs) if (d.querySelector('[contenteditable="true"]')) return true;
+      return false;
+    }, { timeout: 8000 });
+  } catch {
+    return { ok: false, reason: "dialog_did_not_open" };
+  }
+  return page.evaluate((msg) => {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+    let editor = null;
+    for (const d of dialogs) {
+      const e = d.querySelector('.msg-form__contenteditable[contenteditable="true"], [contenteditable="true"]');
+      if (e) { editor = e; break; }
+    }
+    if (!editor) return { ok: false, reason: "editor_missing" };
+    editor.focus();
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch {}
+    let inserted = false;
+    try { inserted = document.execCommand("insertText", false, msg); } catch { inserted = false; }
+    if (!inserted) {
+      editor.textContent = msg;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    }
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true };
+  }, message);
+}
+
 async function expandForEach(runId, stepIndex) {
   return fetchJson(`${BACKEND}/v1/runs/${runId}/expand-for-each`, {
     method: "POST",
@@ -453,6 +545,30 @@ async function driveRun(run) {
           await sleep(jitter(2000, 2000));
           await humanScroll(page, 2);
           await reportStepResult(runId, idx, "noise_break");
+        } else if (action === "open_message_drafts") {
+          const payload = await fetchMessageTargets(runId);
+          const targets = (payload && payload.targets) || [];
+          console.log(`  step ${idx}: open_message_drafts — ${targets.length} outreach drafts`);
+          let pacingMs = 1500;
+          if (Array.isArray(step.methods)) {
+            for (const m of step.methods) {
+              if (m && typeof m.pacing_ms === "number") pacingMs = m.pacing_ms;
+            }
+          }
+          for (let i = 0; i < targets.length; i++) {
+            const t = targets[i];
+            try {
+              const draftPage = await ctx.newPage();
+              await draftPage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+              await sleep(2000);
+              const r = await composeDraftInPage(draftPage, t.rendered_message);
+              console.log(`    [${i + 1}/${targets.length}] ${t.name || t.profile_url} -> ${r.ok ? "drafted" : "fail:" + r.reason}`);
+            } catch (err) {
+              console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message?.slice(0, 200)}`);
+            }
+            if (i < targets.length - 1 && pacingMs > 0) await sleep(pacingMs);
+          }
+          await reportStepResult(runId, idx, "open_message_drafts");
         } else {
           await reportStepResult(runId, idx, action || "noop");
         }

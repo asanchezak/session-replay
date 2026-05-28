@@ -197,6 +197,35 @@ async def get_run(
     }
 
 
+@router.get("/{run_id}/message-targets")
+async def get_run_message_targets(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-candidate rendered outreach drafts for a run's workflow template.
+
+    Consumed by the extension's `open_message_drafts` action handler.
+    """
+    from core.models.workflow import Workflow
+    from services.message_rendering_service import MessageRenderingService
+
+    svc = ExecutionService(db)
+    try:
+        run = await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    result = await db.execute(
+        select(Workflow).where(Workflow.id == run.workflow_id)
+    )
+    workflow = result.scalar_one_or_none()
+    if workflow is None:
+        return _error("NOT_FOUND", "Workflow for run not found")
+
+    renderer = MessageRenderingService(db)
+    return await renderer.build_targets_for_run(run, workflow)
+
+
 @router.post("/{run_id}/repush-applicants")
 async def repush_run_applicants(
     run_id: str,

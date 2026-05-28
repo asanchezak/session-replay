@@ -6,6 +6,7 @@ import { stepExecutor } from "./executor";
 import { registerServiceWorkerListeners } from "./message-router";
 import { commandExecutor, DebuggerSession } from "./command-executor";
 import { waitForTabLoad, waitForTabLoadBestEffort } from "./tab-load";
+import { openMessageComposerAndType } from "./openMessageComposerAndType";
 import { getPageSnapshotTargets } from "./site-adapters/registry";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
@@ -2107,6 +2108,88 @@ async function executeAgentRun(
         try {
           await apiClient.reportStepResult(runId, currentStepIndex, true, undefined, "noise_break");
         } catch { /* ignore */ }
+      }
+      currentStepIndex++;
+      if (currentStepIndex >= steps.length) {
+        await apiClient.completeRun(runId);
+        finalStatus = "completed";
+        break;
+      }
+      continue;
+    }
+
+    // open_message_drafts — terminal step on outreach workflows.
+    // Fetches the per-candidate rendered messages from the backend,
+    // opens a new tab per target, and pastes the draft via an injected
+    // script. Does NOT click send. Tabs are left open for the demo so
+    // the recruiter can review and send manually.
+    if (currentStep && currentStep.action_type === "open_message_drafts") {
+      let pacingMs = 1500;
+      if (Array.isArray(currentStep.methods)) {
+        for (const m of currentStep.methods as Array<Record<string, unknown>>) {
+          if (m && typeof m.pacing_ms === "number") pacingMs = m.pacing_ms as number;
+        }
+      }
+      const outcomes: Array<{ profile_url: string; ok: boolean; reason?: string }> = [];
+      try {
+        const payload = await apiClient.fetchMessageTargets(runId);
+        const targets = payload?.targets || [];
+        log.log(`[Agent] open_message_drafts: ${targets.length} drafts to compose`);
+        for (let i = 0; i < targets.length; i++) {
+          const t = targets[i];
+          try {
+            const tab = await chrome.tabs.create({ url: t.profile_url, active: false });
+            if (!tab.id) {
+              outcomes.push({ profile_url: t.profile_url, ok: false, reason: "tab_create_failed" });
+              continue;
+            }
+            await waitForTabLoadBestEffort(tab.id, 30000);
+            // Small extra settle for LinkedIn SPA hydration.
+            await new Promise((r) => setTimeout(r, 1500));
+            const results = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              world: "MAIN",
+              args: [t.rendered_message],
+              func: openMessageComposerAndType,
+            });
+            const r = results?.[0]?.result as { ok?: boolean; reason?: string } | undefined;
+            outcomes.push({
+              profile_url: t.profile_url,
+              ok: !!r?.ok,
+              reason: r?.reason,
+            });
+            // Activate the last tab so the demo lands on a visible draft.
+            if (i === targets.length - 1) {
+              await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+            }
+          } catch (err) {
+            outcomes.push({
+              profile_url: t.profile_url,
+              ok: false,
+              reason: String(err),
+            });
+          }
+          if (i < targets.length - 1 && pacingMs > 0) {
+            await new Promise((r) => setTimeout(r, pacingMs));
+          }
+        }
+        log.log("[Agent] open_message_drafts outcomes:", outcomes);
+        await apiClient.reportStepResult(
+          runId,
+          currentStepIndex,
+          true,
+          undefined,
+          "open_message_drafts",
+        );
+      } catch (err) {
+        log.error("[Agent] open_message_drafts failed:", err);
+        await apiClient.reportStepResult(
+          runId,
+          currentStepIndex,
+          false,
+          String(err),
+          "open_message_drafts",
+        );
       }
       currentStepIndex++;
       if (currentStepIndex >= steps.length) {
