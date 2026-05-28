@@ -7,7 +7,7 @@ const AI_API_KEY_KEY = "aiApiKey";
 
 export const DEV_DEFAULTS = {
   apiBase: API_BASE_URL,
-  apiKey: "mQSbOlTTH5hDrRXMVsc-uvVmRcCm3tFgaFpLtGs1Nqw",
+  apiKey: "dev-api-key-change-in-production",
   aiApiKey: "",
 };
 
