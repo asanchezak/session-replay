@@ -569,8 +569,9 @@ class ExecutionService:
             except Exception:
                 logger.exception("RunSummary finalization failed for run %s", run_id)
 
-            if new_status == RunStatus.COMPLETED and run.origin and (
-                (run.origin or {}).get("event_kind") == "new_job_position"
+            event_kind = (run.origin or {}).get("event_kind") if run.origin else None
+            if new_status == RunStatus.COMPLETED and event_kind in (
+                "new_job_position", "linkedin_lead_search",
             ):
                 # The push hook makes a synchronous HTTP call to Odoo that can
                 # take 30–240s per applicant (8 AI agents serially). Commit
@@ -586,13 +587,20 @@ class ExecutionService:
                         "Pre-push session commit failed for run %s", run_id
                     )
                 try:
-                    push_result = await self._push_linkedin_applicants_after_completion(run)
-                    logger.info(
-                        "LinkedIn applicant push for run %s: %s", run_id, push_result
-                    )
+                    if event_kind == "linkedin_lead_search":
+                        push_result = await self._push_linkedin_leads_after_completion(run)
+                        logger.info(
+                            "LinkedIn lead push for run %s: %s", run_id, push_result
+                        )
+                    else:
+                        push_result = await self._push_linkedin_applicants_after_completion(run)
+                        logger.info(
+                            "LinkedIn applicant push for run %s: %s", run_id, push_result
+                        )
                 except Exception:
                     logger.exception(
-                        "LinkedIn applicant push failed for run %s", run_id
+                        "LinkedIn push failed for run %s (event_kind=%s)",
+                        run_id, event_kind,
                     )
 
         return run
@@ -625,6 +633,31 @@ class ExecutionService:
                 )
             else:
                 service = LinkedInApplicantPushService(push_session)
+                result = await service.push_from_run(push_run)
+            await push_session.commit()
+            return result
+
+    async def _push_linkedin_leads_after_completion(self, run: ExecutionRun) -> dict:
+        """Run post-completion Odoo lead push in a fresh session.
+
+        Sibling of _push_linkedin_applicants_after_completion for the
+        lightweight lead-sourcing flow (event_kind == "linkedin_lead_search").
+        Uses an independent session so lead ingestion isn't coupled to any
+        failed transaction state left by completion-time hooks.
+        """
+        from services.linkedin_lead_push_service import LinkedInLeadPushService
+
+        async with async_session_factory() as push_session:
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            push_run = (await push_session.execute(stmt)).scalar_one_or_none()
+            service = LinkedInLeadPushService(push_session)
+            if push_run is None:
+                result = await service.push_for_origin(
+                    run_id=run.id,
+                    origin=run.origin or {},
+                )
+            else:
                 result = await service.push_from_run(push_run)
             await push_session.commit()
             return result

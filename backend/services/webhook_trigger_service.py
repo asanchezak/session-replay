@@ -17,7 +17,13 @@ from services.template_service import TemplateService
 from services.workflow_connector_service import WorkflowConnectorService, _short_description
 
 EVENT_KIND_NEW_JOB_POSITION = "new_job_position"
-SUPPORTED_EVENT_KINDS = {EVENT_KIND_NEW_JOB_POSITION}
+# Lightweight "lead sourcing" flow: same Odoo position-publish payload, but the
+# run only collects name+headline+profile_url from the first 2 search pages
+# (no profile visits) and pushes them to Odoo as linkedin.lead rows. Which of
+# these two event kinds actually fires is decided by which WebhookTrigger row is
+# enabled for the connector (see seed_linkedin_lead_search_bindings.py).
+EVENT_KIND_LINKEDIN_LEAD = "linkedin_lead_search"
+SUPPORTED_EVENT_KINDS = {EVENT_KIND_NEW_JOB_POSITION, EVENT_KIND_LINKEDIN_LEAD}
 
 # A run in any of these statuses is still "live" — the single daemon is or will
 # be driving it. trigger-now refuses to pile a second run on top so testers
@@ -95,10 +101,14 @@ class WebhookTriggerService:
 
     async def fire_from_odoo_payload(self, connector_id: str, payload: dict) -> list[str]:
         """Process incoming Odoo webhook; fire all enabled triggers. Returns created run IDs."""
+        # Fire whichever enabled trigger the connector has, across all supported
+        # event kinds. The same Odoo position-publish webhook drives either the
+        # applicant scraper (new_job_position) or the lead sourcer
+        # (linkedin_lead_search), depending on which trigger row is enabled.
         triggers = [
             t
             for t in await self.list_triggers(connector_id=connector_id)
-            if t.enabled and t.event_kind == EVENT_KIND_NEW_JOB_POSITION
+            if t.enabled and t.event_kind in SUPPORTED_EVENT_KINDS
         ]
         connector = await self._get_connector_or_raise(connector_id)
         odoo_base = (connector.config.get("url") or "").rstrip("/")

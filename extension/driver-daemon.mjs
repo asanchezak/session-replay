@@ -130,7 +130,8 @@ async function findPendingRun() {
   const now = Date.now();
   for (const r of items) {
     if (!r.origin) continue;
-    if (r.origin.event_kind !== "new_job_position") continue;
+    if (r.origin.event_kind !== "new_job_position"
+        && r.origin.event_kind !== "linkedin_lead_search") continue;
     if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) continue;
     if (r.current_step_index > 0) continue;
     const startedAt = r.started_at ? Date.parse(r.started_at) : (r.created_at ? Date.parse(r.created_at) : 0);
@@ -454,6 +455,133 @@ async function scrapeSearchProfileUrls(page) {
     return Array.from(out);
   });
   return urls.filter((u) => /linkedin\.com\/in\/[A-Za-z0-9_\-%\.]+$/.test(u));
+}
+
+// Lead-sourcing variant: pull { name, headline, profile_url } per search-result
+// without visiting any profile. LinkedIn renders the people-search list in two
+// shapes depending on how you arrived:
+//   (A) typed search / cold load → `[data-view-name="people-search-result"]`
+//       cards, each wrapping the result avatar <img alt="Full Name"> + <p>
+//       lines: "Name • Nº", headline, location, "Actual: …", followers,
+//       "<X> es contacto en común".
+//   (B) in-session navigation (e.g. page 2 reached while already in the SPA) →
+//       NO people-search-result cards, but `search-result-lockup-title` +
+//       `search-result-social-proof-insight` (the mutual-connection line) and
+//       the same result avatars.
+// Both shapes have ONE result avatar per person whose `alt` is the clean name,
+// wrapped by the profile link. Mutual-connection links live inside the
+// social-proof element (and have no result avatar). So we anchor on result
+// avatars and skip anything inside social-proof — layout-agnostic and free of
+// the mutual-connection noise.
+async function scrapeSearchPeople(page) {
+  // Wait for results (cards OR lockups OR any /in/ link), then let the count
+  // stabilize so a mid-render snapshot doesn't miss half the page.
+  await page.waitForSelector(
+    '[data-view-name="people-search-result"], [data-view-name="search-result-lockup-title"], a[href*="/in/"]',
+    { timeout: 20000 },
+  ).catch(() => {});
+  let prev = -1, stable = 0;
+  for (let i = 0; i < 10; i++) {
+    const n = await page.evaluate(() =>
+      document.querySelectorAll('[data-view-name="people-search-result"], [data-view-name="search-result-lockup-title"]').length
+    ).catch(() => 0);
+    if (n > 0 && n === prev) { if (++stable >= 2) break; } else { stable = 0; }
+    prev = n;
+    await sleep(700);
+  }
+  await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
+  const people = await page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const PROFILE_RE = /linkedin\.com\/in\/[A-Za-z0-9_\-%\.]+/;
+    const canon = (href) => {
+      const m = (href || "").match(/https?:\/\/[^"' ]*linkedin\.com\/in\/[^?#"' ]+/);
+      let u = m ? m[0] : ((href || "").startsWith("/in/")
+        ? `https://www.linkedin.com${href.split("?")[0].split("#")[0]}` : "");
+      return u.replace(/\/$/, "");
+    };
+    // "Jane Doe • 2º" -> "Jane Doe"; also strips a trailing bare degree badge
+    // and any " busca empleo" / "is hiring"-style suffix LinkedIn appends.
+    const nameOf = (s) => clean(s)
+      .split("•")[0]
+      .replace(/\s*\d+(º|°|st|nd|rd|th)\s*$/i, "")
+      .replace(/\s+(busca empleo|is hiring|está contratando|#\w+).*$/i, "")
+      .trim();
+    const isMeta = (t) =>
+      !t
+      || /(contacto en común|mutual connection|in common)/i.test(t)
+      || /seguidor|\bfollowers?\b/i.test(t)
+      || /^(conectar|connect|seguir|follow|mensaje|message|guardar|save|pendiente|pending)$/i.test(t)
+      || /^(actual|anterior|current|past)\s*:/i.test(t)
+      || /•\s*\d+\s*(º|°|st|nd|rd|th)/i.test(t);
+    const looksLikeLocation = (t) =>
+      /,\s*[^,]+,/.test(t) && !/\bat\b|@|\||engineer|developer|manager|ingenier|desarroll|specialist|lead|architect|consultant|analyst|designer|scientist/i.test(t);
+    const inSocialProof = (el) =>
+      !!(el && el.closest && el.closest('[data-view-name="search-result-social-proof-insight"]'));
+
+    const seen = new Set();
+    const out = [];
+    const headlineFrom = (root, name) => {
+      const lines = Array.from(root.querySelectorAll("p, span"))
+        .map((e) => clean(e.textContent)).filter(Boolean);
+      for (const t of lines) {
+        if (nameOf(t) === name) continue;
+        if (isMeta(t) || looksLikeLocation(t)) continue;
+        return t;
+      }
+      return "";
+    };
+
+    // Primary: explicit result cards (page 1 / cold load) — richest structure.
+    const addCard = (card) => {
+      const link = card.querySelector('a[href*="/in/"]');
+      if (!link) return;
+      const url = canon(link.getAttribute("href") || "");
+      if (!url || !PROFILE_RE.test(url) || seen.has(url)) return;
+      const ps = Array.from(card.querySelectorAll("p")).map((p) => clean(p.textContent)).filter(Boolean);
+      let name = nameOf(clean(card.querySelector("img")?.getAttribute("alt") || ""));
+      if (!name && ps[0]) name = nameOf(ps[0]);
+      if (!name) return;
+      let headline = "";
+      for (let i = 1; i < ps.length; i++) {
+        const t = ps[i];
+        if (nameOf(t) === name || isMeta(t) || looksLikeLocation(t)) continue;
+        headline = t; break;
+      }
+      seen.add(url);
+      out.push({ name, headline, profile_url: url });
+    };
+
+    const cards = Array.from(document.querySelectorAll('[data-view-name="people-search-result"]'));
+    if (cards.length) {
+      cards.forEach(addCard);
+      return out;
+    }
+
+    // Secondary (layout B / DOM drift): anchor on result avatars. The result
+    // avatar's alt is the full name and it is wrapped by the profile link;
+    // mutual-connection avatars/links sit inside the social-proof element.
+    document.querySelectorAll('img[alt]').forEach((img) => {
+      const alt = clean(img.getAttribute("alt"));
+      if (!alt || inSocialProof(img)) return;
+      const link = img.closest('a[href*="/in/"]')
+        || (img.parentElement && img.parentElement.querySelector('a[href*="/in/"]'));
+      if (!link || inSocialProof(link)) return;
+      const url = canon(link.getAttribute("href") || "");
+      if (!url || !PROFILE_RE.test(url) || seen.has(url)) return;
+      const name = nameOf(alt);
+      if (!name) return;
+      // Climb to the result container (holds avatar link + a couple <p> lines).
+      let root = link;
+      for (let i = 0; i < 6 && root.parentElement; i++) {
+        root = root.parentElement;
+        if (root.querySelectorAll("p").length >= 2) break;
+      }
+      seen.add(url);
+      out.push({ name, headline: headlineFrom(root, name), profile_url: url });
+    });
+    return out;
+  });
+  return people;
 }
 
 async function scrapeProfileTopCard(page, url, rand = Math.random) {
@@ -1037,6 +1165,10 @@ async function driveRun(run) {
     ? execOpts.max_candidates
     : null;
   const isTestRun = execOpts.mode === "test";
+  // Lead-sourcing flow: collect name+headline+profile_url from the first 2
+  // search pages and stop — NO profile visits, NO for_each. The run
+  // auto-completes when step 5 advances the cursor to total_steps (6).
+  const isLeadRun = run.origin?.event_kind === "linkedin_lead_search";
   let profileExtractCount = 0;
   if (maxCandidates !== null || isTestRun) {
     console.log(`[daemon] run ${runId} options: mode=${execOpts.mode || "live"} max_candidates=${maxCandidates ?? "∞"}`);
@@ -1087,26 +1219,60 @@ async function driveRun(run) {
     await sleep(jitter(3000, 1500));
     await reportStepResult(runId, 2, "navigate");
 
-    const p1 = await scrapeSearchProfileUrls(page);
-    seenPool.push(...p1);
-    console.log(`  step 3: ${p1.length} URLs on page 1`);
-    await postExtraction(runId, 3, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p1 });
+    if (isLeadRun) {
+      const people1 = await scrapeSearchPeople(page);
+      seenPool.push(...people1.map((p) => p.profile_url));
+      console.log(`  step 3: ${people1.length} people on page 1`);
+      await postExtraction(runId, 3, page.url(), { page_title: await page.title(), url: page.url(), people: people1 });
+    } else {
+      const p1 = await scrapeSearchProfileUrls(page);
+      seenPool.push(...p1);
+      console.log(`  step 3: ${p1.length} URLs on page 1`);
+      await postExtraction(runId, 3, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p1 });
+    }
     await reportStepResult(runId, 3, "extract");
 
-    // step 4 — page 2: click the "Next" pagination like a human; goto fallback.
-    const wentP2 = await clickPaginationNext(page, orand);
-    if (!wentP2) {
+    // step 4 — page 2.
+    if (isLeadRun) {
+      // The lead scraper parses `data-view-name="people-search-result"` cards,
+      // which only render on a full server-side load of `&page=2`. SPA "Next"
+      // pagination renders page-2 results WITHOUT those cards, so the card
+      // parser finds nothing and the fallback scrapes mutual-connection links.
+      // Use a direct navigation here (still gated by safeGoto's blocker check).
       await safeGoto(page, searchUrlP2, "search-p2");
       await sleep(jitter(3000, 1500));
+    } else {
+      // Applicant flow only needs /in/ URLs — click "Next" like a human.
+      const wentP2 = await clickPaginationNext(page, orand);
+      if (!wentP2) {
+        await safeGoto(page, searchUrlP2, "search-p2");
+        await sleep(jitter(3000, 1500));
+      }
     }
     lastSearchUrl = page.url();
     await reportStepResult(runId, 4, "navigate");
 
-    const p2 = await scrapeSearchProfileUrls(page);
-    seenPool.push(...p2);
-    console.log(`  step 5: ${p2.length} URLs on page 2`);
-    await postExtraction(runId, 5, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p2 });
+    if (isLeadRun) {
+      const people2 = await scrapeSearchPeople(page);
+      seenPool.push(...people2.map((p) => p.profile_url));
+      console.log(`  step 5: ${people2.length} people on page 2`);
+      await postExtraction(runId, 5, page.url(), { page_title: await page.title(), url: page.url(), people: people2 });
+    } else {
+      const p2 = await scrapeSearchProfileUrls(page);
+      seenPool.push(...p2);
+      console.log(`  step 5: ${p2.length} URLs on page 2`);
+      await postExtraction(runId, 5, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p2 });
+    }
     await reportStepResult(runId, 5, "extract");
+
+    if (isLeadRun) {
+      // Lead flow ends here: reporting step 5 advanced the cursor to 6 ==
+      // total_steps, so the backend auto-completed the run and the lead push
+      // hook fired. No for_each, no profile visits.
+      const done = await getRun(runId);
+      console.log(`  done (lead run): status=${done.status} step=${done.current_step_index}/${done.total_steps}`);
+      return;
+    }
 
     const expansion = await expandForEach(runId, 6);
     console.log(`  step 6: for_each expanded into ${expansion.iterations} iterations`);
@@ -1242,7 +1408,7 @@ async function driveRun(run) {
 // ── Main poll loop ──────────────────────────────────────────────────────────
 
 console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
-console.log(`[daemon] watching for runs with origin.event_kind=new_job_position`);
+console.log(`[daemon] watching for runs with origin.event_kind in {new_job_position, linkedin_lead_search}`);
 
 setInterval(() => {
   postHeartbeat({

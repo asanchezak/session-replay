@@ -44,3 +44,8 @@ class ExecutionRun(Base, TimestampMixin, UUIDMixin):
     # keys: id, name, profile_url, status, score, recommendation, odoo_url,
     # refreshed_at. Populated by LinkedInApplicantPushService.
     linkedin_applicants: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Snapshot of leads pushed to Odoo for the lightweight lead-sourcing flow
+    # (origin.event_kind == "linkedin_lead_search"). List of dicts with keys:
+    # id, name, headline, profile_url, status, odoo_url, refreshed_at.
+    # Populated by LinkedInLeadPushService.
+    linkedin_leads: Mapped[list | None] = mapped_column(JSON, nullable=True)
