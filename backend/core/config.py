@@ -1,4 +1,4 @@
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -30,6 +30,22 @@ class Settings(BaseSettings):
     vision_high_detail_on_failure: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v):
+        """Accept CORS_ORIGINS as a comma-separated string (operator-friendly,
+        e.g. for adding a Tailscale dashboard origin) in addition to a JSON
+        list. Empty -> []."""
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                import json
+                return json.loads(s)
+            return [o.strip() for o in s.split(",") if o.strip()]
+        return v
 
     def check_insecure_defaults(self):
         if self.api_key.get_secret_value() == "dev-api-key-change-in-production":

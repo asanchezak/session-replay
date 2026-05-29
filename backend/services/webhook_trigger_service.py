@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.models.connector import ConnectorConfig
+from core.models.run import ExecutionRun
 from core.models.webhook import WebhookTrigger
+from core.state_machine import RunStatus
 from services.connector_forum_service import ConnectorForumService
 from services.execution_service import ExecutionService
 from services.template_service import TemplateService
@@ -16,6 +18,26 @@ from services.workflow_connector_service import WorkflowConnectorService, _short
 
 EVENT_KIND_NEW_JOB_POSITION = "new_job_position"
 SUPPORTED_EVENT_KINDS = {EVENT_KIND_NEW_JOB_POSITION}
+
+# A run in any of these statuses is still "live" — the single daemon is or will
+# be driving it. trigger-now refuses to pile a second run on top so testers
+# don't burn the shared LinkedIn budget on duplicate scrapes (see the plan's
+# "Guard de run activo"). Terminal states (completed/failed/canceled) don't count.
+NON_TERMINAL_STATUSES = (
+    RunStatus.QUEUED.value,
+    RunStatus.RUNNING.value,
+    RunStatus.WAITING_FOR_USER.value,
+    RunStatus.RECOVERING.value,
+)
+
+
+class ActiveRunConflict(Exception):
+    """Raised when a manual trigger is rejected because the workflow already
+    has a non-terminal run in flight. Carries the existing run id."""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        super().__init__(f"Workflow already has an active run ({run_id}).")
 
 
 class WebhookTriggerService:
@@ -106,7 +128,11 @@ class WebhookTriggerService:
             candidate_count = int(raw_count) if raw_count is not None else 2
         except (TypeError, ValueError):
             candidate_count = 2
-        candidate_count = max(1, min(candidate_count, 25))
+        # Anti-bot: cap how many profiles one webhook can request in a single
+        # burst. 25 profiles × ~3 page loads each is a reckless spike that
+        # tripped LinkedIn's wall; 8 is a sane ceiling. Per-profile extraction
+        # is unaffected (full data still captured for each profile visited).
+        candidate_count = max(1, min(candidate_count, 8))
 
         job_data = {
             "job_id": raw_job_id,
@@ -165,9 +191,36 @@ class WebhookTriggerService:
         return ""
 
     async def trigger_now(
-        self, workflow_id: str, connector_id: str, job_url: str | None = None
+        self,
+        workflow_id: str,
+        connector_id: str,
+        job_url: str | None = None,
+        execution_options: dict | None = None,
+        idempotency_key: str | None = None,
+        triggered_by: str | None = None,
     ) -> dict:
-        """Manual test trigger: resolve latest Odoo job, optionally override job_url."""
+        """Manual test trigger: resolve latest Odoo job, optionally override job_url.
+
+        Two guards protect the shared LinkedIn account:
+        - idempotency_key: re-firing the same logical request returns the prior
+          run instead of creating a duplicate.
+        - active-run guard: refuses to start a second run while the workflow
+          already has one in flight (the single daemon serializes anyway, and a
+          pile of runs just wastes the daily budget).
+        """
+        if idempotency_key:
+            existing = await self._find_run_by_idempotency_key(workflow_id, idempotency_key)
+            if existing is not None:
+                return {
+                    "run_id": str(existing.id),
+                    "status": "duplicate",
+                    "idempotency_key": idempotency_key,
+                }
+
+        active = await self._find_active_run(workflow_id)
+        if active is not None:
+            raise ActiveRunConflict(str(active.id))
+
         connector = await self._get_connector_or_raise(connector_id)
         jobs = await self.connector_forum.fetch_jobs(connector, limit=25)
         if not jobs:
@@ -203,7 +256,13 @@ class WebhookTriggerService:
             workflow_id=workflow_id,
             event_kind=EVENT_KIND_NEW_JOB_POSITION,
         )
-        run_id = await self._fire(synthetic, job_data)
+        run_id = await self._fire(
+            synthetic,
+            job_data,
+            execution_options=execution_options,
+            idempotency_key=idempotency_key,
+            triggered_by=triggered_by,
+        )
         return {"run_id": run_id, "resolved_params": job_data}
 
     async def replay_last(self, trigger_id: str) -> dict:
@@ -223,7 +282,14 @@ class WebhookTriggerService:
         run_id = await self._fire(trigger, trigger.last_job_payload)
         return {"run_id": run_id, "replayed_from": trigger.last_fired_at.isoformat() if trigger.last_fired_at else None, "job_data": trigger.last_job_payload}
 
-    async def _fire(self, trigger: WebhookTrigger, job_data: dict) -> str | None:
+    async def _fire(
+        self,
+        trigger: WebhookTrigger,
+        job_data: dict,
+        execution_options: dict | None = None,
+        idempotency_key: str | None = None,
+        triggered_by: str | None = None,
+    ) -> str | None:
         """Render all enabled connector bindings with job_data, build plan, create and start run."""
         workflow_id = trigger.workflow_id
         bindings = await self.wc_service.list_bindings(workflow_id)
@@ -251,12 +317,47 @@ class WebhookTriggerService:
             "event_kind": trigger.event_kind,
             "trigger_id": str(trigger.id) if trigger.id else None,
             "job_payload": job_data,
+            # QA testing knobs (default empty for production webhook/replay fires):
+            # execution_options.{mode,max_candidates,push_to_odoo,label_outputs}
+            # is read by the daemon (scrape cap + test tagging) and the push hook.
+            "execution_options": execution_options or {},
+            "idempotency_key": idempotency_key,
+            "triggered_by": triggered_by,
         }
         flag_modified(run, "origin")
         await self.session.flush()
-        from core.state_machine import RunStatus
         run = await exec_svc.transition(str(run.id), RunStatus.RUNNING)
         return str(run.id)
+
+    async def _find_active_run(self, workflow_id: str) -> ExecutionRun | None:
+        """Most recent non-terminal run for the workflow, if any."""
+        result = await self.session.execute(
+            select(ExecutionRun)
+            .where(
+                ExecutionRun.workflow_id == workflow_id,
+                ExecutionRun.status.in_(NON_TERMINAL_STATUSES),
+            )
+            .order_by(ExecutionRun.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def _find_run_by_idempotency_key(
+        self, workflow_id: str, idempotency_key: str
+    ) -> ExecutionRun | None:
+        """Find a prior run created with the same idempotency_key. Scans the
+        workflow's recent runs in Python to stay dialect-agnostic (origin is a
+        JSON column; idempotency lookups are rare manual-trigger events)."""
+        result = await self.session.execute(
+            select(ExecutionRun)
+            .where(ExecutionRun.workflow_id == workflow_id)
+            .order_by(ExecutionRun.created_at.desc())
+            .limit(50)
+        )
+        for run in result.scalars().all():
+            if (run.origin or {}).get("idempotency_key") == idempotency_key:
+                return run
+        return None
 
     async def _find_trigger(
         self, connector_id: str, workflow_id: str, event_kind: str

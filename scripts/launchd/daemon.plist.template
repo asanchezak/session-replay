@@ -33,10 +33,25 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>BACKEND</key>
         <string>http://localhost:8081</string>
+        <!-- Rotate this off the dev default and keep it IDENTICAL to backend
+             .env API_KEY. With one daemon this also gates who can trigger runs. -->
         <key>API_KEY</key>
         <string>dev-api-key-change-in-production</string>
         <key>POLL_INTERVAL_MS</key>
         <string>5000</string>
+        <!-- Conservative budget for the QA window so testing can't exhaust a
+             real-usage day. With a single canonical daemon this sidecar budget
+             is the TRUE global rate limit. Raise toward the code defaults
+             (80 / 18 / 30 / 500) once QA is done and real recruiting volume
+             ramps up. See docs/anti-bot-measures.md + the QA plan. -->
+        <key>MAX_PROFILE_VIEWS_DAY</key>
+        <string>20</string>
+        <key>MAX_PROFILE_VIEWS_HOUR</key>
+        <string>6</string>
+        <key>MAX_SEARCHES_DAY</key>
+        <string>10</string>
+        <key>MAX_PAGE_LOADS_DAY</key>
+        <string>150</string>
     </dict>
 
     <key>RunAtLoad</key>

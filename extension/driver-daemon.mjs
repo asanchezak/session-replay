@@ -23,6 +23,15 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { defaultEmptyValue, readExtractShapes, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
+import { STEALTH_INIT } from "./src/shared/stealth.mjs";
+import {
+  mulberry32,
+  pickDwellMs,
+  shuffleInPlace,
+} from "./src/behavior/stealth-core.mjs";
+import { createAccountStateStore } from "./src/behavior/account-state.mjs";
+import { detectChallengeInPage, isBlockerUrl } from "./src/behavior/blocker-detect.mjs";
+import { createPageNav } from "./src/behavior/page-nav.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,11 +96,26 @@ async function fetchJson(url, init = {}) {
   return r.json();
 }
 
-async function postHeartbeat({ worker_id, polling, driving_run_id }) {
+async function postHeartbeat({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }) {
   await fetchJson(`${BACKEND}/v1/daemon/heartbeat`, {
     method: "POST",
-    body: JSON.stringify({ worker_id, polling, driving_run_id }),
+    body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }),
   });
+}
+
+// Pause a run on the backend (mirrors the extension's apiClient.pauseRun). Used
+// when a LinkedIn wall is detected mid-run or the daily budget is exhausted, so
+// the run stops cleanly (cursor NOT advanced) instead of plowing through.
+async function pauseRun(runId, reason, stepIndex) {
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/pause`, {
+      method: "POST",
+      body: JSON.stringify({ reason, step_index: stepIndex }),
+    });
+    console.log(`[daemon] paused run ${runId} @ step ${stepIndex}: ${reason}`);
+  } catch (err) {
+    console.error(`[daemon] pauseRun ${runId} failed:`, err.message?.slice(0, 200));
+  }
 }
 
 // Only pick runs that started within the last STALE_RUN_AGE_MS — keeps the
@@ -115,6 +139,101 @@ async function findPendingRun() {
   }
   return null;
 }
+
+// ── Blocker detection (detect on EVERY navigation; pause, don't plow) ────────
+
+// Distinct error so callers can tell a LinkedIn wall apart from a transient
+// network failure. Carries the blocker kind for circuit-breaker bookkeeping.
+class BlockerError extends Error {
+  constructor(blockerType, soft = false) {
+    super(`LinkedIn blocker: ${blockerType}`);
+    this.name = "BlockerError";
+    this.blockerType = blockerType;
+    this.soft = soft;
+  }
+}
+
+// detectChallengeInPage / isBlockerUrl are imported from
+// ./src/behavior/blocker-detect.mjs (unit-tested against fixture pages).
+
+// Throw BlockerError if the current page is a wall. Checks URL patterns first
+// (cheap), then the DOM. Used after every navigation.
+async function assertNoBlocker(page, label) {
+  let url = "";
+  try { url = page.url(); } catch {}
+  if (isBlockerUrl(url)) throw new BlockerError("checkpoint");
+  const dom = await detectChallengeInPage(page);
+  if (dom) throw new BlockerError(dom.type);
+}
+
+// Single navigation helper: goto → record page-load → blocker check. Replaces
+// every raw page.goto in the daemon so a wall on ANY navigation pauses the run.
+async function safeGoto(page, url, label) {
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  recordPageLoad();
+  await assertNoBlocker(page, label);
+}
+
+// ── Per-account budget + circuit breaker (gitignored sidecar) ────────────────
+//
+// State lives in extension/.linkedin-budget.json, keyed by the profile dir;
+// logic is in ./src/behavior/account-state.mjs (unit-tested separately).
+
+const WORK_START_HOUR = Number(process.env.WORK_START_HOUR || "8");
+const WORK_END_HOUR = Number(process.env.WORK_END_HOUR || "19");
+const WORK_DAYS = (process.env.WORK_DAYS || "1,2,3,4,5").split(",").map((s) => Number(s.trim()));
+const BASE_COOLDOWN_MS = Number(process.env.BASE_COOLDOWN_MS || `${20 * 60_000}`);
+const COOLDOWN_JITTER_MS = Number(process.env.COOLDOWN_JITTER_MS || `${20 * 60_000}`);
+
+const account = createAccountStateStore({
+  file: path.resolve(__dirname, ".linkedin-budget.json"),
+  accountId: path.basename(PROFILE_DIR),
+  limits: {
+    profileViewsPerDay: Number(process.env.MAX_PROFILE_VIEWS_DAY || "80"),
+    profileViewsPerHour: Number(process.env.MAX_PROFILE_VIEWS_HOUR || "18"),
+    searchesPerDay: Number(process.env.MAX_SEARCHES_DAY || "30"),
+    pageLoadsPerDay: Number(process.env.MAX_PAGE_LOADS_DAY || "500"),
+  },
+  work: { startHour: WORK_START_HOUR, endHour: WORK_END_HOUR, days: WORK_DAYS, enabled: process.env.RESPECT_WORKING_HOURS !== "0" },
+});
+
+// Thin wrappers so call sites stay terse + sidecar I/O errors don't crash the
+// daemon (a budget write failure must never abort a live scrape).
+function recordPageLoad() { try { account.recordPageLoad(); } catch (e) { console.error("[budget]", e.message); } }
+function recordProfileView() { try { account.recordProfileView(); } catch (e) { console.error("[budget]", e.message); } }
+function recordSearch() { try { account.recordSearch(); } catch (e) { console.error("[budget]", e.message); } }
+function budgetExhaustedReason() { try { return account.budgetExhaustedReason(); } catch { return null; } }
+function circuitOpen() { try { return account.circuitOpen(); } catch { return false; } }
+function isWithinWorkingHours() { try { return account.isWithinWorkingHours(); } catch { return true; } }
+
+// Circuit detail for the heartbeat so the dashboard can show *why* the account
+// is in cooldown and until when, not just a boolean.
+function circuitInfo() {
+  try {
+    const c = account.circuit();
+    const open = account.circuitOpen();
+    return {
+      circuit_open: open,
+      circuit_reason: open ? (c.last_trip_kind || null) : null,
+      cooldown_until: open && c.open_until ? new Date(c.open_until).toISOString() : null,
+    };
+  } catch {
+    return { circuit_open: false, circuit_reason: null, cooldown_until: null };
+  }
+}
+
+function tripCircuit(kind, soft = false) {
+  try {
+    const c = account.tripCircuit(kind, soft);
+    const hrs = (c.cooldown_ms / 3600_000).toFixed(0);
+    console.error(`[CIRCUIT OPEN] account=${path.basename(PROFILE_DIR)} kind=${kind} soft=${soft} trips=${c.consecutive_trips} cooldown=${hrs}h until=${new Date(c.open_until).toISOString()}`);
+    if (c.consecutive_trips >= 4) console.error(`[CIRCUIT OPEN] !! ${c.consecutive_trips} consecutive trips — needs manual review of this account`);
+  } catch (e) {
+    console.error("[circuit] trip failed:", e.message);
+  }
+}
+
+let nextRunNotBefore = 0;
 
 async function getRun(runId) {
   return fetchJson(`${BACKEND}/v1/runs/${runId}`);
@@ -270,51 +389,18 @@ async function expandForEach(runId, stepIndex) {
 }
 
 // ── Stealth init ────────────────────────────────────────────────────────────
+// STEALTH_INIT now lives in ./src/shared/stealth.mjs (minimal, consistent set
+// for a real Chrome on this machine). See that module for the rationale.
 
-const STEALTH_INIT = () => {
-  try {
-    const nativeToString = Function.prototype.toString;
-    const toStringMap = new WeakMap();
-    const proxiedToString = new Proxy(nativeToString, {
-      apply(t, thisArg, args) { const c = toStringMap.get(thisArg); if (c) return c; return Reflect.apply(t, thisArg, args); },
-    });
-    Function.prototype.toString = proxiedToString;
-    toStringMap.set(proxiedToString, "function toString() { [native code] }");
-    const mask = (fn, name) => (toStringMap.set(fn, `function ${name}() { [native code] }`), fn);
-    try { Object.defineProperty(navigator, "webdriver", { get: () => undefined, configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"], configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8, configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8, configurable: true }); } catch {}
-    try {
-      const q = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = mask(function query(p) {
-        if (p && p.name === "notifications") return Promise.resolve({ state: "default", name: "notifications", onchange: null, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true });
-        return q(p);
-      }, "query");
-    } catch {}
-    try {
-      if (!window.chrome) window.chrome = {};
-      if (!window.chrome.runtime) window.chrome.runtime = { OnInstalledReason: { CHROME_UPDATE: "chrome_update", INSTALL: "install", UPDATE: "update" } };
-    } catch {}
-    try {
-      const orig = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = mask(function (p) { if (p === 37445) return "Intel Inc."; if (p === 37446) return "Intel Iris OpenGL Engine"; return orig.call(this, p); }, "getParameter");
-    } catch {}
-  } catch (err) { console.warn("[stealth] init error:", err); }
-};
-
-// ── Page interactions / scraping (mirror live-linkedin-driver) ──────────────
-
-async function humanScroll(page, rounds = 5) {
-  for (let i = 0; i < rounds; i++) {
-    await page.mouse.wheel(0, 400 + Math.floor(Math.random() * 400));
-    await sleep(jitter(600, 700));
-  }
-}
+// ── Human-input primitives (Playwright `page.mouse.*` → trusted events) ──────
+// Bezier mouse travel, trusted "Show all" clicks, seeded scrolling, and
+// Show-all section discovery live in ./src/behavior/page-nav.mjs (unit-tested
+// against fixture pages). One factory instance holds the per-page cursor state.
+const { moveMouseAlongBezier, clickSectionLink, humanScrollSeeded, getShowAllSections } = createPageNav();
 
 async function scrapeSearchProfileUrls(page) {
   await page.waitForSelector('a[href*="/in/"]', { timeout: 30000 }).catch(() => {});
-  await humanScroll(page, 4);
+  await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
   const urls = await page.evaluate(() => {
     const out = new Set();
     document.querySelectorAll('a[href*="/in/"]').forEach((a) => {
@@ -328,11 +414,17 @@ async function scrapeSearchProfileUrls(page) {
   return urls.filter((u) => /linkedin\.com\/in\/[A-Za-z0-9_\-%\.]+$/.test(u));
 }
 
-async function scrapeProfileTopCard(page, url) {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+async function scrapeProfileTopCard(page, url, rand = Math.random) {
+  // The `navigate` step usually already landed us on the profile; only goto if
+  // we're not already there (avoids a redundant double-load of the main page,
+  // itself a bot tell). safeGoto is used so a wall here still pauses the run.
+  const base = url.replace(/\/$/, "");
+  if (!page.url().replace(/\/$/, "").startsWith(base)) {
+    await safeGoto(page, url, "topcard");
+  }
   try { await page.waitForSelector('[data-view-name="profile-top-card"], section[componentkey*="Topcard"]', { timeout: 20000, state: "attached" }); } catch {}
   await sleep(jitter(2500, 1500));
-  await humanScroll(page, 7);
+  await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
   try { await page.waitForSelector('[data-view-name="profile-card-about"]', { timeout: 6000, state: "attached" }); } catch {}
   await sleep(jitter(1500, 1000));
 
@@ -370,12 +462,9 @@ async function scrapeProfileTopCard(page, url) {
   });
 }
 
-async function scrapeExperienceItems(page, base) {
-  const url = `${base.replace(/\/$/, "")}/details/experience/`;
-  try { await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }); } catch { return []; }
-  await sleep(jitter(2500, 1200));
-  for (let i = 0; i < 8; i++) { await page.mouse.wheel(0, 700); await sleep(jitter(450, 300)); }
-  await sleep(jitter(1500, 800));
+// Extract the experience paras/desc from the CURRENT page (the
+// /details/experience/ subpage). Navigation is handled by visitSection.
+async function extractExperienceParas(page) {
   return await page.evaluate(() => {
     const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
     const main = document.querySelector("main") || document.body;
@@ -423,12 +512,9 @@ function parseExperienceItems(items) {
   return out;
 }
 
-async function scrapeSectionListItems(page, profileBase, section) {
-  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
-  try { await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }); } catch { return []; }
-  await sleep(jitter(2500, 1200));
-  for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, 700); await sleep(jitter(400, 300)); }
-  await sleep(jitter(1500, 800));
+// Extract structured list items from the CURRENT page (a /details/<section>/
+// subpage). Navigation is handled by visitSection.
+async function extractSectionListItems(page) {
   return await page.evaluate(() => {
     const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
     const leafTexts = (root) => {
@@ -557,12 +643,9 @@ function parseSimpleListItems(items, limit = 25) {
   return out;
 }
 
-async function scrapeSubpageText(page, profileBase, section) {
-  const url = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
-  try { await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }); } catch { return ""; }
-  await sleep(jitter(2500, 1200));
-  for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, 700); await sleep(jitter(400, 300)); }
-  await sleep(jitter(1500, 800));
+// Extract raw section text from the CURRENT page (a /details/<section>/
+// subpage) for AI extraction. Navigation is handled by visitSection.
+async function extractSubpageText(page, section) {
   return await page.evaluate((sec) => {
     const clean = (s) => (s || "").trim().replace(/\s+/g, " ");
     const main = document.querySelector("main") || document.body;
@@ -617,8 +700,74 @@ function defaultProfileShapes() {
   ];
 }
 
+// Deterministic 32-bit string hash → PRNG seed.
+function seedFromString(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// Navigate to ONE /details/<section>/ subpage like a human — preferring a
+// trusted click on the in-page "Show all" anchor (bezier mouse travel), with a
+// page.goto fallback when the anchor isn't present — then extract everything
+// that subpage offers in a SINGLE visit (list items + raw text, plus the
+// experience paras for the experience page). Replaces the old per-extraction
+// goto's that visited the same subpage 2-3×. Throws BlockerError up if a wall
+// is hit. Returns empty data on transient nav failure (full extraction is
+// best-effort per section, matching prior behavior).
+async function visitSection(page, profileBase, section, rand, showAllSet) {
+  const slug = (profileBase.match(/\/in\/([^/]+)/) || [])[1] || "";
+  const sectionPath = `/in/${slug}/details/${section}/`;
+  const sectionUrl = `${profileBase.replace(/\/$/, "")}/details/${section}/`;
+  const empty = { listItems: [], rawText: "", expParas: [] };
+
+  // Short jittered "read, then click" pause.
+  await sleep(600 + Math.floor(rand() * 1400));
+
+  let navigated = false;
+  if (showAllSet.has(sectionPath)) {
+    const clicked = await clickSectionLink(page, sectionPath, rand);
+    if (clicked) {
+      await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+      await sleep(800 + Math.floor(rand() * 800));
+      // Confirm the click actually landed on the section page; if a blocker
+      // intercepted, detect it here too.
+      await assertNoBlocker(page, `section-click:${section}`);
+      if (new RegExp(`/details/${section}/?`).test(page.url())) navigated = true;
+    }
+  }
+  if (!navigated) {
+    try {
+      await safeGoto(page, sectionUrl, `section:${section}`);
+    } catch (err) {
+      if (err instanceof BlockerError) throw err;
+      return empty;
+    }
+  }
+
+  await sleep(1500 + Math.floor(rand() * 1500));
+  await humanScrollSeeded(page, 1 + Math.floor(rand() * 3), rand);
+
+  const listItems = await extractSectionListItems(page).catch(() => []);
+  const rawText = await extractSubpageText(page, section).catch(() => "");
+  const expParas = section === "experience"
+    ? await extractExperienceParas(page).catch(() => [])
+    : [];
+
+  // Reading dwell with the cursor settled — looks like a person reading.
+  await sleep(pickDwellMs(3000, 10000, rand));
+  return { listItems, rawText, expParas };
+}
+
 async function scrapeProfileFull(page, url, extractShapes = []) {
-  const top = await scrapeProfileTopCard(page, url);
+  // Per-profile seed mixes the URL with wall-clock so the same profile isn't
+  // replayed with an identical behavior signature across runs.
+  const rand = mulberry32((seedFromString(url) ^ (Date.now() & 0xffffffff)) >>> 0);
+
+  const top = await scrapeProfileTopCard(page, url, rand);
   const requestedShapes = extractShapes.length > 0 ? extractShapes : defaultProfileShapes();
   const result = {
     page_title: top.full_name ? `${top.full_name} | LinkedIn` : "",
@@ -627,75 +776,58 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
     location: top.location || "",
     about: top.about || "",
   };
-  const subpageTextCache = new Map();
-  const sectionItemsCache = new Map();
+
+  // Which /details/<section>/ subpages we need (full extraction — every
+  // requested section, deduped). about/full_name/headline/location come from
+  // the top card and need no subpage.
+  const TOPCARD_KEYS = new Set(["about", "full_name", "headline", "location"]);
+  const neededSections = [...new Set(
+    requestedShapes
+      .map((s) => s?.key)
+      .filter((k) => k && !TOPCARD_KEYS.has(k))
+      .map((k) => (k === "top_skills" ? "skills" : k)),
+  )];
+
+  // Inspect the loaded profile for which sections expose a "Show all" anchor,
+  // then visit each needed section ONCE, in a shuffled order (a real recruiter
+  // doesn't open sections in a fixed sequence).
+  const showAll = await getShowAllSections(page, url);
+  const visitOrder = shuffleInPlace([...neededSections], rand);
+  const sectionData = new Map();
+  for (const section of visitOrder) {
+    sectionData.set(section, await visitSection(page, url, section, rand, showAll));
+  }
+
   for (const shape of requestedShapes) {
     if (!shape?.key) continue;
-    if (shape.key === "about") {
-      result.about = top.about || defaultEmptyValue(shape);
-      continue;
-    }
+    if (shape.key === "about") { result.about = top.about || defaultEmptyValue(shape); continue; }
+    if (shape.key === "full_name") { result.full_name = top.full_name || defaultEmptyValue(shape); continue; }
+    if (shape.key === "headline") { result.headline = top.headline || defaultEmptyValue(shape); continue; }
+    if (shape.key === "location") { result.location = top.location || defaultEmptyValue(shape); continue; }
+
+    const sectionKey = shape.key === "top_skills" ? "skills" : shape.key;
+    const data = sectionData.get(sectionKey) || { listItems: [], rawText: "", expParas: [] };
+
     if (shape.key === "experience") {
-      const expItems = await scrapeExperienceItems(page, url);
-      const parsedExperience = parseExperienceItems(expItems);
+      const parsedExperience = parseExperienceItems(data.expParas);
       if (parsedExperience.length > 0) {
         result.experience = parsedExperience;
       } else {
-        const listItems = await scrapeSectionListItems(page, url, "experience");
         result.experience = parseExperienceItems(
-          listItems.map((item) => ({ paras: item.texts || [], desc: "" })),
+          data.listItems.map((item) => ({ paras: item.texts || [], desc: "" })),
         );
       }
       continue;
     }
-    if (shape.key === "full_name") {
-      result.full_name = top.full_name || defaultEmptyValue(shape);
-      continue;
-    }
-    if (shape.key === "headline") {
-      result.headline = top.headline || defaultEmptyValue(shape);
-      continue;
-    }
-    if (shape.key === "location") {
-      result.location = top.location || defaultEmptyValue(shape);
-      continue;
-    }
-    const sectionKey = shape.key === "top_skills" ? "skills" : shape.key;
-    let sectionItems = sectionItemsCache.get(sectionKey);
-    if (sectionItems === undefined) {
-      sectionItems = await scrapeSectionListItems(page, url, sectionKey);
-      sectionItemsCache.set(sectionKey, sectionItems);
-    }
-    let rawText = subpageTextCache.get(sectionKey);
-    if (rawText === undefined) {
-      rawText = await scrapeSubpageText(page, url, sectionKey);
-      subpageTextCache.set(sectionKey, rawText);
-    }
-    const parsed = await aiExtractByShape(shape, rawText);
-    if (parsed?.[shape.key]) {
-      result[shape.key] = parsed[shape.key];
-      continue;
-    }
-    if (sectionKey === "skills") {
-      result[shape.key] = parseSkillItems(sectionItems);
-      continue;
-    }
-    if (sectionKey === "education") {
-      result[shape.key] = parseEducationItems(sectionItems);
-      continue;
-    }
-    if (sectionKey === "certifications") {
-      result[shape.key] = parseCertificationItems(sectionItems);
-      continue;
-    }
-    if (sectionKey === "projects") {
-      result[shape.key] = parseProjectItems(sectionItems);
-      continue;
-    }
-    if (sectionKey === "courses" || sectionKey === "languages") {
-      result[shape.key] = parseSimpleListItems(sectionItems);
-      continue;
-    }
+
+    const parsed = await aiExtractByShape(shape, data.rawText);
+    if (parsed?.[shape.key]) { result[shape.key] = parsed[shape.key]; continue; }
+
+    if (sectionKey === "skills") { result[shape.key] = parseSkillItems(data.listItems); continue; }
+    if (sectionKey === "education") { result[shape.key] = parseEducationItems(data.listItems); continue; }
+    if (sectionKey === "certifications") { result[shape.key] = parseCertificationItems(data.listItems); continue; }
+    if (sectionKey === "projects") { result[shape.key] = parseProjectItems(data.listItems); continue; }
+    if (sectionKey === "courses" || sectionKey === "languages") { result[shape.key] = parseSimpleListItems(data.listItems); continue; }
     result[shape.key] = defaultEmptyValue(shape);
   }
   return result;
@@ -703,9 +835,105 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
 
 // ── Run driver ──────────────────────────────────────────────────────────────
 
+// Click a search-results "Next" pagination control like a human (bezier travel
+// + trusted click) instead of deep-linking ?page=2. Returns false → goto fallback.
+async function clickPaginationNext(page, rand) {
+  try {
+    const target = await page.evaluate(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const btn = document.querySelector(
+        'button[aria-label="Next"], button[aria-label="Siguiente"], a[aria-label="Next"], a[aria-label="Siguiente"]',
+      );
+      if (!btn) return null;
+      btn.scrollIntoView({ behavior: "smooth", block: "center" });
+      await sleep(500);
+      const r = btn.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return null;
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    if (!target) return false;
+    await moveMouseAlongBezier(page, target, rand);
+    await sleep(80 + Math.floor(rand() * 140));
+    await page.mouse.click(target.x, target.y);
+    await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+    recordPageLoad();
+    await assertNoBlocker(page, "search-next");
+    return true;
+  } catch (err) {
+    if (err instanceof BlockerError) throw err;
+    return false;
+  }
+}
+
+// Noise navigation between profiles — honors the backend's noise contract
+// (_noise_kind / _noise_seed). Mirrors the extension's executeNoiseBreak.
+async function executeNoiseBreakDaemon(page, kind, seed, lastSearchUrl, seenPool) {
+  const rand = mulberry32((Number(seed) >>> 0) || 1);
+  const nav = async (url) => {
+    if (!url) return;
+    await safeGoto(page, url, `noise:${kind}`);
+  };
+  switch (kind) {
+    case "search_bounce": {
+      if (lastSearchUrl) {
+        await nav(lastSearchUrl);
+        await humanScrollSeeded(page, 2 + Math.floor(rand() * 2), rand);
+        await sleep(5000 + Math.floor(rand() * 7000));
+        return;
+      }
+      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
+      await sleep(5000 + Math.floor(rand() * 7000));
+      return;
+    }
+    case "feed_scroll": {
+      await nav("https://www.linkedin.com/feed/");
+      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
+      await sleep(8000 + Math.floor(rand() * 12000));
+      return;
+    }
+    case "profile_hover": {
+      const candidate = seenPool.length ? seenPool[Math.floor(rand() * seenPool.length)] : null;
+      if (candidate) {
+        await nav(candidate);
+        await humanScrollSeeded(page, 1 + Math.floor(rand() * 2), rand);
+        await sleep(3000 + Math.floor(rand() * 5000));
+        return;
+      }
+      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
+      await sleep(5000 + Math.floor(rand() * 10000));
+      return;
+    }
+    case "idle_scroll":
+    default: {
+      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
+      await sleep(5000 + Math.floor(rand() * 10000));
+      return;
+    }
+  }
+}
+
+// Pause the run on a detected wall + trip the account circuit breaker.
+async function handleBlocker(runId, err, stepIndex) {
+  console.error(`[daemon] blocker "${err.blockerType}" at step ${stepIndex} — pausing run, NOT advancing`);
+  await pauseRun(runId, `Blocking: ${err.blockerType}`, stepIndex);
+  tripCircuit(err.blockerType, err.soft);
+}
+
 async function driveRun(run) {
   const runId = run.id;
   drivingRunId = runId;
+  // QA execution options (default: live, no cap). max_candidates caps how many
+  // profiles a test run actually scrapes so a test doesn't burn the shared
+  // budget; remaining candidate steps just advance the cursor without page loads.
+  const execOpts = run.origin?.execution_options || {};
+  const maxCandidates = (typeof execOpts.max_candidates === "number" && execOpts.max_candidates >= 0)
+    ? execOpts.max_candidates
+    : null;
+  const isTestRun = execOpts.mode === "test";
+  let profileExtractCount = 0;
+  if (maxCandidates !== null || isTestRun) {
+    console.log(`[daemon] run ${runId} options: mode=${execOpts.mode || "live"} max_candidates=${maxCandidates ?? "∞"}`);
+  }
   const jobTitle = run.origin?.job_payload?.job_title || "Software Engineer";
   const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(jobTitle)}&origin=SWITCH_SEARCH_VERTICAL`;
   const searchUrlP2 = `${searchUrl}&page=2`;
@@ -719,31 +947,51 @@ async function driveRun(run) {
   });
   await ctx.addInitScript(STEALTH_INIT);
 
+  // Run-scoped RNG for the opening sequence + a pool of seen profile URLs for
+  // noise decoys + the last search URL for search_bounce noise.
+  const orand = mulberry32((seedFromString(runId) ^ (Date.now() & 0xffffffff)) >>> 0);
+  const seenPool = [];
+  let lastSearchUrl = searchUrl;
+  let blocked = false;
+  let lastIdx = 0;
+
   try {
     const page = ctx.pages()[0] || (await ctx.newPage());
 
-    await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 60000 });
+    // step 0 — feed warm-up (real users don't deep-link cold to search).
+    await safeGoto(page, "https://www.linkedin.com/feed/", "feed");
     await sleep(jitter(2500, 1500));
-    if (/checkpoint|login|authwall/i.test(page.url())) throw new Error(`Challenge on /feed/: ${page.url()}`);
     await reportStepResult(runId, 0, "navigate");
 
-    await humanScroll(page, 4);
+    // step 1 — idle noise: varied scroll + read dwell.
+    await humanScrollSeeded(page, 2 + Math.floor(orand() * 3), orand);
+    await sleep(pickDwellMs(3000, 9000, orand));
     await reportStepResult(runId, 1, "noise_break");
 
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    // step 2 — search page 1.
+    await safeGoto(page, searchUrl, "search-p1");
+    lastSearchUrl = searchUrl;
+    recordSearch();
     await sleep(jitter(3000, 1500));
     await reportStepResult(runId, 2, "navigate");
 
     const p1 = await scrapeSearchProfileUrls(page);
+    seenPool.push(...p1);
     console.log(`  step 3: ${p1.length} URLs on page 1`);
     await postExtraction(runId, 3, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p1 });
     await reportStepResult(runId, 3, "extract");
 
-    await page.goto(searchUrlP2, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await sleep(jitter(3000, 1500));
+    // step 4 — page 2: click the "Next" pagination like a human; goto fallback.
+    const wentP2 = await clickPaginationNext(page, orand);
+    if (!wentP2) {
+      await safeGoto(page, searchUrlP2, "search-p2");
+      await sleep(jitter(3000, 1500));
+    }
+    lastSearchUrl = page.url();
     await reportStepResult(runId, 4, "navigate");
 
     const p2 = await scrapeSearchProfileUrls(page);
+    seenPool.push(...p2);
     console.log(`  step 5: ${p2.length} URLs on page 2`);
     await postExtraction(runId, 5, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: p2 });
     await reportStepResult(runId, 5, "extract");
@@ -757,29 +1005,55 @@ async function driveRun(run) {
 
     while (cur.current_step_index < cur.total_steps && cur.status === "running") {
       const idx = cur.current_step_index;
+      lastIdx = idx;
       const step = steps[idx] || {};
       const action = String(step.action_type || "");
       const value = String(step.value || "");
       try {
-        if (action === "navigate") {
+        // Honor the backend-computed inter-iteration pacing.
+        if (typeof step.delay_before_ms === "number" && step.delay_before_ms > 0) {
+          await sleep(step.delay_before_ms);
+        }
+        if (maxCandidates !== null && profileExtractCount >= maxCandidates
+            && (action === "navigate" || action === "extract")) {
+          // Cap reached: skip remaining candidate navigate/extract steps (no
+          // page load, no scrape) and just advance the cursor so the run still
+          // completes cleanly with exactly max_candidates profiles.
+          await reportStepResult(runId, idx, action);
+        } else if (action === "navigate") {
           const target = step._for_each_item || value;
           if (/^https?:/.test(target)) {
-            await page.goto(target, { waitUntil: "domcontentloaded", timeout: 60000 });
-            await sleep(jitter(2500, 1500));
+            await safeGoto(page, target, `navigate:${idx}`);
+            // Settle on arrival with a bezier move + small scroll so the
+            // cursor isn't frozen on a freshly-loaded profile.
+            await moveMouseAlongBezier(page, { x: 500 + orand() * 400, y: 300 + orand() * 200 }, orand);
+            await humanScrollSeeded(page, 1 + Math.floor(orand() * 2), orand);
+            await sleep(jitter(2000, 1500));
           }
           await reportStepResult(runId, idx, "navigate");
         } else if (action === "extract") {
+          // Budget gate: pause-and-resume rather than drop candidates.
+          const reason = budgetExhaustedReason();
+          if (reason) {
+            console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
+            await pauseRun(runId, reason, idx);
+            blocked = true;
+            break;
+          }
           // Capture profile URL BEFORE scrapeProfileFull navigates through
           // /details/<section>/ subpages, otherwise page.url() returns the
           // last subpage instead of the canonical /in/<slug>/.
           const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
           const data = await scrapeProfileFull(page, profileUrl, readExtractShapes(step));
+          recordProfileView();
           console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${data.education.length} skills=${data.skills.length} certs=${data.certifications.length}`);
           await postExtraction(runId, idx, profileUrl, data);
           await reportStepResult(runId, idx, "extract");
+          profileExtractCount += 1;
         } else if (action === "noise_break") {
-          await sleep(jitter(2000, 2000));
-          await humanScroll(page, 2);
+          const kind = step._noise_kind || "idle_scroll";
+          const seed = step._noise_seed != null ? step._noise_seed : Math.floor(Math.random() * 0xffffffff);
+          await executeNoiseBreakDaemon(page, kind, seed, lastSearchUrl, seenPool);
           await reportStepResult(runId, idx, "noise_break");
         } else if (action === "open_message_drafts") {
           const payload = await fetchMessageTargets(runId);
@@ -796,6 +1070,7 @@ async function driveRun(run) {
             try {
               const profilePage = await ctx.newPage();
               await profilePage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+              recordPageLoad();
               console.log(`    [${i + 1}/${targets.length}] opened ${t.name || t.profile_url}`);
             } catch (err) {
               console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message?.slice(0, 200)}`);
@@ -807,6 +1082,10 @@ async function driveRun(run) {
           await reportStepResult(runId, idx, action || "noop");
         }
       } catch (stepErr) {
+        // A detected LinkedIn wall must NOT be plowed through: bubble it so the
+        // outer handler pauses the run (cursor NOT advanced) and trips the
+        // circuit breaker.
+        if (stepErr instanceof BlockerError) throw stepErr;
         // Transient LinkedIn / network failures (e.g. ERR_INTERNET_DISCONNECTED,
         // navigation timeout) would otherwise pin the run in `running` forever
         // while the daemon crashes out. The workflow's for_each declares
@@ -825,7 +1104,23 @@ async function driveRun(run) {
       }
       cur = await getRun(runId);
     }
-    console.log(`  done: status=${cur.status} step=${cur.current_step_index}/${cur.total_steps}`);
+    // Loop exits when the run leaves `running` — completed, or canceled by an
+    // operator via POST /v1/runs/{id}/cancel. Detect cancellation explicitly so
+    // it's not silently treated as a normal finish.
+    if (cur.status === "canceled") {
+      console.log(`  run ${runId} CANCELED by operator at step ${cur.current_step_index}/${cur.total_steps} — aborting drive`);
+      blocked = true;
+    }
+    if (!blocked) console.log(`  done: status=${cur.status} step=${cur.current_step_index}/${cur.total_steps}`);
+  } catch (err) {
+    if (err instanceof BlockerError) {
+      // Wall hit on the opening sequence or bubbled from the step loop. Pause
+      // at the last step we were on (0 for the opening) and trip the circuit.
+      await handleBlocker(runId, err, lastIdx);
+      blocked = true;
+    } else {
+      throw err;
+    }
   } finally {
     drivingRunId = null;
     await ctx.close().catch(() => {});
@@ -842,10 +1137,14 @@ setInterval(() => {
     worker_id: WORKER_ID,
     polling: drivingRunId === null,
     driving_run_id: drivingRunId,
+    ...circuitInfo(),
   }).catch((err) => {
     console.error("[daemon] heartbeat error:", err.message);
   });
 }, POLL_INTERVAL_MS);
+
+let lastSkipLog = "";
+const skipLog = (msg) => { if (msg !== lastSkipLog) { console.log(`[daemon] ${msg}`); lastSkipLog = msg; } };
 
 while (true) {
   try {
@@ -853,13 +1152,34 @@ while (true) {
       worker_id: WORKER_ID,
       polling: drivingRunId === null,
       driving_run_id: drivingRunId,
+      ...circuitInfo(),
     });
-    const run = await findPendingRun();
-    if (run) {
-      try {
-        await driveRun(run);
-      } catch (err) {
-        console.error(`[daemon] driveRun ${run.id} failed:`, err.message);
+
+    // Account-wide gates — skip driving (keep heart-beating) when any holds.
+    if (circuitOpen()) {
+      const until = new Date(account.circuit().open_until).toISOString();
+      skipLog(`circuit OPEN until ${until} — not driving`);
+    } else if (!isWithinWorkingHours()) {
+      skipLog(`outside working hours (${WORK_START_HOUR}:00-${WORK_END_HOUR}:00, days ${WORK_DAYS.join(",")}) — not driving`);
+    } else if (Date.now() < nextRunNotBefore) {
+      skipLog(`inter-run cooldown until ${new Date(nextRunNotBefore).toISOString()} — not driving`);
+    } else {
+      const run = await findPendingRun();
+      if (run) {
+        const reason = budgetExhaustedReason();
+        if (reason) {
+          skipLog(`budget exhausted (${reason}) — deferring run ${run.id} to next window`);
+        } else {
+          lastSkipLog = "";
+          try {
+            await driveRun(run);
+          } catch (err) {
+            console.error(`[daemon] driveRun ${run.id} failed:`, err.message);
+          }
+          // Inter-run cooldown with jitter so runs don't fire back-to-back.
+          nextRunNotBefore = Date.now() + jitter(BASE_COOLDOWN_MS, COOLDOWN_JITTER_MS);
+          console.log(`[daemon] next run not before ${new Date(nextRunNotBefore).toISOString()}`);
+        }
       }
     }
   } catch (err) {

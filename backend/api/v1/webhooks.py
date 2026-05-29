@@ -6,7 +6,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from services.webhook_trigger_service import SUPPORTED_EVENT_KINDS, WebhookTriggerService
+from services.webhook_trigger_service import (
+    SUPPORTED_EVENT_KINDS,
+    ActiveRunConflict,
+    WebhookTriggerService,
+)
 
 router = APIRouter(tags=["webhooks"])
 
@@ -52,9 +56,26 @@ async def odoo_incoming_webhook(
 
 # ── Manual test trigger ───────────────────────────────────────────────────────
 
+class ExecutionOptions(BaseModel):
+    """Per-run QA knobs. `mode="test"` caps the scrape and tags outputs as test
+    data; defaults keep production behavior unchanged."""
+
+    mode: str = Field(default="live", pattern=r"^(live|test)$")
+    max_candidates: int | None = Field(
+        default=None, ge=0, le=8, description="Cap profiles scraped this run (test runs stay small)"
+    )
+    push_to_odoo: bool = Field(default=True, description="Push applicants to Odoo on completion")
+    label_outputs: bool = Field(default=False, description="Tag pushed applicants as test data in Odoo")
+
+
 class TriggerNowRequest(BaseModel):
     connector_id: str
     job_url: str | None = Field(default=None, description="Override the application URL sent in the message")
+    execution_options: ExecutionOptions | None = None
+    idempotency_key: str | None = Field(
+        default=None, description="Re-firing with the same key returns the prior run instead of duplicating"
+    )
+    triggered_by: str | None = Field(default=None, description="Operator id for audit (e.g. 'qa', 'andrey')")
 
 
 @router.post("/workflows/{workflow_id}/trigger-now")
@@ -70,7 +91,12 @@ async def trigger_workflow_now(
             workflow_id=workflow_id,
             connector_id=req.connector_id,
             job_url=req.job_url,
+            execution_options=req.execution_options.model_dump() if req.execution_options else None,
+            idempotency_key=req.idempotency_key,
+            triggered_by=req.triggered_by,
         )
+    except ActiveRunConflict as exc:
+        return _err(409, "ACTIVE_RUN", str(exc))
     except ValueError as exc:
         return _err(400, "BAD_REQUEST", str(exc))
     await db.commit()

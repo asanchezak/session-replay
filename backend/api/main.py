@@ -129,6 +129,11 @@ async def csrf_origin_check(request: Request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    # CORS preflight (OPTIONS) never carries the X-API-Key header; let it through
+    # so CORSMiddleware can answer it. Without this, cross-origin dashboard calls
+    # (e.g. over Tailscale) fail their preflight with 401.
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if request.url.path.startswith("/v1/") and request.url.path not in _AUTH_EXEMPT:
         api_key = request.headers.get("X-API-Key", "")
         if not api_key or api_key != settings.api_key.get_secret_value():

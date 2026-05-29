@@ -175,6 +175,16 @@ class LinkedInApplicantPushService:
         job_id = job_payload.get("job_id")
         connector_id = origin.get("connector_id")
 
+        # QA execution options: skip the Odoo push entirely if disabled, and tag
+        # applicants as test data when mode=test / label_outputs so they can be
+        # cleaned up later (Odoo akcr_cleanup_test_applicants).
+        exec_opts = origin.get("execution_options") or {}
+        if exec_opts.get("push_to_odoo") is False:
+            logger.info("push_from_run: push_to_odoo disabled for run %s — skipping", run_id)
+            return {"pushed": 0, "skipped": "push_disabled"}
+        run_mode = exec_opts.get("mode") or "live"
+        label_outputs = bool(exec_opts.get("label_outputs"))
+
         if not job_id:
             logger.warning("push_from_run: no job_id in origin for run %s", run_id)
             return {"pushed": 0, "skipped": "no_job_id"}
@@ -222,6 +232,8 @@ class LinkedInApplicantPushService:
                 payload = {
                     "job_id": job_id,
                     "source_run_id": str(run_id),
+                    "mode": run_mode,
+                    "label_outputs": label_outputs,
                     "profile_url": profile["profile_url"],
                     "full_name": profile.get("full_name") or "",
                     "headline": profile.get("headline") or "",
