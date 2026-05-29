@@ -287,7 +287,7 @@ async function composeDraftInPage(page, message) {
     return { ok: false, reason: "top_card_not_found" };
   }
   const trimmed = (message || "").slice(0, 300);
-  return page.evaluate(async (msg) => {
+  const result = await page.evaluate(async (msg) => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     function inGlobalNav(el) {
       if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
@@ -369,16 +369,27 @@ async function composeDraftInPage(page, message) {
       'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i], textarea'
     ), 6000);
     if (!textarea) return { ok: false, reason: "note_textarea_missing" };
+    // Focus + clear only. The note text itself is typed from the driver (Node)
+    // side with real keystroke timing instead of injected here, so LinkedIn
+    // sees genuine keydown/input events rather than a one-shot value set.
     textarea.focus();
-    textarea.value = "";
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter) setter.call(textarea, msg);
-    else textarea.value = msg;
+    if (setter) setter.call(textarea, ""); else textarea.value = "";
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.dispatchEvent(new Event("change", { bubbles: true }));
-    await sleep(200);
-    return { ok: true };
+    await sleep(150);
+    return { ok: true, ready: true };
   }, trimmed);
+
+  // Type the note with human keystroke timing into the focused note field.
+  if (result && result.ok && result.ready) {
+    const ta = page.locator(
+      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i]',
+    ).first();
+    await ta.click({ timeout: 3000 }).catch(() => { /* keep in-page focus */ });
+    await typeHumanLike(page, trimmed);
+    await sleep(200 + Math.floor(Math.random() * 300));
+  }
+  return result;
 }
 
 async function expandForEach(runId, stepIndex) {
@@ -397,6 +408,37 @@ async function expandForEach(runId, stepIndex) {
 // Show-all section discovery live in ./src/behavior/page-nav.mjs (unit-tested
 // against fixture pages). One factory instance holds the per-page cursor state.
 const { moveMouseAlongBezier, clickSectionLink, humanScrollSeeded, getShowAllSections } = createPageNav();
+
+// Type text into the currently-focused element one character at a time with
+// human-ish inter-key jitter (40-160ms), so LinkedIn sees real keystroke
+// timing instead of an instantaneous value injection. `page.keyboard.type`
+// dispatches trusted key events. Used for the search box and the connect note.
+async function typeHumanLike(page, text, rand = Math.random) {
+  for (const ch of text) {
+    try { await page.keyboard.type(ch); } catch { /* ignore */ }
+    await sleep(40 + Math.floor(rand() * 120));
+  }
+}
+
+// A "reading" dwell that, instead of freezing the cursor for the whole period,
+// breaks the wait into chunks interleaved with occasional micro mouse moves and
+// stray scrolls — what a person idly does while reading a section. Total wall
+// time ≈ `ms`.
+async function dwellWithJitter(page, ms, rand) {
+  let remaining = Math.max(0, ms | 0);
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, 700 + Math.floor(rand() * 1500));
+    await sleep(chunk);
+    remaining -= chunk;
+    if (remaining <= 0) break;
+    const r = rand();
+    if (r < 0.5) {
+      try { await moveMouseAlongBezier(page, { x: 400 + rand() * 500, y: 250 + rand() * 350 }, rand); } catch { /* ignore */ }
+    } else if (r < 0.7) {
+      try { await page.mouse.wheel(0, (rand() > 0.5 ? 1 : -1) * (80 + Math.floor(rand() * 160))); } catch { /* ignore */ }
+    }
+  }
+}
 
 async function scrapeSearchProfileUrls(page) {
   await page.waitForSelector('a[href*="/in/"]', { timeout: 30000 }).catch(() => {});
@@ -757,8 +799,9 @@ async function visitSection(page, profileBase, section, rand, showAllSet) {
     ? await extractExperienceParas(page).catch(() => [])
     : [];
 
-  // Reading dwell with the cursor settled — looks like a person reading.
-  await sleep(pickDwellMs(3000, 10000, rand));
+  // Reading dwell — broken up with micro mouse moves / stray scrolls so the
+  // cursor isn't frozen, which is what a person reading a section looks like.
+  await dwellWithJitter(page, pickDwellMs(3000, 10000, rand), rand);
   return { listItems, rawText, expParas };
 }
 
@@ -834,6 +877,70 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
 }
 
 // ── Run driver ──────────────────────────────────────────────────────────────
+
+// Reach the People search results the way a human does: click the global
+// search box, type the query with keystroke timing, press Enter, then click the
+// "People" filter pill (bezier travel + trusted click). Deep-links to the
+// people-results URL as a fallback if any step fails or we don't end up on a
+// people page, so the pipeline never breaks. Returns the URL we landed on.
+// Throws BlockerError up if a wall is hit (handled by the outer driveRun catch).
+async function navigateToPeopleSearch(page, jobTitle, deepLinkUrl, rand) {
+  const onPeople = () => /\/search\/results\/people/.test(page.url());
+  try {
+    // 1. Focus the global typeahead search box and type the query like a person.
+    const box = page.locator(
+      'input.search-global-typeahead__input, input[aria-label="Search" i], input[placeholder="Search" i], input[aria-label="Buscar" i], input[placeholder="Buscar" i]',
+    ).first();
+    await box.click({ timeout: 8000 });
+    await sleep(300 + Math.floor(rand() * 500));
+    // Clear any pre-filled text, then type with keystroke timing.
+    try {
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+      await page.keyboard.press("Backspace");
+    } catch { /* ignore */ }
+    await typeHumanLike(page, jobTitle, rand);
+    await sleep(300 + Math.floor(rand() * 600));
+    await page.keyboard.press("Enter");
+    await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+    recordPageLoad();
+    await assertNoBlocker(page, "search-typed");
+    await sleep(jitter(2000, 1500));
+
+    // 2. Narrow to People by clicking the filter pill (a real in-page click,
+    //    not a deep-link). Enter from the typeahead lands on /search/results/all/.
+    if (!onPeople()) {
+      const target = await page.evaluate(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const isPeople = (t) => /^(people|personas)$/i.test((t || "").trim());
+        const el = Array.from(document.querySelectorAll('button, a[role="button"], a'))
+          .find((e) => isPeople(e.innerText || e.textContent)
+            || /\/search\/results\/people/.test(e.getAttribute("href") || ""));
+        if (!el) return null;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        await sleep(400);
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      if (target) {
+        await moveMouseAlongBezier(page, target, rand);
+        await sleep(80 + Math.floor(rand() * 140));
+        await page.mouse.click(target.x, target.y);
+        await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+        recordPageLoad();
+        await assertNoBlocker(page, "search-people-filter");
+        await sleep(jitter(1500, 1200));
+      }
+    }
+    if (onPeople()) return page.url();
+  } catch (err) {
+    if (err instanceof BlockerError) throw err;
+    // Any non-blocker failure (selector drift, timeout): fall back to the
+    // deep-link so extraction can still proceed.
+  }
+  await safeGoto(page, deepLinkUrl, "search-p1-fallback");
+  return deepLinkUrl;
+}
 
 // Click a search-results "Next" pagination control like a human (bezier travel
 // + trusted click) instead of deep-linking ?page=2. Returns false → goto fallback.
@@ -963,14 +1070,14 @@ async function driveRun(run) {
     await sleep(jitter(2500, 1500));
     await reportStepResult(runId, 0, "navigate");
 
-    // step 1 — idle noise: varied scroll + read dwell.
+    // step 1 — idle noise: varied scroll + read dwell (cursor not frozen).
     await humanScrollSeeded(page, 2 + Math.floor(orand() * 3), orand);
-    await sleep(pickDwellMs(3000, 9000, orand));
+    await dwellWithJitter(page, pickDwellMs(3000, 9000, orand), orand);
     await reportStepResult(runId, 1, "noise_break");
 
-    // step 2 — search page 1.
-    await safeGoto(page, searchUrl, "search-p1");
-    lastSearchUrl = searchUrl;
+    // step 2 — search page 1: type the query into the global search box and
+    // click the People filter like a human (deep-link fallback inside).
+    lastSearchUrl = await navigateToPeopleSearch(page, jobTitle, searchUrl, orand);
     recordSearch();
     await sleep(jitter(3000, 1500));
     await reportStepResult(runId, 2, "navigate");

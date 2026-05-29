@@ -91,8 +91,24 @@ every requested section for every profile. We only humanize *how*:
 - **Seeded, varied cadence** — scroll counts (`humanScrollSeeded`), dwell times
   (`pickDwellMs`, beta-skewed 3–10s/section), per-profile RNG seeded from the
   URL ⊕ wall-clock (so the same profile isn't replayed identically).
+- **Dwell ≠ frozen cursor.** Read dwells go through `dwellWithJitter`, which
+  breaks the wait into chunks interleaved with occasional micro mouse moves
+  (bezier) and stray scrolls — a motionless cursor for N seconds is itself a
+  tell. (`driver-daemon.mjs`.)
+- **Typed search, not deep-linked.** Search page 1 is reached via
+  `navigateToPeopleSearch`: click the global typeahead box, type the query with
+  per-keystroke jitter (`typeHumanLike`, 40–160ms/char), Enter, then a trusted
+  click on the "People" filter pill. Deep-links to the people-results URL only
+  as a fallback if selectors drift, so the pipeline never breaks. The old code
+  jumped straight to `/search/results/people/?…&origin=SWITCH_SEARCH_VERTICAL`,
+  a cold synthetic deep-link.
 - **Humanized opening** — feed warm-up, then search page 2 reached by clicking
   the "Next" pagination control (goto fallback), not `?page=2` deep-link.
+- **Connect note is typed, not injected.** `composeDraftInPage` opens the
+  Connect-with-note modal and focuses the textarea in-page, then the note text
+  is typed from the driver side with `typeHumanLike` (real keydown/input
+  events) instead of a one-shot `value` set. (Draft only — Send is never
+  clicked.)
 - **Noise navigations** — the daemon honors the backend's noise contract
   (`_noise_kind` / `_noise_seed` / `delay_before_ms` from `expand_for_each`):
   `search_bounce` / `feed_scroll` / `profile_hover` / `idle_scroll`.
@@ -181,6 +197,15 @@ Run: `cd extension && npx vitest run && npx playwright test e2e/stealth-coverage
 
 ## Changelog
 
+- **2026-05-29** — Behavior-polish pass (daemon). (D) Search page 1 now typed
+  into the global search box + People-filter click (`navigateToPeopleSearch`)
+  instead of a cold deep-link. (E) Read dwells go through `dwellWithJitter` so
+  the cursor isn't frozen during reads. (F) Connect-with-note text is typed with
+  keystroke timing (`typeHumanLike`) rather than value-injected. Deep-link /
+  in-page fallbacks preserved so nothing breaks on selector drift. NOT yet
+  verified against a live LinkedIn session — still the user's call to fire.
+  Still-open backlog below (IP/ASN, full-section-visit pattern, soft-signal
+  detection) is unchanged.
 - **2026-05-28** — Account-flag response. (1) Removed the Intel-on-Apple WebGL
   lie + all counterproductive spoofs; consolidated 4 divergent `STEALTH_INIT`
   copies into `src/shared/stealth.mjs`. (2) Ported the extension's V2 behavior
