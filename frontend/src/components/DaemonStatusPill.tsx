@@ -6,6 +6,9 @@ interface DaemonWorkerStatus {
   worker_id: string;
   polling: boolean;
   driving_run_id: string | null;
+  circuit_open?: boolean | null;
+  circuit_reason?: string | null;
+  cooldown_until?: string | null;
   last_seen: string;
   age_seconds: number;
   up: boolean;
@@ -14,12 +17,23 @@ interface DaemonWorkerStatus {
 interface DaemonStatusResponse {
   workers: DaemonWorkerStatus[];
   any_up: boolean;
+  circuit_open?: boolean;
 }
 
 function formatAge(ageSeconds: number): string {
   if (ageSeconds < 60) return `${Math.round(ageSeconds)}s ago`;
   const minutes = Math.round(ageSeconds / 60);
   return `${minutes}m ago`;
+}
+
+function formatUntil(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const until = Date.parse(iso);
+  if (!Number.isFinite(until)) return "";
+  const mins = Math.round((until - Date.now()) / 60000);
+  if (mins <= 0) return "";
+  if (mins < 60) return ` · ~${mins}m left`;
+  return ` · ~${Math.round(mins / 60)}h left`;
 }
 
 export default function DaemonStatusPill() {
@@ -51,6 +65,25 @@ export default function DaemonStatusPill() {
 
   const mostRecentWorker = status.workers[0] || null;
   const activeWorker = status.workers.find((worker) => worker.up && worker.driving_run_id) || null;
+  const cooldownWorker = status.workers.find((worker) => worker.up && worker.circuit_open) || null;
+
+  // Circuit breaker open = the LinkedIn account is in cooldown; the daemon won't
+  // drive until it clears. Surface this so operators don't wonder why a trigger
+  // does nothing. Takes priority over the plain "up" state (a driving run can't
+  // coexist with an open circuit, so this sits after the driving-run check).
+  if (cooldownWorker) {
+    const reason = cooldownWorker.circuit_reason ? ` (${cooldownWorker.circuit_reason})` : "";
+    return (
+      <div
+        className="flex items-center gap-2 text-xs text-[#FF7675]"
+        aria-label="LinkedIn account in cooldown"
+        title={`Circuit breaker open${reason}${formatUntil(cooldownWorker.cooldown_until)}`}
+      >
+        <span className="w-2 h-2 rounded-full bg-[#FF7675]" />
+        <span>Account cooldown{reason}{formatUntil(cooldownWorker.cooldown_until)}</span>
+      </div>
+    );
+  }
 
   if (activeWorker?.driving_run_id) {
     return (

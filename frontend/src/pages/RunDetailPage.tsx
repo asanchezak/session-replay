@@ -193,6 +193,13 @@ interface RunDetail {
     event_kind?: string;
     trigger_id?: string;
     job_payload?: { job_id?: number; candidate_count?: number };
+    execution_options?: {
+      mode?: string;
+      max_candidates?: number | null;
+      push_to_odoo?: boolean;
+      label_outputs?: boolean;
+    } | null;
+    triggered_by?: string | null;
   } | null;
   linkedin_applicants?: LinkedInApplicant[];
 }
@@ -677,10 +684,19 @@ export default function RunDetailPage() {
               {workflow ? workflow.name : <span className="font-mono">#{run.id.slice(0, 8)}</span>}
             </h1>
             <StatusBadge status={run.status as any} size="md" />
+            {run.origin?.execution_options?.mode === "test" && (
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30"
+                title={`Test run · cap ${run.origin.execution_options.max_candidates ?? "∞"}${run.origin.execution_options.push_to_odoo === false ? " · no Odoo push" : ""}`}
+              >
+                Test
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-4 text-xs text-text-secondary">
             {workflow && <span className="font-mono text-text-gray">#{run.id.slice(0, 8)}</span>}
             <span>Step {run.current_step_index + 1} of {run.total_steps}</span>
+            {run.origin?.triggered_by && <span>By {run.origin.triggered_by}</span>}
             {run.started_at && <span>Started {formatTime(run.started_at)}</span>}
             {run.ended_at && <span>Ended {formatTime(run.ended_at)}</span>}
             {!run.ended_at && run.started_at && (
