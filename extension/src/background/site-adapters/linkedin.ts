@@ -1,18 +1,10 @@
 import type { SiteAdapterHarnessResult } from "./types";
+import { LINKEDIN_DETAIL_SECTIONS } from "../../behavior/stealth-core.mjs";
 
 export type SiteSnapshotTarget = {
   sectionName: string;
   pageUrl: string;
 };
-
-const LINKEDIN_DETAIL_SECTIONS = [
-  "experience",
-  "education",
-  "skills",
-  "certifications",
-  "projects",
-  "languages",
-] as const;
 
 export function getLinkedInProfileSnapshotTargets(url: string): SiteSnapshotTarget[] {
   try {

@@ -22,6 +22,7 @@ import { chromium } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { STEALTH_INIT } from "./src/shared/stealth.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -301,54 +302,8 @@ async function composeDraftInPage(page, message) {
 
 
 // ── Stealth init script ─────────────────────────────────────────────────────
-
-const STEALTH_INIT = () => {
-  try {
-    const nativeToString = Function.prototype.toString;
-    const toStringMap = new WeakMap();
-    const proxiedToString = new Proxy(nativeToString, {
-      apply(t, thisArg, args) {
-        const c = toStringMap.get(thisArg);
-        if (c) return c;
-        return Reflect.apply(t, thisArg, args);
-      },
-    });
-    Function.prototype.toString = proxiedToString;
-    toStringMap.set(proxiedToString, "function toString() { [native code] }");
-    const mask = (fn, name) => (toStringMap.set(fn, `function ${name}() { [native code] }`), fn);
-    try { Object.defineProperty(navigator, "webdriver", { get: () => undefined, configurable: true }); } catch {}
-    try {
-      const pluginNames = ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer", "Microsoft Edge PDF Viewer", "WebKit built-in PDF"];
-      const fake = pluginNames.map((name) => ({ name, filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1, 0: { type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" } }));
-      const proxy = new Proxy(fake, { get(t, p) { if (p === "length") return t.length; if (p === "item") return (i) => t[i]; if (p === "namedItem") return (n) => t.find((q) => q.name === n); if (typeof p === "string" && /^\d+$/.test(p)) return t[Number(p)]; return Reflect.get(t, p); } });
-      Object.defineProperty(navigator, "plugins", { get: () => proxy, configurable: true });
-      Object.defineProperty(navigator, "mimeTypes", { get: () => [{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }], configurable: true });
-    } catch {}
-    try { Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"], configurable: true }); } catch {}
-    try {
-      const q = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = mask(function query(p) {
-        if (p && p.name === "notifications") return Promise.resolve({ state: "default", name: "notifications", onchange: null, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true });
-        return q(p);
-      }, "query");
-    } catch {}
-    try {
-      if (!window.chrome) window.chrome = {};
-      if (!window.chrome.runtime) window.chrome.runtime = { OnInstalledReason: { CHROME_UPDATE: "chrome_update", INSTALL: "install", UPDATE: "update" } };
-    } catch {}
-    try {
-      const orig = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = mask(function (p) { if (p === 37445) return "Intel Inc."; if (p === 37446) return "Intel Iris OpenGL Engine"; return orig.call(this, p); }, "getParameter");
-      if (typeof WebGL2RenderingContext !== "undefined") {
-        const o2 = WebGL2RenderingContext.prototype.getParameter;
-        WebGL2RenderingContext.prototype.getParameter = mask(function (p) { if (p === 37445) return "Intel Inc."; if (p === 37446) return "Intel Iris OpenGL Engine"; return o2.call(this, p); }, "getParameter");
-      }
-    } catch {}
-    try { if (typeof Notification !== "undefined") Object.defineProperty(Notification, "permission", { get: () => "default", configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8, configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8, configurable: true }); } catch {}
-  } catch (err) { console.warn("[stealth] init error:", err); }
-};
+// STEALTH_INIT now lives in ./src/shared/stealth.mjs (minimal, consistent set
+// for a real Chrome on this machine). Imported at the top of this file.
 
 // ── Page interactions ───────────────────────────────────────────────────────
 

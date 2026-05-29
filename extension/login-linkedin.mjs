@@ -8,52 +8,11 @@
 import { chromium } from "@playwright/test";
 import path from "path";
 import { fileURLToPath } from "url";
+import { STEALTH_INIT } from "./src/shared/stealth.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
-
-const STEALTH_INIT = () => {
-  try {
-    const nativeToString = Function.prototype.toString;
-    const toStringMap = new WeakMap();
-    const proxiedToString = new Proxy(nativeToString, {
-      apply(t, thisArg, args) {
-        const c = toStringMap.get(thisArg);
-        if (c) return c;
-        return Reflect.apply(t, thisArg, args);
-      },
-    });
-    Function.prototype.toString = proxiedToString;
-    toStringMap.set(proxiedToString, "function toString() { [native code] }");
-    const mask = (fn, name) => (toStringMap.set(fn, `function ${name}() { [native code] }`), fn);
-    try { Object.defineProperty(navigator, "webdriver", { get: () => undefined, configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"], configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8, configurable: true }); } catch {}
-    try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8, configurable: true }); } catch {}
-    try {
-      const q = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = mask(function query(p) {
-        if (p && p.name === "notifications") return Promise.resolve({ state: "default", name: "notifications", onchange: null, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true });
-        return q(p);
-      }, "query");
-    } catch {}
-    try {
-      if (!window.chrome) window.chrome = {};
-      if (!window.chrome.runtime) window.chrome.runtime = { OnInstalledReason: { CHROME_UPDATE: "chrome_update", INSTALL: "install", UPDATE: "update" } };
-    } catch {}
-    try {
-      const orig = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = mask(function (p) {
-        if (p === 37445) return "Intel Inc.";
-        if (p === 37446) return "Intel Iris OpenGL Engine";
-        return orig.call(this, p);
-      }, "getParameter");
-    } catch {}
-  } catch (err) {
-    console.warn("[stealth] init error:", err);
-  }
-};
 
 const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
   channel: "chrome",

@@ -8,6 +8,7 @@ import { commandExecutor, DebuggerSession } from "./command-executor";
 import { waitForTabLoad, waitForTabLoadBestEffort } from "./tab-load";
 import { openMessageComposerAndType } from "./openMessageComposerAndType";
 import { getPageSnapshotTargets } from "./site-adapters/registry";
+import { bezierPath, mulberry32, pickDwellMs, shuffleInPlace, cryptoRandom } from "../behavior/stealth-core.mjs";
 import { detectChallenges } from "../shared/detector";
 import type { ChallengeDetection } from "../shared/detector";
 import type { BackgroundToContentMessage, DetectChallengesMessage, ChallengesDetectedResponse } from "../shared/messaging";
@@ -535,27 +536,8 @@ function isLinkedInProfilePage(url: string): boolean {
   }
 }
 
-// Pick a uniform float in [0,1) using crypto for unbiased entropy.
-function cryptoRandom(): number {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return buf[0] / 0x1_0000_0000;
-}
-
-function shuffleInPlace<T>(arr: T[]): T[] {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(cryptoRandom() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-// Beta-skewed dwell: low alpha biases toward shorter; occasional long reads.
-function pickDwellMs(min: number, max: number): number {
-  // Mix of two uniforms, lighter weight on the upper tail.
-  const r = cryptoRandom() * cryptoRandom() + cryptoRandom() * 0.15;
-  return Math.floor(min + (max - min) * Math.min(1, r));
-}
+// cryptoRandom / shuffleInPlace / pickDwellMs / bezierPath / mulberry32 are now
+// imported from ../behavior/stealth-core.mjs (shared with the Playwright daemon).
 
 async function getShowAllSections(tabId: number, pageUrl: string): Promise<Set<string>> {
   // Inspect the current profile page for "Show all" links into /details/X/.
@@ -604,40 +586,7 @@ async function microScroll(tabId: number, ticks: number): Promise<void> {
 // target. Real users don't teleport — clicks always follow a mouse move.
 const lastCursorByTab = new Map<number, { x: number; y: number }>();
 
-function bezierPath(
-  from: { x: number; y: number },
-  to: { x: number; y: number },
-  steps: number,
-): Array<{ x: number; y: number }> {
-  // Two random control points so successive paths aren't identically shaped.
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const c1 = {
-    x: from.x + dx * (0.25 + cryptoRandom() * 0.2),
-    y: from.y + dy * (0.25 + cryptoRandom() * 0.2) + (cryptoRandom() - 0.5) * 80,
-  };
-  const c2 = {
-    x: from.x + dx * (0.6 + cryptoRandom() * 0.2),
-    y: from.y + dy * (0.6 + cryptoRandom() * 0.2) + (cryptoRandom() - 0.5) * 80,
-  };
-  const out: Array<{ x: number; y: number }> = [];
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const it = 1 - t;
-    const x =
-      it * it * it * from.x +
-      3 * it * it * t * c1.x +
-      3 * it * t * t * c2.x +
-      t * t * t * to.x;
-    const y =
-      it * it * it * from.y +
-      3 * it * it * t * c1.y +
-      3 * it * t * t * c2.y +
-      t * t * t * to.y;
-    out.push({ x, y });
-  }
-  return out;
-}
+// bezierPath imported from ../behavior/stealth-core.mjs.
 
 async function locateSectionAnchor(
   tabId: number,
@@ -710,19 +659,8 @@ async function clickSectionLink(
   return true;
 }
 
-// Tiny deterministic PRNG — same algorithm as the backend's `random.Random`
-// approximation: given the same seed, two extension invocations yield
-// identical noise shapes. Used so tests can replay noise behaviour.
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// mulberry32 imported from ../behavior/stealth-core.mjs (shared with the daemon
+// and the backend's seed contract).
 
 // Track the most recent search URL the agent navigated to per tab. Used by
 // `noise_break.search_bounce` so we can return to the user's search context

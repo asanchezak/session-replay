@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { fileURLToPath } from "url";
+import { STEALTH_INIT } from "../src/shared/stealth.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.resolve(__filename, "..");
@@ -30,199 +31,15 @@ function makeProfileDir(): { dir: string; ephemeral: boolean } {
 }
 
 /**
- * Proxy-based stealth bundle. Masks the headless/automation fingerprint
- * vectors LinkedIn's anti-bot bundle reads — navigator.webdriver, plugins,
- * languages, permissions, window.chrome.runtime, WebGL renderer,
- * Notification.permission, hardwareConcurrency, deviceMemory — and pins
- * Function.prototype.toString so the patched functions still report
- * `[native code]`. Naive Object.defineProperty patches can be detected via
- * `someFn.toString().includes("native code")` checks; this version defeats
- * that by re-pointing Function.prototype.toString through a Proxy.
+ * Installs the shared, minimal stealth bundle (src/shared/stealth.mjs) — the
+ * SAME init script the production drivers use, so this test fixture exercises
+ * the real code path rather than a divergent copy. It patches only what
+ * automation breaks (navigator.webdriver + permissions.query, masked via a
+ * toString proxy) and leaves WebGL/plugins/CPU/locale to native Chrome so the
+ * fingerprint stays internally consistent for the real machine.
  */
 async function installStealthInitScript(context: BrowserContext): Promise<void> {
-  await context.addInitScript(() => {
-    try {
-      // -------- Function.prototype.toString — native-shape masking ---------
-      const nativeToString = Function.prototype.toString;
-      const toStringMap = new WeakMap<Function, string>();
-      const proxiedToString = new Proxy(nativeToString, {
-        apply(target, thisArg, args) {
-          const canned = toStringMap.get(thisArg as Function);
-          if (canned) return canned;
-          return Reflect.apply(target, thisArg, args);
-        },
-      });
-      Function.prototype.toString = proxiedToString;
-      // Make the proxy itself look native too.
-      toStringMap.set(proxiedToString, "function toString() { [native code] }");
-
-      const maskNative = <T extends Function>(fn: T, name: string): T => {
-        toStringMap.set(fn, `function ${name}() { [native code] }`);
-        return fn;
-      };
-
-      // -------------------- navigator.webdriver ----------------------------
-      try {
-        Object.defineProperty(navigator, "webdriver", {
-          get: () => undefined,
-          configurable: true,
-        });
-      } catch { /* ignore */ }
-
-      // -------------------- navigator.plugins ------------------------------
-      // Real Chrome has 5 plugin entries by default (PDF-related).
-      const pluginNames = [
-        "PDF Viewer",
-        "Chrome PDF Viewer",
-        "Chromium PDF Viewer",
-        "Microsoft Edge PDF Viewer",
-        "WebKit built-in PDF",
-      ];
-      const fakePlugins = pluginNames.map((name) => ({
-        name,
-        filename: "internal-pdf-viewer",
-        description: "Portable Document Format",
-        length: 1,
-        0: { type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" },
-      }));
-      const pluginArrayProxy = new Proxy(fakePlugins, {
-        get(target, prop) {
-          if (prop === "length") return target.length;
-          if (prop === "item") return (i: number) => target[i];
-          if (prop === "namedItem") return (n: string) => target.find((p) => p.name === n);
-          if (typeof prop === "string" && /^\d+$/.test(prop)) return target[Number(prop)];
-          return Reflect.get(target, prop);
-        },
-      });
-      try {
-        Object.defineProperty(navigator, "plugins", {
-          get: () => pluginArrayProxy,
-          configurable: true,
-        });
-        Object.defineProperty(navigator, "mimeTypes", {
-          get: () => [{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }],
-          configurable: true,
-        });
-      } catch { /* ignore */ }
-
-      // -------------------- navigator.languages ----------------------------
-      try {
-        Object.defineProperty(navigator, "languages", {
-          get: () => ["en-US", "en"],
-          configurable: true,
-        });
-      } catch { /* ignore */ }
-
-      // -------------------- navigator.permissions.query --------------------
-      // Headless returns "denied" for notifications; real Chrome returns
-      // "default" until the user grants/denies. Wrap and lie.
-      try {
-        const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-        const patchedQuery = function query(p: PermissionDescriptor): Promise<PermissionStatus> {
-          if ((p as { name?: string }).name === "notifications") {
-            return Promise.resolve({
-              state: "default" as PermissionState,
-              name: "notifications",
-              onchange: null,
-              addEventListener() {},
-              removeEventListener() {},
-              dispatchEvent: () => true,
-            } as unknown as PermissionStatus);
-          }
-          return originalQuery(p);
-        };
-        navigator.permissions.query = maskNative(patchedQuery, "query");
-      } catch { /* ignore */ }
-
-      // -------------------- window.chrome.runtime --------------------------
-      try {
-        const w = window as unknown as { chrome?: Record<string, unknown> };
-        if (!w.chrome) w.chrome = {};
-        if (!(w.chrome as { runtime?: unknown }).runtime) {
-          (w.chrome as { runtime?: unknown }).runtime = {
-            OnInstalledReason: {
-              CHROME_UPDATE: "chrome_update",
-              INSTALL: "install",
-              SHARED_MODULE_UPDATE: "shared_module_update",
-              UPDATE: "update",
-            },
-            OnRestartRequiredReason: {
-              APP_UPDATE: "app_update",
-              OS_UPDATE: "os_update",
-              PERIODIC: "periodic",
-            },
-            PlatformArch: {
-              ARM: "arm",
-              ARM64: "arm64",
-              MIPS: "mips",
-              MIPS64: "mips64",
-              X86_32: "x86-32",
-              X86_64: "x86-64",
-            },
-            PlatformOs: {
-              ANDROID: "android",
-              CROS: "cros",
-              LINUX: "linux",
-              MAC: "mac",
-              OPENBSD: "openbsd",
-              WIN: "win",
-            },
-            RequestUpdateCheckStatus: {
-              NO_UPDATE: "no_update",
-              THROTTLED: "throttled",
-              UPDATE_AVAILABLE: "update_available",
-            },
-          };
-        }
-      } catch { /* ignore */ }
-
-      // -------------------- WebGL UNMASKED_RENDERER / VENDOR ---------------
-      try {
-        const origGetParameter = WebGLRenderingContext.prototype.getParameter;
-        const patchedGetParameter = function getParameter(this: WebGLRenderingContext, p: number) {
-          if (p === 37445) return "Intel Inc.";                  // UNMASKED_VENDOR_WEBGL
-          if (p === 37446) return "Intel Iris OpenGL Engine";    // UNMASKED_RENDERER_WEBGL
-          return origGetParameter.call(this, p);
-        };
-        WebGLRenderingContext.prototype.getParameter = maskNative(patchedGetParameter, "getParameter");
-        if (typeof WebGL2RenderingContext !== "undefined") {
-          const origGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
-          const patchedGetParameter2 = function getParameter(this: WebGL2RenderingContext, p: number) {
-            if (p === 37445) return "Intel Inc.";
-            if (p === 37446) return "Intel Iris OpenGL Engine";
-            return origGetParameter2.call(this, p);
-          };
-          WebGL2RenderingContext.prototype.getParameter = maskNative(patchedGetParameter2, "getParameter");
-        }
-      } catch { /* ignore */ }
-
-      // -------------------- Notification.permission ------------------------
-      try {
-        if (typeof Notification !== "undefined") {
-          Object.defineProperty(Notification, "permission", {
-            get: () => "default",
-            configurable: true,
-          });
-        }
-      } catch { /* ignore */ }
-
-      // -------------------- hardwareConcurrency / deviceMemory -------------
-      try {
-        Object.defineProperty(navigator, "hardwareConcurrency", {
-          get: () => 8,
-          configurable: true,
-        });
-      } catch { /* ignore */ }
-      try {
-        Object.defineProperty(navigator, "deviceMemory", {
-          get: () => 8,
-          configurable: true,
-        });
-      } catch { /* ignore */ }
-    } catch (err) {
-      console.warn("[stealth] init script error:", err);
-    }
-  });
+  await context.addInitScript(STEALTH_INIT);
 }
 
 export type ErrorEntry = {

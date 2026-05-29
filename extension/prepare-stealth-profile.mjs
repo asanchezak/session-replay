@@ -118,6 +118,25 @@ if (!fs.existsSync(SRC_PROFILE)) {
   process.exit(1);
 }
 
+// Pre-flight: Chrome MUST be fully quit before snapshotting. Copying live
+// SQLite databases (Cookies/History) mid-write captures a half-written WAL,
+// which Chrome then rebuilds on launch — yielding what looks like a brand-new,
+// historyless profile, which is itself an anti-bot flag. Refuse to stage a
+// corrupt snapshot. Override with ALLOW_CHROME_RUNNING=1 if you know better.
+{
+  const probe = spawnSync("pgrep", ["-x", "Google Chrome"], { encoding: "utf-8" });
+  const running = (probe.stdout || "").trim().length > 0;
+  if (running && process.env.ALLOW_CHROME_RUNNING !== "1") {
+    console.error(
+      "Chrome is currently running. Quit Chrome completely (Cmd-Q) before staging —\n" +
+      "snapshotting a live profile corrupts Cookies/History and produces a\n" +
+      "historyless profile that LinkedIn is more likely to flag.\n" +
+      "Re-run after quitting, or set ALLOW_CHROME_RUNNING=1 to override.",
+    );
+    process.exit(1);
+  }
+}
+
 // Wipe any previous staged profile.
 rmRf(DEST_ROOT);
 fs.mkdirSync(DEST_DEFAULT, { recursive: true });

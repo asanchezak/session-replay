@@ -63,6 +63,29 @@ hard way and not obvious from reading code.
   the outer session first, or run on a separate session via
   `async_session_factory()`.
 
+## Anti-bot (read `docs/anti-bot-measures.md` — source of truth)
+
+- **The daemon (`extension/driver-daemon.mjs`) is the PRODUCTION scraper, NOT
+  the extension.** They're separate runtimes; keep their behavior in sync via
+  the shared modules in `extension/src/{shared/stealth.mjs,behavior/*}`. An
+  account got flagged (2026-05-28) because V2 anti-bot work landed only in the
+  extension and never reached the daemon.
+- **Never hardcode GPU / CPU cores / deviceMemory / locale in stealth.** This is
+  a real M1 Mac running real Chrome — the native fingerprint is already a
+  consistent human. The old code faked WebGL to "Intel Iris" on Apple Silicon, a
+  self-contradiction that flagged us. `STEALTH_INIT` now patches only
+  `navigator.webdriver` + `permissions.query`.
+- **Blocker → pause, never plow.** Every navigation goes through `safeGoto`,
+  which detects login/captcha/checkpoint walls and PAUSES the run (cursor not
+  advanced) + trips a persisted circuit breaker. Don't add raw `page.goto` that
+  bypasses it.
+- **Click "Show all", don't deep-link `/details/<section>/`.** Full extraction
+  is preserved (every section, shuffled order, single visit) — only the
+  navigation is humanized (bezier mouse, trusted click via `page.mouse`).
+- **Account state** (budget + circuit) is in gitignored
+  `extension/.linkedin-budget.json`; delete it to clear a tripped circuit. Env
+  knobs: `MAX_PROFILE_VIEWS_*`, `WORK_*`, `*_COOLDOWN_MS`, `RESPECT_WORKING_HOURS`.
+
 ## LinkedIn scraping (2025 DOM, anti-bot)
 
 - **Chrome 148 removed `--load-extension`** entirely. Playwright tests
@@ -72,11 +95,14 @@ hard way and not obvious from reading code.
   the extension, real Chrome works fine.
 - **Anti-bot bypass**: stage the user's real Chrome profile via
   `extension/prepare-stealth-profile.mjs` (snapshots Profile 4 → 283 MB,
-  cookies + history + IndexedDB + Local Storage). Launch with full
-  stealth init bundle from `live-linkedin-driver.mjs` (mirrors
-  `e2e/fixtures.ts` — webdriver, plugins, languages, WebGL, permissions,
-  chrome.runtime). First launch may hit a `/checkpoint/challenge/...`
-  page — user solves it once, the profile is then whitelisted.
+  cookies + history + IndexedDB + Local Storage; now refuses to run while
+  Chrome is open — quit Chrome first). Launch with the shared `STEALTH_INIT`
+  from `extension/src/shared/stealth.mjs` (minimal: webdriver +
+  permissions.query only — see the Anti-bot section above and
+  `docs/anti-bot-measures.md`; the old "fake WebGL/plugins/cores" bundle was
+  removed because it contradicted the real M1 fingerprint). First launch may
+  hit a `/checkpoint/challenge/...` page — user solves it once, the profile is
+  then whitelisted.
 - **LinkedIn moved profile data structurally in 2025**. The profile name
   is now in `<h2>` inside `[data-view-name="profile-top-card"]`, not
   `<h1>`. Section anchor IDs (`#about`, `#experience`) are gone — use
