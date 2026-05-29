@@ -344,6 +344,37 @@ describe("WorkflowDetailPage", () => {
     expect(popupWindow.close).toHaveBeenCalled();
   });
 
+  it("toggles anti-bot and PUTs config.anti_bot while preserving sibling config keys", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/workflows/wf-1") && (!init?.method || init.method === "GET")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ...baseWorkflow, config: { message_template: "Hi {{candidate_name}}" } }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [] } as Response;
+    });
+    (global as any).fetch = fetchMock;
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Demo WF/)).toBeInTheDocument());
+
+    const toggle = screen.getByRole("switch", { name: /anti-bot/i });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(([i, init]) => String(i).endsWith("/workflows/wf-1") && init?.method === "PUT");
+      expect(put).toBeTruthy();
+    });
+    const putCall = fetchMock.mock.calls.find(([i, init]) => String(i).endsWith("/workflows/wf-1") && init?.method === "PUT");
+    const body = JSON.parse(String(putCall?.[1]?.body || "{}"));
+    // anti_bot turned on AND the existing message_template preserved (merge, not clobber).
+    expect(body.config).toEqual({ message_template: "Hi {{candidate_name}}", anti_bot: true });
+  });
+
   it("Edit fields modal lets the user remove a field and PUTs the updated step", async () => {
     const extractWorkflow = {
       ...baseWorkflow,

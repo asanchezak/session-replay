@@ -89,6 +89,7 @@ export class ApiClient {
   async getWorkflow(workflowId: string) {
     return this.request<{
       id: string; name: string; status: string; target_url?: string;
+      config?: { anti_bot?: boolean; message_template?: string; message_template_updated_at?: string };
       steps: Array<{
         step_index: number;
         action_type: string;

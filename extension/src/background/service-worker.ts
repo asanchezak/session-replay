@@ -681,6 +681,17 @@ try {
 // pick a decoy URL distinct from the next target).
 const seenProfileUrlsByRun = new Map<string, string[]>();
 
+// Per-tab "anti-bot" flag for the active run, sourced from the workflow's
+// `config.anti_bot`. Set when a run starts (executeRun / executeAgentRun) once
+// the target tab is known, and consulted by the humanization helpers
+// (humanStepDelay, executeNoiseBreak, the LinkedIn detail capture) so they pace
+// like a human ONLY when the workflow opted in. Opt-in: absent ⇒ false ⇒
+// mechanical. Mirrors the tab-keyed maps above (e.g. lastSearchUrlByTab).
+const antiBotByTab = new Map<number, boolean>();
+function isAntiBot(tabId: number | undefined): boolean {
+  return tabId != null && antiBotByTab.get(tabId) === true;
+}
+
 async function fetchProfileUrlPoolForRun(runId: string): Promise<string[]> {
   // Reuse cached pool if already populated this run.
   const cached = seenProfileUrlsByRun.get(runId);
@@ -718,6 +729,21 @@ async function microScrollSeeded(tabId: number, ticks: number, rand: () => numbe
   }
 }
 
+// Generic inter-step pause, applied on EVERY page. When the workflow opted into
+// anti-bot, replace the flat configured delay with a variable, beta-skewed dwell
+// (human reading cadence) plus an occasional micro-scroll; otherwise keep the
+// fast, mechanical flat delay.
+async function humanStepDelay(tabId: number, flatMs: number): Promise<void> {
+  if (!isAntiBot(tabId)) {
+    await new Promise((r) => setTimeout(r, flatMs));
+    return;
+  }
+  if (cryptoRandom() < 0.5) {
+    await microScrollSeeded(tabId, 1 + Math.floor(cryptoRandom() * 2), cryptoRandom);
+  }
+  await new Promise((r) => setTimeout(r, pickDwellMs(1200, 6000)));
+}
+
 async function executeNoiseBreak(
   tabId: number,
   kind: string,
@@ -725,6 +751,10 @@ async function executeNoiseBreak(
   runId: string,
   originStep: number | undefined,
 ): Promise<void> {
+  // noise_break is purely decoy behavior; when the workflow hasn't opted into
+  // anti-bot, skip the decoy navigation + idle dwell entirely (caller still
+  // reports the step a success). Opt-in default: absent config ⇒ mechanical.
+  if (!isAntiBot(tabId)) return;
   const rand = mulberry32(seed);
   const safelyNavigate = async (url: string) => {
     await chrome.tabs.update(tabId, { url });
@@ -790,6 +820,10 @@ async function captureLinkedInDetailsViaTabNavigation(
   //   4. Shuffle the visit order.
   //   5. Variable dwell (4-22 s, beta-skewed) with 1-3 micro-scrolls.
   const startedAt = Date.now();
+  // Human reading dwells / pre-nav pauses only when the workflow opted into
+  // anti-bot; otherwise capture each section back-to-back (still trusted clicks
+  // + SPA render waits, just no idle "reading" time).
+  const antiBot = isAntiBot(tabId);
   const allTargets = getPageSnapshotTargets(pageUrl);
   if (allTargets.length === 0) return [];
 
@@ -824,7 +858,7 @@ async function captureLinkedInDetailsViaTabNavigation(
     try {
       // Short jittered pre-navigation pause — looks like reading then clicking.
       await new Promise((resolve) =>
-        setTimeout(resolve, 600 + Math.floor(cryptoRandom() * 1400)));
+        setTimeout(resolve, antiBot ? 600 + Math.floor(cryptoRandom() * 1400) : 120));
 
       // Prefer a trusted CDP click on the section anchor. Falls back to
       // chrome.tabs.update if the link isn't located.
@@ -851,16 +885,19 @@ async function captureLinkedInDetailsViaTabNavigation(
         });
       }
 
-      // Variable dwell with micro-scrolls — looks like a person reading.
-      const dwell = pickDwellMs(4_000, 22_000);
-      const scrollTicks = 1 + Math.floor(cryptoRandom() * 3);
-      const scrollBudget = Math.min(dwell - 500, scrollTicks * 2500);
-      const scrollPromise = microScroll(tabId, scrollTicks);
-      const dwellRemain = Math.max(500, dwell - scrollBudget);
-      await Promise.all([
-        scrollPromise,
-        new Promise<void>((r) => setTimeout(r, dwellRemain)),
-      ]);
+      // Variable dwell with micro-scrolls — looks like a person reading. Only
+      // when anti-bot is enabled; otherwise move straight to the next section.
+      if (antiBot) {
+        const dwell = pickDwellMs(4_000, 22_000);
+        const scrollTicks = 1 + Math.floor(cryptoRandom() * 3);
+        const scrollBudget = Math.min(dwell - 500, scrollTicks * 2500);
+        const scrollPromise = microScroll(tabId, scrollTicks);
+        const dwellRemain = Math.max(500, dwell - scrollBudget);
+        await Promise.all([
+          scrollPromise,
+          new Promise<void>((r) => setTimeout(r, dwellRemain)),
+        ]);
+      }
     } catch (err) {
       log.warn("LinkedIn in-tab capture per-section failed", {
         section: target.sectionName,
@@ -1613,6 +1650,9 @@ async function executeWorkflowRun(
     return { id: runId, status: "failed", total_steps: steps.length };
   }
   await setRunTab(runId, targetTabId);
+  // Opt-in anti-bot pacing for this run (governs humanStepDelay + the noise /
+  // LinkedIn-capture dwells via isAntiBot). Absent config ⇒ false ⇒ mechanical.
+  antiBotByTab.set(targetTabId, workflow.config?.anti_bot === true);
   sendOverlay(targetTabId, { step: 0, total: steps.length, action_type: "starting", workflow_name: workflow.name });
 
   // Navigate to target URL if set
@@ -1702,7 +1742,7 @@ async function executeWorkflowRun(
     // on the current page, then report results directly — no DOM manipulation.
     if (actionType === "extract") {
       await executeExtractStep(runId, i, step, targetTabId);
-      await new Promise((r) => setTimeout(r, stepDelay));
+      await humanStepDelay(targetTabId, stepDelay);
       continue;
     }
 
@@ -1843,8 +1883,8 @@ async function executeWorkflowRun(
       pendingNavigation = true;
     }
 
-    // Small delay between steps
-    await new Promise((r) => setTimeout(r, stepDelay));
+    // Delay between steps — humanized variable dwell when anti-bot is on.
+    await humanStepDelay(targetTabId, stepDelay);
   }
 
   // Final navigation wait for last step
@@ -1879,6 +1919,7 @@ async function executeWorkflowRun(
   }
 
   await clearRunTab(runId);
+  if (targetTabId) antiBotByTab.delete(targetTabId);
   canceledRuns.delete(runId);
   return { id: runId, status: statusOverride || (allStepsSucceeded ? "completed" : "failed"), total_steps: steps.length };
 }
@@ -1931,6 +1972,9 @@ async function executeAgentRun(
     return { id: runId, status: "failed", total_steps: totalSteps };
   }
   await setRunTab(runId, targetTabId);
+  // Opt-in anti-bot pacing for this run (governs the noise / LinkedIn-capture
+  // dwells via isAntiBot). Absent config ⇒ false ⇒ mechanical.
+  antiBotByTab.set(targetTabId, workflow.config?.anti_bot === true);
   sendOverlay(targetTabId, { step: 0, total: totalSteps, action_type: "starting", workflow_name: workflow.name });
 
   // Phase 2: fresh run = fresh diff history. Clear the per-tab snapshot
@@ -2625,6 +2669,7 @@ async function executeAgentRun(
   // "canceled" and "waiting_for_user" need no further API calls — the run is
   // already in the target terminal state on the backend.
   await clearRunTab(runId);
+  if (targetTabId) antiBotByTab.delete(targetTabId);
   canceledRuns.delete(runId);
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }

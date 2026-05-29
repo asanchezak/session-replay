@@ -157,6 +157,30 @@ To force the daemon to resume after a manual fix, delete this file (or set
 
 ---
 
+## 4b. Per-workflow toggle (`config.anti_bot`)
+
+Anti-bot pacing is **opt-in per workflow**, stored in the existing
+`workflows.config` JSON as `config.anti_bot: boolean` (no migration — reuses the
+column added in migration 023). Set it from the dashboard: the workflow detail
+page has a "Human-like execution (anti-bot)" switch
+(`frontend/src/pages/WorkflowDetailPage.tsx`) that PATCHes
+`config: { ...config, anti_bot }`. The backend full-replaces `config` on PUT, so
+the frontend must **merge** existing keys (both the toggle and the
+message-template save spread `...data.config`).
+
+- **Default OFF (opt-in).** Absent/false ⇒ the extension runs steps mechanically
+  at the flat `stepDelay`. True ⇒ humanized pacing.
+- **Governs the EXTENSION path only.** `service-worker.ts` reads
+  `workflow.config?.anti_bot` at run start into a tab-keyed flag (`antiBotByTab`
+  / `isAntiBot`). When on: `humanStepDelay` adds a variable beta-skewed dwell +
+  occasional micro-scroll between every step on every page; the LinkedIn
+  detail-capture reading dwells and `executeNoiseBreak` decoys are also gated on
+  it. When off: those are skipped (trusted clicks + SPA render waits remain).
+- **The daemon ignores it — always protected.** `driver-daemon.mjs` (the
+  LinkedIn-recruitment path that got flagged) keeps fingerprint stealth +
+  circuit breaker + budget on unconditionally; the flag is never read there (see
+  the comment at `ctx.addInitScript`).
+
 ## 5. Tests
 
 - `extension/tests/test_stealth_core.test.ts` — pure behavior math (vitest).

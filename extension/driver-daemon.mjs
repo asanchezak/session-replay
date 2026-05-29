@@ -1052,6 +1052,11 @@ async function driveRun(run) {
     args: ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", "--disable-features=ChromeWhatsNewUI", "--profile-directory=Default"],
     ignoreDefaultArgs: ["--enable-automation"],
   });
+  // NOTE: the daemon is UNCONDITIONALLY protected. It deliberately ignores the
+  // per-workflow `config.anti_bot` toggle (which gates the extension path only):
+  // this is the high-risk LinkedIn-recruitment path that got flagged, so its
+  // fingerprint stealth + circuit breaker + budget must never be disableable.
+  // Do not "wire up the flag here for consistency".
   await ctx.addInitScript(STEALTH_INIT);
 
   // Run-scoped RNG for the opening sequence + a pool of seen profile URLs for

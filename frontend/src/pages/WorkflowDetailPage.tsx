@@ -15,7 +15,7 @@ import {
   parameterConsumerSteps,
 } from "./viewmodels/workflowDetailViewModel";
 import type { ConnectorBindingDraft, WebhookTrigger } from "./viewmodels/workflowDetailViewModel";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database, MessageSquare } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database, MessageSquare, Shield } from "lucide-react";
 
 interface Step {
   step_index: number;
@@ -75,7 +75,7 @@ interface WorkflowDetail {
   steps: Step[];
   analysis: Analysis | null;
   connector_bindings?: ConnectorBinding[];
-  config?: { message_template?: string; message_template_updated_at?: string };
+  config?: { message_template?: string; message_template_updated_at?: string; anti_bot?: boolean };
 }
 
 const MESSAGE_TEMPLATE_VARIABLES = [
@@ -153,6 +153,7 @@ export default function WorkflowDetailPage() {
   const [messageTemplateDraft, setMessageTemplateDraft] = useState<string | null>(null);
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [templateSavedAt, setTemplateSavedAt] = useState<string | null>(null);
+  const [savingAntiBot, setSavingAntiBot] = useState(false);
   const messageTemplateRef = useRef<HTMLTextAreaElement | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   // Edit-fields modal state: which extract step is being edited (by step_index).
@@ -737,6 +738,50 @@ export default function WorkflowDetailPage() {
         </div>
       )}
 
+      {/* Anti-bot toggle — available on every workflow, persisted in
+          config.anti_bot. Opt-in (off by default). Governs the extension's
+          human-like pacing on every page; the LinkedIn recruitment daemon is
+          always protected regardless of this flag. */}
+      <Card className="mb-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium text-text-primary flex items-center gap-2">
+              <Shield size={14} /> Human-like execution (anti-bot)
+            </h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              When on, this workflow runs with human-like pacing — variable dwell and the occasional micro-scroll between steps, on every page. Off (default) runs steps mechanically at the fixed step delay.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={data.config?.anti_bot === true}
+            aria-label="Toggle human-like (anti-bot) execution"
+            disabled={savingAntiBot}
+            onClick={async () => {
+              setSavingAntiBot(true);
+              try {
+                await request<unknown>("PUT", `/workflows/${data.id}`, {
+                  config: { ...data.config, anti_bot: !(data.config?.anti_bot === true) },
+                });
+                fetchData("GET", `/workflows/${data.id}`);
+              } finally {
+                setSavingAntiBot(false);
+              }
+            }}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+              data.config?.anti_bot === true ? "bg-accent" : "bg-border"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                data.config?.anti_bot === true ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+      </Card>
+
       {/* Message Template — visible whenever the workflow has an open_message_drafts step,
           independent of literal/semantic view mode (clones won't have analysis yet). */}
       {data.steps.some((s) => s.action_type === "open_message_drafts") && (() => {
@@ -765,7 +810,9 @@ export default function WorkflowDetailPage() {
           setSavingTemplate(true);
           try {
             await request<unknown>("PUT", `/workflows/${data.id}`, {
-              config: { message_template: value, message_template_updated_at: new Date().toISOString() },
+              // Spread existing config so saving the template doesn't clobber
+              // sibling keys (e.g. anti_bot) — the backend full-replaces config.
+              config: { ...data.config, message_template: value, message_template_updated_at: new Date().toISOString() },
             });
             setTemplateSavedAt(new Date().toISOString());
             setMessageTemplateDraft(null);
