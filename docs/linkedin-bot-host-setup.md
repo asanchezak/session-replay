@@ -305,6 +305,11 @@ por terminal (el `kickstart` de ARD avisa "must be enabled from System Settings"
 - **No** abrir LinkedIn de esta cuenta desde el navegador propio de ningún operador.
 - Ante checkpoint/captcha: **pausar**, dejar correr el cooldown, y que el titular valide
   manualmente. No re-loguear en bucle ni mover el perfil.
+- **No** usar en producción el wrapper de prueba (`/Users/Shared/start-bot-daemon.sh`) con
+  `BASE_COOLDOWN_MS=0` / `COOLDOWN_JITTER_MS=0` / `RESPECT_WORKING_HOURS=0` — eso es solo
+  para iterar rápido en QA; en producción daría una cadencia robótica (runs back-to-back,
+  fuera de horario) que es un tell anti-bot. **Producción = `make daemon-install`**, que usa
+  los defaults del plist (cooldown 20-40min entre runs + horario laboral).
 
 ---
 

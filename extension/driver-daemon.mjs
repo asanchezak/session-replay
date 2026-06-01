@@ -510,7 +510,7 @@ async function scrapeSearchPeople(page) {
     const nameOf = (s) => clean(s)
       .split("•")[0]
       .replace(/\s*\d+(º|°|st|nd|rd|th)\s*$/i, "")
-      .replace(/\s+(busca empleo|is hiring|está contratando|#\w+).*$/i, "")
+      .replace(/\s+(busca empleo|is hiring|está contratando|is open to work|open to work|disponible para trabajar|abierto a trabajar|#\w+).*$/i, "")
       .trim();
     const isMeta = (t) =>
       !t

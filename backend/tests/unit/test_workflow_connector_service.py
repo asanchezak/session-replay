@@ -70,20 +70,18 @@ async def test_save_and_preview_binding(db_session: AsyncSession, monkeypatch):
         workflow_id,
         "recipient",
         connector_id=connector_id,
-        workflow_step_index=0,
         source_kind="odoo_latest_job",
         template="Role: {job_title}\n\n{job_description}",
         job_filters={},
         enabled=True,
     )
     assert binding.parameter_key == "recipient"
-    assert binding.workflow_step_index == 0
+    assert binding.source_kind == "odoo_latest_job"
 
     preview = await svc.preview_binding(workflow_id, "recipient")
     assert preview["resolved_value"] == "Role: Latest Role\n\nLatest description"
     assert preview["source_record"]["job_id"] == "9"
-    assert preview["workflow_step_index"] == 0
-    assert preview["target_summary"] == "Step 1 - type: Type message"
+    assert preview["binding"]["source_kind"] == "odoo_latest_job"
 
 
 @pytest.mark.asyncio
@@ -95,7 +93,6 @@ async def test_resolve_runtime_params_preserves_manual_override(db_session: Asyn
         workflow_id,
         "recipient",
         connector_id=connector_id,
-        workflow_step_index=None,
         source_kind="odoo_latest_job",
         template="{job_title}: {job_description}",
         job_filters={},
@@ -128,7 +125,6 @@ async def test_rejects_unknown_template_placeholders(db_session: AsyncSession):
             workflow_id,
             "recipient",
             connector_id=connector_id,
-            workflow_step_index=99,
             source_kind="odoo_latest_job",
             template="{job_title} {candidate_name}",
             job_filters={},
@@ -137,18 +133,20 @@ async def test_rejects_unknown_template_placeholders(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_rejects_unknown_workflow_step(db_session: AsyncSession):
+async def test_accepts_candidate_count_placeholder(db_session: AsyncSession):
+    # candidate_count is supplied by the webhook/trigger context, so it must be an
+    # accepted template placeholder. Regression guard for the trigger-now fix
+    # (commit d51dc7c): it was missing from TEMPLATE_FIELDS and broke lead-search.
     workflow_id, connector_id = await _seed_workflow_param_and_connector(db_session)
     svc = WorkflowConnectorService(db_session)
 
-    with pytest.raises(ValueError, match="Workflow step '99' does not exist"):
-        await svc.save_binding(
-            workflow_id,
-            "recipient",
-            connector_id=connector_id,
-            workflow_step_index=99,
-            source_kind="odoo_latest_job",
-            template="{job_title}",
-            job_filters={},
-            enabled=True,
-        )
+    binding = await svc.save_binding(
+        workflow_id,
+        "recipient",
+        connector_id=connector_id,
+        source_kind="odoo_latest_job",
+        template="{job_title} — {candidate_count} candidates",
+        job_filters={},
+        enabled=True,
+    )
+    assert binding.parameter_key == "recipient"
