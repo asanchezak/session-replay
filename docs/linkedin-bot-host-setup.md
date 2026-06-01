@@ -273,6 +273,15 @@ propio navegador. (Pasos interactivos: los ejecuta el usuario, no se automatizan
 4. Observación principal = **dashboard `:5173`** + applicants/scoring en **Odoo**. VNC
    es para debug visual; nadie clickea dentro del Chrome del bot durante un run.
 
+**Validado 2026-06-01:** Tailscale arriba (cada equipo recibe IP `100.x`); backend
+`:8081` y dashboard `:5173` alcanzables por la IP del tailnet con API key (401 sin
+key); un **iPhone** (2º nodo del tailnet) abre el dashboard en Safari. VNC: Screen
+Sharing `:5900` alcanzable por tailnet; **desde Mac** → `vnc://<IP-tailnet>` con
+Screen Sharing.app; **desde iPhone** → app **RealVNC Viewer** a `<IP-tailnet>:5900`.
+Siempre se autentica con la cuenta macOS **`linkedin-bot`** (no la del titular).
+Habilitar Screen Sharing es **GUI** (System Settings → Sharing) — macOS lo bloquea
+por terminal (el `kickstart` de ARD avisa "must be enabled from System Settings").
+
 ---
 
 ## 8. Checklist antes de cada ventana de QA
@@ -310,3 +319,47 @@ rm -rf /Users/Shared/bg-smoke /Users/Shared/bg-*.log
 ```
 
 El usuario `linkedin-bot` se queda: es el usuario real del bot.
+
+---
+
+## 11. Debugging remoto (host sin shell)
+
+Dos canales, ambos sobre Tailscale (sin puertos públicos).
+
+**(a) Consola SSH — la vía principal.** Habilitá **Remote Login** (System Settings →
+General → Sharing → Remote Login = ON; o `sudo systemsetup -setremotelogin on` si el
+terminal tiene Full Disk Access), instalá la llave pública del operador en
+`~linkedin-bot/.ssh/authorized_keys`, y entrá por el tailnet:
+```
+ssh linkedin-bot@<IP-tailnet>
+```
+Da consola completa como `linkedin-bot`: `tail -f` del log, leer `.debug/`, reiniciar
+el daemon, correr lo que sea — sin VNC. **Headed Chrome funciona lanzado desde SSH**
+siempre que `linkedin-bot` tenga **sesión GUI activa** (logueado por FUS) — validado
+2026-06-01. Si no la tiene, los comandos GUI fallan; mantené la sesión del bot abierta.
+Usá ruta completa `/opt/homebrew/bin/node` (el shell SSH no hereda el PATH de Homebrew).
+
+**(b) Artefactos que el daemon reporta al backend** — para cuando no hay shell a mano:
+
+- **Logs del daemon:** stdout con timestamps (`[dbg HH:MM:SS] …`) — inicio de cada
+  step con URL/título, conteos, y errores de consola de la página. El operador los ve
+  por VNC (`tail -f` del log); launchd los escribe a `~/Library/Logs/session-replay/`.
+- **Watchdog anti-cuelgue:** si un run supera `RUN_WATCHDOG_MS` (default 240000ms), el
+  daemon **captura el estado de la página y aborta limpio** (pausa el run) en vez de
+  colgarse en silencio. Cubre incluso un `page.evaluate` sin timeout (la causa típica
+  de un cuelgue mudo).
+- **Captura de página (`captureDebug`):** guarda screenshot + HTML + consola en
+  `extension/.debug/<runId>/` (para el operador por VNC) **y postea** URL/título/HTML
+  (8KB)/consola al backend.
+- **Recuperar la captura en remoto** (lo que ve Claude/un operador sin shell):
+  ```bash
+  curl -s -H "X-API-Key: $API_KEY" \
+    "http://<IP-tailnet>:8081/v1/runs/<RUN_ID>/events?event_type=debug" | python3 -m json.tool
+  ```
+  El `payload` trae `reason`, `url`, `title`, `html_excerpt`, `console`, `screenshot_path`.
+
+**Reinicio limpio del daemon (importante):** NO hagas un `pkill` en seco del daemon —
+deja el Chrome huérfano, bloquea el perfil y causa un "search → cuelgue" (observado
+2026-06-01). El wrapper de arranque ya mata el daemon **y** su Chrome (por ruta de
+perfil, scoped al usuario) antes de relanzar. En producción (launchd) el `KeepAlive`
+reinicia; al cambiar código, parar/arrancar el LaunchAgent hace el reinicio limpio.

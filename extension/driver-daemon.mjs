@@ -40,6 +40,12 @@ const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || "5000");
+// Run watchdog: if a single run takes longer than this, the daemon captures the
+// page state (URL/title/HTML/console/screenshot) and aborts cleanly instead of
+// hanging silently. Critical for remote hosts (Fernanda's Mac) where there is no
+// shell to inspect a stuck Chrome. Tune via RUN_WATCHDOG_MS.
+const RUN_WATCHDOG_MS = Number(process.env.RUN_WATCHDOG_MS || "240000");
+const DEBUG_DIR = path.resolve(__dirname, ".debug");
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 
 const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
@@ -1154,6 +1160,55 @@ async function handleBlocker(runId, err, stepIndex) {
   tripCircuit(err.blockerType, err.soft);
 }
 
+// Timestamped debug logger — goes to the daemon log (operator can tail/VNC it).
+function dbg(msg) {
+  console.log(`[dbg ${new Date().toISOString().slice(11, 19)}] ${msg}`);
+}
+
+// Snapshot the page when a step stalls or errors. Writes full artifacts locally
+// (.debug/<runId>/ — for the on-site operator via VNC) AND posts a compact record
+// to the backend so it's retrievable over Tailscale with no shell access:
+//   GET /v1/runs/<runId>/events?event_type=debug
+async function captureDebug(page, runId, stepIndex, reason, consoleBuf = []) {
+  // Each sub-op is raced against a short timeout: the page may be unresponsive
+  // (that's often WHY we're capturing), and page.content()/screenshot can hang.
+  const race = (p, ms, fallback) =>
+    Promise.race([
+      Promise.resolve().then(() => p).catch(() => fallback),
+      new Promise((r) => setTimeout(() => r(fallback), ms)),
+    ]);
+  let url = "";
+  try { url = page.url(); } catch { /* page may be closed */ }
+  const title = await race(page.title(), 4000, "");
+  const html = (await race(page.content(), 5000, "")).slice(0, 20000);
+  let shotPath = "";
+  try {
+    const dir = path.join(DEBUG_DIR, runId);
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const base = path.join(dir, `step${stepIndex}-${stamp}`);
+    const buf = await race(page.screenshot({ fullPage: false }), 6000, null);
+    if (buf) { fs.writeFileSync(`${base}.png`, buf); shotPath = `${base}.png`; }
+    fs.writeFileSync(`${base}.html`, html);
+    fs.writeFileSync(`${base}.json`, JSON.stringify({ url, title, reason, console: consoleBuf.slice(-50) }, null, 2));
+  } catch (e) { dbg(`captureDebug local write failed: ${e.message || e}`); }
+  dbg(`[DEBUG CAPTURE] step=${stepIndex} reason="${reason}" url=${url} title="${title}" html=${html.length}B shot=${shotPath || "none"} console=${consoleBuf.length}`);
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/debug`, {
+      method: "POST",
+      body: JSON.stringify({
+        step_index: stepIndex,
+        reason,
+        url,
+        title,
+        html_excerpt: html.slice(0, 8000),
+        console: consoleBuf.slice(-50),
+        screenshot_path: shotPath,
+      }),
+    });
+  } catch (e) { dbg(`captureDebug backend POST failed: ${e.message || e}`); }
+}
+
 async function driveRun(run) {
   const runId = run.id;
   drivingRunId = runId;
@@ -1198,9 +1253,26 @@ async function driveRun(run) {
   let lastSearchUrl = searchUrl;
   let blocked = false;
   let lastIdx = 0;
+  let page = null;
+  let watchdogFired = false;
+  let watchdog = null;
+  const consoleBuf = [];
+  let mark = "start";
 
   try {
-    const page = ctx.pages()[0] || (await ctx.newPage());
+    page = ctx.pages()[0] || (await ctx.newPage());
+
+    // Ring-buffer page console errors/warnings so debug snapshots include them.
+    page.on("console", (m) => { const t = m.type(); if (t === "error" || t === "warning") { consoleBuf.push(`[${t}] ${m.text()}`.slice(0, 300)); if (consoleBuf.length > 80) consoleBuf.shift(); } });
+    page.on("pageerror", (e) => { consoleBuf.push(`[pageerror] ${e.message}`.slice(0, 300)); if (consoleBuf.length > 80) consoleBuf.shift(); });
+    // Watchdog: if the run stalls past RUN_WATCHDOG_MS, snapshot the page and
+    // abort cleanly (closing ctx makes in-flight awaits reject → caught below).
+    watchdog = setTimeout(async () => {
+      watchdogFired = true;
+      dbg(`[WATCHDOG] run ${runId} exceeded ${RUN_WATCHDOG_MS}ms at "${mark}" (step ~${lastIdx}) — capturing + aborting`);
+      await captureDebug(page, runId, lastIdx, `watchdog-timeout ${RUN_WATCHDOG_MS}ms at ${mark}`, consoleBuf).catch(() => {});
+      await ctx.close().catch(() => {});
+    }, RUN_WATCHDOG_MS);
 
     // step 0 — feed warm-up (real users don't deep-link cold to search).
     await safeGoto(page, "https://www.linkedin.com/feed/", "feed");
@@ -1214,14 +1286,17 @@ async function driveRun(run) {
 
     // step 2 — search page 1: type the query into the global search box and
     // click the People filter like a human (deep-link fallback inside).
+    lastIdx = 2; mark = "search-nav"; dbg(`step2 navigate people search for "${jobTitle}"`);
     lastSearchUrl = await navigateToPeopleSearch(page, jobTitle, searchUrl, orand);
     recordSearch();
     await sleep(jitter(3000, 1500));
     await reportStepResult(runId, 2, "navigate");
 
     if (isLeadRun) {
+      lastIdx = 3; mark = "scrape-page1"; dbg(`step3 scrape page1 url=${page.url()}`);
       const people1 = await scrapeSearchPeople(page);
       seenPool.push(...people1.map((p) => p.profile_url));
+      dbg(`step3 scraped ${people1.length} people`);
       console.log(`  step 3: ${people1.length} people on page 1`);
       await postExtraction(runId, 3, page.url(), { page_title: await page.title(), url: page.url(), people: people1 });
     } else {
@@ -1253,8 +1328,10 @@ async function driveRun(run) {
     await reportStepResult(runId, 4, "navigate");
 
     if (isLeadRun) {
+      lastIdx = 5; mark = "scrape-page2"; dbg(`step5 scrape page2 url=${page.url()}`);
       const people2 = await scrapeSearchPeople(page);
       seenPool.push(...people2.map((p) => p.profile_url));
+      dbg(`step5 scraped ${people2.length} people`);
       console.log(`  step 5: ${people2.length} people on page 2`);
       await postExtraction(runId, 5, page.url(), { page_title: await page.title(), url: page.url(), people: people2 });
     } else {
@@ -1391,15 +1468,25 @@ async function driveRun(run) {
     }
     if (!blocked) console.log(`  done: status=${cur.status} step=${cur.current_step_index}/${cur.total_steps}`);
   } catch (err) {
-    if (err instanceof BlockerError) {
+    const msg = err?.message || String(err);
+    if (watchdogFired || /Target.*closed|browser.*closed|context.*closed/i.test(msg)) {
+      // The watchdog already captured the page; pause cleanly so a stall is a
+      // diagnosable terminal state, never a silent hang.
+      dbg(`run ${runId} aborted by watchdog at "${mark}" (step ${lastIdx})`);
+      await pauseRun(runId, `watchdog: stalled at ${mark} (step ${lastIdx})`, lastIdx).catch(() => {});
+      blocked = true;
+    } else if (err instanceof BlockerError) {
       // Wall hit on the opening sequence or bubbled from the step loop. Pause
       // at the last step we were on (0 for the opening) and trip the circuit.
       await handleBlocker(runId, err, lastIdx);
       blocked = true;
     } else {
+      // Unexpected error — snapshot the page before bubbling so it's diagnosable.
+      if (page) await captureDebug(page, runId, lastIdx, `error: ${msg}`, consoleBuf).catch(() => {});
       throw err;
     }
   } finally {
+    if (watchdog) clearTimeout(watchdog);
     drivingRunId = null;
     await ctx.close().catch(() => {});
   }
