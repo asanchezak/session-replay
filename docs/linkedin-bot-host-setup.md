@@ -326,18 +326,56 @@ El usuario `linkedin-bot` se queda: es el usuario real del bot.
 
 Dos canales, ambos sobre Tailscale (sin puertos públicos).
 
-**(a) Consola SSH — la vía principal.** Habilitá **Remote Login** (System Settings →
-General → Sharing → Remote Login = ON; o `sudo systemsetup -setremotelogin on` si el
-terminal tiene Full Disk Access), instalá la llave pública del operador en
-`~linkedin-bot/.ssh/authorized_keys`, y entrá por el tailnet:
+**(a) Consola SSH — la vía principal.** Da una consola completa como `linkedin-bot`
+desde la máquina del operador, sobre Tailscale (sin puerto público). Es lo que permite
+desplegar/reiniciar el daemon, `tail -f` del log y leer `.debug/` **sin depender del VNC**.
+Resuelve además que el operador corre como su propio usuario y no puede tocar los procesos
+de `linkedin-bot` (otro usuario): por SSH entra *como* `linkedin-bot`.
+
+**Setup (una sola vez, en el host, con admin):**
+```bash
+# 1) Habilitar el servidor SSH integrado de macOS (Remote Login).
+#    Por terminal (si el Terminal tiene Full Disk Access):
+sudo systemsetup -setremotelogin on
+#    Si responde "requires Full Disk Access" → hacerlo por GUI:
+#    System Settings → General → Sharing → Remote Login = ON.
+
+# 2) Permitir a linkedin-bot conectarse por SSH (grupo de acceso).
+sudo dseditgroup -o edit -a linkedin-bot -t user com.apple.access_ssh 2>/dev/null || true
+
+# 3) Instalar la llave PÚBLICA del operador en linkedin-bot (login sin password).
+#    <pubkey> = contenido de ~/.ssh/id_ed25519.pub de la máquina del operador.
+sudo mkdir -p /Users/linkedin-bot/.ssh
+echo '<pubkey>' | sudo tee -a /Users/linkedin-bot/.ssh/authorized_keys >/dev/null
+sudo chown -R linkedin-bot:staff /Users/linkedin-bot/.ssh
+sudo chmod 700 /Users/linkedin-bot/.ssh && sudo chmod 600 /Users/linkedin-bot/.ssh/authorized_keys
 ```
-ssh linkedin-bot@<IP-tailnet>
+*(En el rehearsal 2026-06-01 esto quedó scripteado en `/Users/Shared/setup-ssh-bot.sh`.)*
+
+**Verificar** (sin password, por llave):
+```bash
+ssh -o BatchMode=yes linkedin-bot@<IP-tailnet> whoami   # → linkedin-bot
 ```
-Da consola completa como `linkedin-bot`: `tail -f` del log, leer `.debug/`, reiniciar
-el daemon, correr lo que sea — sin VNC. **Headed Chrome funciona lanzado desde SSH**
-siempre que `linkedin-bot` tenga **sesión GUI activa** (logueado por FUS) — validado
-2026-06-01. Si no la tiene, los comandos GUI fallan; mantené la sesión del bot abierta.
-Usá ruta completa `/opt/homebrew/bin/node` (el shell SSH no hereda el PATH de Homebrew).
+
+**Uso típico** (desde la máquina del operador):
+```bash
+HOST=linkedin-bot@<IP-tailnet>
+ssh $HOST 'tail -f /Users/Shared/bot-daemon.log'                # seguir el log en vivo
+ssh $HOST 'ls -t ~/session-replay/extension/.debug/*/ | head'   # capturas de cuelgues
+ssh $HOST 'cat ~/session-replay/extension/.debug/<runId>/*.json'# URL/consola del cuelgue
+ssh $HOST 'zsh /Users/Shared/start-bot-daemon.sh'               # reinicio LIMPIO del daemon
+ssh $HOST 'cp /Users/Shared/driver-daemon.mjs ~/session-replay/extension/driver-daemon.mjs'  # desplegar código
+```
+
+**Caveats (importantes):**
+- **Headed Chrome desde SSH funciona SOLO si `linkedin-bot` tiene sesión GUI activa**
+  (logueado por FUS): el proceso SSH alcanza el WindowServer de esa sesión. Sin sesión
+  GUI, todo comando gráfico (el daemon, Chrome) falla. Regla: mantené la sesión del bot
+  logueada en pantalla. (Validado 2026-06-01: smoke test headed 2/2 OK por SSH.)
+- El shell SSH **no hereda el PATH de Homebrew** → usá ruta completa `/opt/homebrew/bin/node`.
+- Solo por red privada (localhost en una sola Mac; Tailscale entre máquinas). El puerto 22
+  **nunca se expone a internet**. Autenticación por **llave**, no password. Usuario `linkedin-bot`
+  es standard (sin admin), así que el alcance del acceso está acotado.
 
 **(b) Artefactos que el daemon reporta al backend** — para cuando no hay shell a mano:
 
