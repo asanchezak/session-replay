@@ -194,10 +194,17 @@ Hacer **en la sesión de `linkedin-bot`**. El titular participa una sola vez (el
    cd <REPO>/extension
    node login-linkedin.mjs
    ```
-   Abre Chrome contra un `.linkedin-profile` nuevo. **El titular teclea sus
-   credenciales** y resuelve el checkpoint/captcha si aparece (1 sola vez; LinkedIn
-   whitelistea ese dispositivo+IP). El script espera hasta 25 min a que la URL quede
-   en una superficie logueada de LinkedIn.
+   Abre Chrome directo en la página de login de LinkedIn. El titular solo tiene que
+   **llegar a su feed**, de la forma más cómoda:
+   - **La más simple, sin teclear:** si Chrome muestra "Iniciar sesión con la app" /
+     un **código QR**, escanearlo con la app de LinkedIn del teléfono.
+   - O email + contraseña normal.
+   - Si pide un **código** (SMS/email) la 1ª vez, ingresarlo una sola vez (es el
+     checkpoint que whitelistea el equipo).
+
+   El script **detecta solo** el login y cierra (espera hasta 25 min). Es **una sola
+   vez**: el perfil queda en `.linkedin-profile` y el daemon lo reutiliza sin que el
+   titular vuelva a intervenir.
 
    > No correr `prepare-stealth-profile.mjs` aquí: ese script copia un `Profile 4`
    > de Chrome ya envejecido (flujo de una Mac con perfil preexistente). En el usuario
@@ -221,6 +228,32 @@ Hacer **en la sesión de `linkedin-bot`**. El titular participa una sola vez (el
 
 Detalle completo del pipeline (webhook Odoo → search → scrape → push → scoring):
 `docs/recruitment-automation-flow.md`.
+
+### Verificación E2E (run de prueba, sin contaminar Odoo)
+
+Para confirmar el flujo completo sin ensuciar datos reales, dispará un run en **modo
+test** vía `trigger-now` (tagea los outputs como test en Odoo, `is_test=true`):
+
+```bash
+curl -s -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8081/v1/workflows/<WORKFLOW_ID>/trigger-now \
+  -d '{"connector_id":"<CONNECTOR_ID>","execution_options":{"mode":"test","max_candidates":1,"push_to_odoo":true,"label_outputs":true},"triggered_by":"qa"}'
+```
+
+- El daemon (sesión `linkedin-bot`) abre Chrome headed y hace la búsqueda → observable por FUS/VNC.
+- El dashboard `:5173` refleja el run en vivo (mismo backend compartido).
+- Verificar leads en Odoo, tagueados como test:
+  ```sql
+  select is_test, count(*) from linkedin_lead where source_run_id = '<RUN_ID>' group by is_test;  -- is_test=t
+  ```
+- **Limpieza de datos de prueba** (por run o por flag):
+  ```sql
+  delete from linkedin_lead where source_run_id = '<RUN_ID>';   -- o: where is_test = true
+  ```
+
+> Validado 2026-06-01 (rehearsal en 2ª Mac, daemon bajo `linkedin-bot` contra backend
+> compartido): búsqueda real → **19 leads pusheados con `is_test=true` + `source_run_id`**,
+> dashboard sincronizado, Chrome headed renderizando en sesión en 2º plano.
 
 ---
 
