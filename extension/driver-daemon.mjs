@@ -37,6 +37,7 @@ import {
   parseCertificationItems, parseProjectItems, parseSimpleListItems,
 } from "./src/behavior/profile-parsers.mjs";
 import { experienceParasCore, sectionListItemsCore, subpageTextCore } from "./src/behavior/profile-dom.mjs";
+import { prepareConnectNoteDialog, NOTE_TEXTAREA_SELECTOR } from "./src/behavior/connect-compose-core.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -299,104 +300,13 @@ async function composeDraftInPage(page, message) {
     return { ok: false, reason: "top_card_not_found" };
   }
   const trimmed = (message || "").slice(0, 300);
-  const result = await page.evaluate(async (msg) => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    function inGlobalNav(el) {
-      if (el.closest('nav, header, #global-nav, .global-nav, [data-global-nav], [class*="global-nav"]')) return true;
-      if (el.tagName === "A" && /\/messaging\//.test(el.getAttribute("href") || "")) return true;
-      return false;
-    }
-    const topCard = document.querySelector('[data-view-name="profile-top-card"]');
-    function findActionButton(tokens, scope) {
-      if (!scope) return null;
-      const aria = Array.from(scope.querySelectorAll("button[aria-label], a[aria-label]"));
-      for (const el of aria) {
-        if (inGlobalNav(el)) continue;
-        const l = (el.getAttribute("aria-label") || "").toLowerCase().trim();
-        if (!l) continue;
-        for (const t of tokens) {
-          if (l === t || l.startsWith(t + " ") || l.startsWith(t + "…") || l.includes(" " + t + " ")) return el;
-        }
-      }
-      const others = Array.from(scope.querySelectorAll('button, a[role="button"], div[role="button"], li[role="menuitem"]'));
-      for (const el of others) {
-        if (inGlobalNav(el)) continue;
-        const t = (el.innerText || el.textContent || "").trim().toLowerCase();
-        if (!t) continue;
-        for (const tok of tokens) {
-          if (t === tok || t.startsWith(tok)) return el;
-        }
-      }
-      return null;
-    }
-    function findInOpenMenus(tokens) {
-      const menus = Array.from(document.querySelectorAll('[role="menu"], [aria-expanded="true"] + *, .artdeco-dropdown__content'));
-      for (const m of menus) {
-        const f = findActionButton(tokens, m);
-        if (f) return f;
-      }
-      return null;
-    }
-    async function waitFor(fn, timeoutMs, poll = 200) {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const v = fn();
-        if (v) return v;
-        await sleep(poll);
-      }
-      return null;
-    }
-    if (!topCard) return { ok: false, reason: "top_card_not_found" };
-    const pendingTokens = ["pending", "pendiente", "invitation sent", "invitación enviada"];
-    if (findActionButton(pendingTokens, topCard)) return { ok: false, reason: "already_pending" };
+  // Shared canonical in-page logic (connect → dialog → note textarea → focus+clear).
+  // The note is typed below with real keystroke timing so LinkedIn sees genuine
+  // keydown/input events rather than a one-shot value set.
+  const result = await page.evaluate(prepareConnectNoteDialog);
 
-    const connectTokens = ["connect", "conectar", "invitar", "invite", "vincular"];
-    const moreTokens = ["more", "más", "mas"];
-    let connectBtn = findActionButton(connectTokens, topCard);
-    if (!connectBtn) {
-      const more = findActionButton(moreTokens, topCard);
-      if (more) {
-        try { more.scrollIntoView({ block: "center" }); more.click(); } catch {}
-        await sleep(600);
-        connectBtn = await waitFor(() => findInOpenMenus(connectTokens), 5000);
-      }
-    }
-    if (!connectBtn) return { ok: false, reason: "no_connect_button" };
-    try { connectBtn.scrollIntoView({ block: "center" }); connectBtn.click(); } catch {}
-    const dialog = await waitFor(() => {
-      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-      for (const d of dialogs) {
-        const txt = (d.innerText || "").toLowerCase();
-        if (/invit|connect|conectar|personaliz/.test(txt)) return d;
-      }
-      return null;
-    }, 8000);
-    if (!dialog) return { ok: false, reason: "connect_modal_did_not_open" };
-    const addNote = Array.from(dialog.querySelectorAll('button, a[role="button"]')).find((b) => {
-      const t = (b.innerText || b.textContent || "").trim().toLowerCase();
-      return t.includes("add a note") || t.includes("añadir nota") || t.includes("personalizar") || t.includes("personalize");
-    });
-    if (addNote) { try { addNote.click(); } catch {} await sleep(400); }
-    const textarea = await waitFor(() => dialog.querySelector(
-      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i], textarea'
-    ), 6000);
-    if (!textarea) return { ok: false, reason: "note_textarea_missing" };
-    // Focus + clear only. The note text itself is typed from the driver (Node)
-    // side with real keystroke timing instead of injected here, so LinkedIn
-    // sees genuine keydown/input events rather than a one-shot value set.
-    textarea.focus();
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter) setter.call(textarea, ""); else textarea.value = "";
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    await sleep(150);
-    return { ok: true, ready: true };
-  }, trimmed);
-
-  // Type the note with human keystroke timing into the focused note field.
   if (result && result.ok && result.ready) {
-    const ta = page.locator(
-      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="message" i], textarea[aria-label*="nota" i]',
-    ).first();
+    const ta = page.locator(NOTE_TEXTAREA_SELECTOR).first();
     await ta.click({ timeout: 3000 }).catch(() => { /* keep in-page focus */ });
     await typeHumanLike(page, trimmed);
     await sleep(200 + Math.floor(Math.random() * 300));
