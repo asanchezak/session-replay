@@ -31,6 +31,7 @@ from core.models.analysis import (
 )
 from core.models.workflow import Workflow, WorkflowStep
 from services.template_service import TemplateService
+from ai.extraction_shapes import FIELD_SHAPES, normalize_field_key, shape_to_dict
 
 
 WORKFLOW_NAME = "LinkedIn People Search"
@@ -40,35 +41,27 @@ SEARCH_URL_TEMPLATE = (
 )
 
 
+def _profile_shape(key: str, label: str) -> dict:
+    """Build a seed shape, deriving kind/item_keys/extract_hints from the shared
+    FIELD_SHAPES registry — the single source of truth (backend/ai/extraction_shapes.py).
+    Keeps the seed from drifting (it used to lack the registry's extract_hints).
+    Fields absent from the registry (topcard scalars like full_name/headline)
+    default to a plain scalar."""
+    shape = FIELD_SHAPES.get(normalize_field_key(key))
+    if shape is None:
+        return {"key": key, "label": label, "kind": "scalar", "item_keys": None}
+    return {"key": key, "label": label, **shape_to_dict(shape)}
+
+
 PROFILE_EXTRACT_SHAPES = [
-    {"key": "full_name", "label": "Full Name", "kind": "scalar", "item_keys": None},
-    {"key": "headline", "label": "Headline", "kind": "scalar", "item_keys": None},
-    {"key": "about", "label": "About", "kind": "scalar", "item_keys": None},
-    {"key": "skills", "label": "Skills", "kind": "string_list", "item_keys": None},
-    {
-        "key": "projects",
-        "label": "Projects",
-        "kind": "record_list",
-        "item_keys": ["name", "description", "dates"],
-    },
-    {
-        "key": "experience",
-        "label": "Experience",
-        "kind": "record_list",
-        "item_keys": ["title", "company", "location", "dates", "description"],
-    },
-    {
-        "key": "education",
-        "label": "Education",
-        "kind": "record_list",
-        "item_keys": ["school", "degree", "field", "dates"],
-    },
-    {
-        "key": "certifications",
-        "label": "Certifications",
-        "kind": "record_list",
-        "item_keys": ["name", "issuer", "issued"],
-    },
+    _profile_shape("full_name", "Full Name"),
+    _profile_shape("headline", "Headline"),
+    _profile_shape("about", "About"),
+    _profile_shape("skills", "Skills"),
+    _profile_shape("projects", "Projects"),
+    _profile_shape("experience", "Experience"),
+    _profile_shape("education", "Education"),
+    _profile_shape("certifications", "Certifications"),
 ]
 
 
