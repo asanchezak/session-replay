@@ -153,8 +153,12 @@ async function findPendingRun() {
   const now = Date.now();
   for (const r of items) {
     if (!r.origin) continue;
-    if (r.origin.event_kind !== "new_job_position"
-        && r.origin.event_kind !== "linkedin_lead_search") continue;
+    // Pick up the webhook-driven LinkedIn flows (by event_kind) AND any run the
+    // extension explicitly enqueued for the daemon (execution_target=="daemon").
+    const watched = r.origin.event_kind === "new_job_position"
+      || r.origin.event_kind === "linkedin_lead_search"
+      || r.origin.execution_target === "daemon";
+    if (!watched) continue;
     if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) continue;
     if (r.current_step_index > 0) continue;
     const startedAt = r.started_at ? Date.parse(r.started_at) : (r.created_at ? Date.parse(r.created_at) : 0);
@@ -1028,6 +1032,11 @@ async function driveRun(run) {
   // search pages and stop — NO profile visits, NO for_each. The run
   // auto-completes when step 5 advances the cursor to total_steps (6).
   const isLeadRun = run.origin?.event_kind === "linkedin_lead_search";
+  // Per-workflow execution mode (threaded through run.origin from the workflow).
+  // "generic" → drive the plan via the generic loop; "hardcoded" → the bespoke
+  // steps-0-5 preamble. The DAEMON_GENERIC_PREAMBLE env flag stays a global
+  // force-on override. Missing mode → falsy → hardcoded (safe, matches today).
+  const useGeneric = run.origin?.execution_mode === "generic" || GENERIC_PREAMBLE;
   let profileExtractCount = 0;
   if (maxCandidates !== null || isTestRun) {
     console.log(`[daemon] run ${runId} options: mode=${execOpts.mode || "live"} max_candidates=${maxCandidates ?? "∞"}`);
@@ -1085,7 +1094,7 @@ async function driveRun(run) {
     // linkedin_paginate_next + linkedin_search_urls + a for_each step arm. OFF
     // (default) → the preamble + imperative expansion run exactly as before.
     let expansion = null;
-    if (!GENERIC_PREAMBLE) {
+    if (!useGeneric) {
     // step 0 — feed warm-up (real users don't deep-link cold to search).
     await safeGoto(page, "https://www.linkedin.com/feed/", "feed");
     await sleep(jitter(2500, 1500));

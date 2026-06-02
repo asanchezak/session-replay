@@ -17,6 +17,7 @@ from api.v1.workflows import (
     delete_workflow,
     generate_workflow_prompt,
     get_workflow,
+    list_workflows,
     record_workflow,
     run_workflow,
     run_workflow_with_parameters,
@@ -25,6 +26,7 @@ from api.v1.workflows import (
     update_workflow_status,
 )
 from core.exceptions import NotFoundError
+from core.models.run import ExecutionRun
 from core.models.workflow import WorkflowStep
 from services.workflow_service import WorkflowService
 
@@ -478,3 +480,62 @@ async def test_record_workflow_no_simplification_and_causal_enrichment(db_sessio
     assert type_meta.get("caused_url_change") is False
     assert type_meta.get("time_since_previous_ms") is not None
     assert type_meta.get("time_since_previous_ms") > 3000  # 3.7s gap
+
+
+async def _active_wf_with_step(db_session) -> str:
+    # Self-contained (does NOT use _seed_workflow, whose update_status(active)
+    # hits a pre-existing StateTransitionError because create() already yields
+    # an active workflow).
+    svc = WorkflowService(db_session)
+    wf = await svc.create(name="exec-mode-seed", target_url="https://example.test")
+    await svc.add_step(
+        workflow_id=str(wf.id),
+        step_index=0,
+        action_type="click",
+        intent="click",
+        selector_chain=[{"type": "css", "value": "#a"}],
+    )
+    return str(wf.id)
+
+
+@pytest.mark.asyncio
+async def test_execution_mode_exposed_and_defaults_generic(db_session):
+    # A freshly-created workflow defaults to "generic" (the interpreter path);
+    # the list + detail responses expose execution_mode for the dashboard badge.
+    wf_id = await _active_wf_with_step(db_session)
+    listed = await list_workflows(status=None, type=None, limit=50, offset=0, db=db_session)
+    row = next(w for w in listed if w["id"] == wf_id)
+    assert row["execution_mode"] == "generic"
+    detail = await get_workflow(wf_id, db=db_session)
+    assert detail["execution_mode"] == "generic"
+
+
+@pytest.mark.asyncio
+async def test_run_with_params_daemon_target_tags_origin(db_session):
+    # execution_target="daemon" tags the run so the daemon picks it up: origin
+    # carries execution_target + execution_mode, and the run is RUNNING.
+    wf_id = await _active_wf_with_step(db_session)
+    resp = await run_workflow_with_parameters(
+        wf_id,
+        req=RunWithParamsRequest(runtime_params={}, execution_target="daemon"),
+        db=db_session,
+    )
+    assert resp["status"] == "running"
+    assert resp["execution_target"] == "daemon"
+    run = await db_session.get(ExecutionRun, uuid.UUID(resp["id"]))
+    assert run.origin["execution_target"] == "daemon"
+    assert run.origin["execution_mode"] == "generic"  # seeded workflow default
+
+
+@pytest.mark.asyncio
+async def test_run_with_params_browser_target_leaves_origin_untagged(db_session):
+    # Default "browser" target: the daemon must NOT pick it up (no daemon tag).
+    wf_id = await _active_wf_with_step(db_session)
+    resp = await run_workflow_with_parameters(
+        wf_id,
+        req=RunWithParamsRequest(runtime_params={}),
+        db=db_session,
+    )
+    assert resp["execution_target"] == "browser"
+    run = await db_session.get(ExecutionRun, uuid.UUID(resp["id"]))
+    assert not (run.origin or {}).get("execution_target")

@@ -83,7 +83,7 @@ export class ApiClient {
   }
 
   async listWorkflows() {
-    return this.request<Array<{ id: string; name: string; status: string }>>("GET", "/workflows");
+    return this.request<Array<{ id: string; name: string; status: string; execution_mode?: string }>>("GET", "/workflows");
   }
 
   async getWorkflow(workflowId: string) {
@@ -268,6 +268,12 @@ export class ApiClient {
     return this.request<{ id: string; status: string }>("POST", `/runs/${runId}/cancel`);
   }
 
+  async getRun(runId: string) {
+    return this.request<{ id: string; status: string; current_step_index: number; total_steps: number }>(
+      "GET", `/runs/${runId}`,
+    );
+  }
+
   async reportTabClosed(runId: string): Promise<{ id: string; status: string }> {
     return this.request<{ id: string; status: string }>("POST", `/runs/${runId}/tab-closed`);
   }
@@ -373,16 +379,19 @@ export class ApiClient {
     workflowId: string,
     params: Record<string, unknown>,
     executionGoal?: string,
+    executionTarget: "browser" | "daemon" = "browser",
   ) {
     return this.request<{
       id: string;
       status: string;
       current_step_index: number;
       total_steps: number;
+      execution_target?: string;
       execution_plan: { strategy: string; mode: string; steps?: Array<Record<string, unknown>>; parameters?: Record<string, unknown>; reason?: string };
     }>("POST", `/workflows/${workflowId}/run-with-params`, {
       runtime_params: params,
       execution_goal: executionGoal || null,
+      execution_target: executionTarget,
     });
   }
 

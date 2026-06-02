@@ -50,6 +50,8 @@ class ExecutionService:
                 "name": workflow.name,
                 "version": workflow.version,
                 "target_url": workflow.target_url,
+                # Daemon reads this (via origin) to pick hardcoded vs generic.
+                "execution_mode": workflow.execution_mode,
             },
             "steps": [
                 {

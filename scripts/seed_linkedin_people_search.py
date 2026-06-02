@@ -253,6 +253,8 @@ async def main() -> None:
             status="active",
             version=1,
             workflow_type="user",
+            # Bespoke daemon flow (steps-0-5 preamble), not the generic interpreter.
+            execution_mode="hardcoded",
         )
         session.add(wf)
         await session.flush()

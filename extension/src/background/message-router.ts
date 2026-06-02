@@ -24,6 +24,11 @@ type RouterDeps = {
     runtimeParams?: Record<string, unknown>,
     onStart?: (runHandle: RunHandle) => void,
   ) => Promise<RunHandle>;
+  enqueueDaemonRun: (
+    workflowId: string,
+    goal?: string,
+    runtimeParams?: Record<string, unknown>,
+  ) => Promise<RunHandle>;
   executeStepOnTab: (
     step: BackgroundToContentMessage["step"],
     tabId?: number,
@@ -129,6 +134,27 @@ export function registerServiceWorkerListeners(deps: RouterDeps): void {
               sendResponse({ type: "RUN_FAILED", error: String(err) });
             }
           });
+          return true;
+        }
+        case "GET_RUN_STATUS": {
+          const msg = message as unknown as { runId: string };
+          apiClient.getRun(msg.runId)
+            .then((run) => sendResponse({ type: "RUN_STATUS", run }))
+            .catch((err: unknown) => sendResponse({ type: "RUN_FAILED", error: String(err) }));
+          return true;
+        }
+        case "RUN_ON_DAEMON": {
+          const msg = message as unknown as {
+            workflowId: string;
+            goal?: string;
+            params?: Record<string, unknown>;
+          };
+          deps.enqueueDaemonRun(msg.workflowId, msg.goal, msg.params)
+            .then((runHandle) => sendResponse({ type: "DAEMON_RUN_QUEUED", run: runHandle }))
+            .catch((err: unknown) => {
+              log.error("Failed to enqueue daemon run:", err);
+              sendResponse({ type: "RUN_FAILED", error: String(err) });
+            });
           return true;
         }
         case "ANALYZE_PAGE_STEP": {

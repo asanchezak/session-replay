@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
+import ExecutionModeBadge from "../components/ExecutionModeBadge";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
@@ -127,6 +128,9 @@ export default function WorkflowsPage() {
           columns={[
             { key: "name", label: "Name", render: (w: WorkflowSummary) => (
               <span className="font-medium">{w.name}</span>
+            )},
+            { key: "mode", label: "Mode", render: (w: WorkflowSummary) => (
+              <ExecutionModeBadge mode={w.execution_mode} />
             )},
             { key: "connector", label: "Connector", render: () => "—" },
             { key: "version", label: "Version", render: (w: WorkflowSummary) => (

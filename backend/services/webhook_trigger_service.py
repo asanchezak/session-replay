@@ -337,6 +337,9 @@ class WebhookTriggerService:
             "event_kind": trigger.event_kind,
             "trigger_id": str(trigger.id) if trigger.id else None,
             "job_payload": job_data,
+            # Daemon decides hardcoded-vs-generic per run from this (sourced from
+            # the workflow, stamped into the snapshot by create_run).
+            "execution_mode": (run.workflow_snapshot or {}).get("workflow", {}).get("execution_mode"),
             # QA testing knobs (default empty for production webhook/replay fires):
             # execution_options.{mode,max_candidates,push_to_odoo,label_outputs}
             # is read by the daemon (scrape cap + test tagging) and the push hook.

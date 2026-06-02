@@ -7,6 +7,8 @@ export interface WorkflowSummary {
   description?: string;
   status: string;
   workflow_type: string;
+  /** "hardcoded" (bespoke daemon flow) | "generic" (plan-interpreter). */
+  execution_mode?: string;
   version: number;
   target_url?: string;
   created_at: string;
