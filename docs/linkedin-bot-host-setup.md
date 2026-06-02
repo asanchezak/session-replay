@@ -46,7 +46,7 @@ Para el admin que instala todo de cero. Cada ítem enlaza a la sección con el d
 
 **En la Mac del titular (como admin):**
 - [ ] Instalar Homebrew + Node: `node -v` debe responder (§1)
-- [ ] Clonar el repo: `git clone ... ~/session-replay` + `cd ~/session-replay/extension && npm install` (§1)
+- [ ] Clonar el repo en el home del usuario bot: `git clone <URL> /Users/linkedin-bot/session-replay` + `cd /Users/linkedin-bot/session-replay/extension && npm install` (§1)
 - [ ] Crear usuario `linkedin-bot`: `sudo sysadminctl -addUser linkedin-bot ...` (§2)
 - [ ] Activar Fast User Switching (§3)
 - [ ] Fijar sleep a 0 enchufado: `sudo pmset -c sleep 0` (§4)
@@ -56,13 +56,13 @@ Para el admin que instala todo de cero. Cada ítem enlaza a la sección con el d
 - [ ] Activar Screen Sharing (GUI: System Settings → Sharing → Screen Sharing = ON) (§7)
 
 **En la sesión de `linkedin-bot` (por FUS o VNC):**
-- [ ] Validar render GPU: `node test-bg-session-chrome.mjs` + `node test-bg-session-gpu.mjs` (§5)
-- [ ] Login de LinkedIn: `node login-linkedin.mjs` — el titular escanea QR o ingresa credenciales (§6)
-- [ ] Instalar servicios: `make all-services-install && make services-status` (§6)
+- [ ] Validar render GPU: `cd ~/session-replay/extension && node test-bg-session-chrome.mjs && node test-bg-session-gpu.mjs` (§5)
+- [ ] Login de LinkedIn: `cd ~/session-replay/extension && node login-linkedin.mjs` — el titular escanea QR o ingresa credenciales (§6)
+- [ ] Instalar daemon y apuntar al backend central: `cd ~/session-replay && make daemon-install` → editar `BACKEND` en el plist (§6)
 
 **Desde la Mac del operador:**
 - [ ] Verificar SSH: `ssh -o BatchMode=yes linkedin-bot@<IP-tailnet> whoami` → debe responder `linkedin-bot` (§11a)
-- [ ] Abrir dashboard: `http://<IP-tailnet>:5173` con `X-API-Key` en extensión o header
+- [ ] Abrir dashboard: `http://localhost:5173` (el frontend vive en la Mac del operador, no en el host)
 - [ ] Correr run de prueba: `trigger-now` con `"mode":"test","max_candidates":1` (§6)
 - [ ] Verificar leads en Odoo con `is_test=true`, luego limpiar (§6)
 
@@ -73,10 +73,20 @@ Para el admin que instala todo de cero. Cada ítem enlaza a la sección con el d
 - macOS reciente (validado en **macOS 26.5 / Apple M1 Pro**).
 - **Google Chrome** instalado (el bot usa `channel:"chrome"`, el Chrome del sistema).
 - **Homebrew Node** (`/opt/homebrew/bin/node`). Verificar: `node -v`.
-- El repo `session-replay` clonado (ej. en `~/Documents/session-replay`).
-  En el resto del doc se abrevia como `<REPO>`.
+- El repo `session-replay` clonado en el **home del usuario bot** (no en `~/Documents/`):
+  ```bash
+  git clone <URL-del-repo> /Users/linkedin-bot/session-replay
+  ```
+  Clonar dentro de `~/Documents/` puede causar errores EPERM cuando launchd intenta
+  leer esa carpeta. Directamente en el home (`~/session-replay`) no tiene ese problema.
+  En el resto del doc `<REPO>` = `/Users/linkedin-bot/session-replay`.
 - `npm install` corrido en `<REPO>/extension` (trae Playwright).
 - Acceso administrador para crear el usuario (lo hace quien administre la Mac).
+
+**Arquitectura de este host:** el **daemon** corre aquí (bajo `linkedin-bot`); el
+**backend + frontend + Postgres** corren en la Mac del operador (ya configurados).
+El daemon se conecta al backend por Tailscale — ver §6 para la configuración del
+`BACKEND`.
 
 ---
 
@@ -242,14 +252,26 @@ Hacer **en la sesión de `linkedin-bot`**. El titular participa una sola vez (el
    > de Chrome ya envejecido (flujo de una Mac con perfil preexistente). En el usuario
    > bot fresco el camino correcto es el login limpio de arriba.
 
-2. **Instalar los servicios** (daemon en launchd + backend/frontend en screen):
+2. **Instalar el daemon** y apuntarlo al backend del operador:
    ```bash
    cd <REPO>
-   make all-services-install
-   make services-status      # daemon up, puertos 8081/5173 respondiendo
+   make daemon-install
    ```
-   Para que no dependan del sleep, lanzar el daemon bajo `caffeinate` o fijar
-   `sudo pmset -c sleep 0` (§4).
+   Después del install, editar el plist renderizado para cambiar `BACKEND` y `API_KEY`
+   a los valores del backend central (que corre en la Mac del operador por Tailscale):
+   ```bash
+   PLIST="$HOME/Library/LaunchAgents/com.akurey.session-replay-daemon.plist"
+   # Reemplazar la IP con la IP de Tailscale de la Mac del operador (100.x.x.x)
+   plutil -replace EnvironmentVariables.BACKEND \
+     -string "http://<IP-TAILNET-OPERADOR>:8081" "$PLIST"
+   # API_KEY debe coincidir con el backend del operador
+   plutil -replace EnvironmentVariables.API_KEY \
+     -string "dev-api-key-change-in-production" "$PLIST"
+   make daemon-restart
+   make daemon-status        # debe mostrar pid activo
+   ```
+   > Nota: el backend, frontend y Postgres corren en la Mac del operador — no se
+   > instalan en este host. Solo el daemon vive aquí.
 
 3. **Bajar límites de budget para testing** (env vars que el daemon ya lee, en el
    plist del daemon): `MAX_PROFILE_VIEWS_DAY/HOUR`, `MAX_SEARCHES_DAY`,
@@ -264,16 +286,18 @@ Detalle completo del pipeline (webhook Odoo → search → scrape → push → s
 ### Verificación E2E (run de prueba, sin contaminar Odoo)
 
 Para confirmar el flujo completo sin ensuciar datos reales, dispará un run en **modo
-test** vía `trigger-now` (tagea los outputs como test en Odoo, `is_test=true`):
+test** vía `trigger-now` (tagea los outputs como test en Odoo, `is_test=true`). Correr
+desde la **Mac del operador** (donde vive el backend):
 
 ```bash
+API_KEY="dev-api-key-change-in-production"
 curl -s -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
   http://localhost:8081/v1/workflows/<WORKFLOW_ID>/trigger-now \
   -d '{"connector_id":"<CONNECTOR_ID>","execution_options":{"mode":"test","max_candidates":1,"push_to_odoo":true,"label_outputs":true},"triggered_by":"qa"}'
 ```
 
-- El daemon (sesión `linkedin-bot`) abre Chrome headed y hace la búsqueda → observable por FUS/VNC.
-- El dashboard `:5173` refleja el run en vivo (mismo backend compartido).
+- El daemon en la Mac de Fernanda (sesión `linkedin-bot`) detecta el run vía poll y abre Chrome headed → observable por VNC (`vnc://<IP-tailnet>` conectado como `linkedin-bot`).
+- El dashboard `localhost:5173` refleja el run en vivo (mismo backend).
 - Verificar leads en Odoo, tagueados como test:
   ```sql
   select is_test, count(*) from linkedin_lead where source_run_id = '<RUN_ID>' group by is_test;  -- is_test=t
@@ -337,11 +361,11 @@ por terminal (el `kickstart` de ARD avisa "must be enabled from System Settings"
 - **No** abrir LinkedIn de esta cuenta desde el navegador propio de ningún operador.
 - Ante checkpoint/captcha: **pausar**, dejar correr el cooldown, y que el titular valide
   manualmente. No re-loguear en bucle ni mover el perfil.
-- **No** usar en producción el wrapper de prueba (`/Users/Shared/start-bot-daemon.sh`) con
-  `BASE_COOLDOWN_MS=0` / `COOLDOWN_JITTER_MS=0` / `RESPECT_WORKING_HOURS=0` — eso es solo
-  para iterar rápido en QA; en producción daría una cadencia robótica (runs back-to-back,
-  fuera de horario) que es un tell anti-bot. **Producción = `make daemon-install`**, que usa
-  los defaults del plist (cooldown 20-40min entre runs + horario laboral).
+- **No** lanzar el daemon con `BASE_COOLDOWN_MS=0` / `COOLDOWN_JITTER_MS=0` /
+  `RESPECT_WORKING_HOURS=0` — esas variables son solo para iterar rápido en QA y
+  producirían una cadencia robótica (runs back-to-back, fuera de horario) que es un
+  tell anti-bot. **Producción = `make daemon-install`**, que usa los defaults del plist
+  (cooldown 20–40 min entre runs + horario laboral).
 
 ---
 
@@ -422,7 +446,7 @@ ssh -o BatchMode=yes linkedin-bot@<IP-TAILNET> whoami   # → linkedin-bot
 HOST="linkedin-bot@<IP-TAILNET>"
 
 # Ver log del daemon en vivo
-ssh $HOST 'tail -f ~/Library/Logs/session-replay/driver-daemon.log'
+ssh $HOST 'tail -f ~/Library/Logs/session-replay/daemon.log'
 
 # Estado de los servicios
 ssh $HOST 'cd ~/session-replay && make services-status'
@@ -459,7 +483,7 @@ Para cuando el operador no puede abrir una terminal (ej. solo tiene el dashboard
 
 - **Logs con timestamps** (`[dbg HH:MM:SS] …`) — inicio de cada step con URL/título,
   conteos, y errores de consola de la página. launchd los escribe a
-  `~/Library/Logs/session-replay/driver-daemon.log`.
+  `~/Library/Logs/session-replay/daemon.log`.
 - **Watchdog anti-cuelgue:** si un run supera `RUN_WATCHDOG_MS` (default 240 s), el
   daemon captura el estado de la página y aborta limpio (pausa el run) en vez de
   colgarse en silencio.
