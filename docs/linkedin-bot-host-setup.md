@@ -36,6 +36,38 @@
 
 ---
 
+## Checklist rápido (orden de instalación)
+
+Para el admin que instala todo de cero. Cada ítem enlaza a la sección con el detalle.
+
+**En la Mac del operador (antes de ir al host):**
+- [ ] Generar llave SSH: `ls ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519` → copiar `~/.ssh/id_ed25519.pub` (§11a)
+- [ ] Instalar Tailscale y hacer `tailscale up` → anotar la IP `100.x` del tailnet (§7)
+
+**En la Mac del titular (como admin):**
+- [ ] Instalar Homebrew + Node: `node -v` debe responder (§1)
+- [ ] Clonar el repo: `git clone ... ~/session-replay` + `cd ~/session-replay/extension && npm install` (§1)
+- [ ] Crear usuario `linkedin-bot`: `sudo sysadminctl -addUser linkedin-bot ...` (§2)
+- [ ] Activar Fast User Switching (§3)
+- [ ] Fijar sleep a 0 enchufado: `sudo pmset -c sleep 0` (§4)
+- [ ] Habilitar Remote Login (SSH): `sudo systemsetup -setremotelogin on` (§11a)
+- [ ] Instalar llave pública del operador en `linkedin-bot` (§11a)
+- [ ] Instalar Tailscale y hacer `tailscale up` (§7)
+- [ ] Activar Screen Sharing (GUI: System Settings → Sharing → Screen Sharing = ON) (§7)
+
+**En la sesión de `linkedin-bot` (por FUS o VNC):**
+- [ ] Validar render GPU: `node test-bg-session-chrome.mjs` + `node test-bg-session-gpu.mjs` (§5)
+- [ ] Login de LinkedIn: `node login-linkedin.mjs` — el titular escanea QR o ingresa credenciales (§6)
+- [ ] Instalar servicios: `make all-services-install && make services-status` (§6)
+
+**Desde la Mac del operador:**
+- [ ] Verificar SSH: `ssh -o BatchMode=yes linkedin-bot@<IP-tailnet> whoami` → debe responder `linkedin-bot` (§11a)
+- [ ] Abrir dashboard: `http://<IP-tailnet>:5173` con `X-API-Key` en extensión o header
+- [ ] Correr run de prueba: `trigger-now` con `"mode":"test","max_candidates":1` (§6)
+- [ ] Verificar leads en Odoo con `is_test=true`, luego limpiar (§6)
+
+---
+
 ## 1. Pre-requisitos en el host
 
 - macOS reciente (validado en **macOS 26.5 / Apple M1 Pro**).
@@ -327,82 +359,123 @@ El usuario `linkedin-bot` se queda: es el usuario real del bot.
 
 ---
 
-## 11. Debugging remoto (host sin shell)
+## 11. Terminal remota y debugging (acceso desde la Mac del operador)
 
 Dos canales, ambos sobre Tailscale (sin puertos públicos).
 
-**(a) Consola SSH — la vía principal.** Da una consola completa como `linkedin-bot`
-desde la máquina del operador, sobre Tailscale (sin puerto público). Es lo que permite
-desplegar/reiniciar el daemon, `tail -f` del log y leer `.debug/` **sin depender del VNC**.
-Resuelve además que el operador corre como su propio usuario y no puede tocar los procesos
-de `linkedin-bot` (otro usuario): por SSH entra *como* `linkedin-bot`.
+---
 
-**Setup (una sola vez, en el host, con admin):**
+### 11a. Consola SSH — la vía principal
+
+Da una terminal completa como `linkedin-bot` desde cualquier Mac del operador, sin
+exponer puertos a internet. Es lo que permite desplegar/reiniciar el daemon, hacer
+`tail -f` del log y leer capturas de debug **sin necesitar VNC ni estar en la misma red**.
+
+#### Setup en el host (una sola vez, con admin)
+
 ```bash
-# 1) Habilitar el servidor SSH integrado de macOS (Remote Login).
-#    Por terminal (si el Terminal tiene Full Disk Access):
+# 1) Habilitar Remote Login (servidor SSH de macOS).
+#    Por terminal (si tiene Full Disk Access):
 sudo systemsetup -setremotelogin on
-#    Si responde "requires Full Disk Access" → hacerlo por GUI:
+#    Si responde "requires Full Disk Access" → GUI:
 #    System Settings → General → Sharing → Remote Login = ON.
 
-# 2) Permitir a linkedin-bot conectarse por SSH (grupo de acceso).
+# 2) Dar acceso SSH al usuario bot.
 sudo dseditgroup -o edit -a linkedin-bot -t user com.apple.access_ssh 2>/dev/null || true
 
-# 3) Instalar la llave PÚBLICA del operador en linkedin-bot (login sin password).
-#    <pubkey> = contenido de ~/.ssh/id_ed25519.pub de la máquina del operador.
+# 3) Instalar la llave pública del operador.
+#    El operador te pasa el contenido de ~/.ssh/id_ed25519.pub (ver §11a "Operador").
 sudo mkdir -p /Users/linkedin-bot/.ssh
-echo '<pubkey>' | sudo tee -a /Users/linkedin-bot/.ssh/authorized_keys >/dev/null
+echo 'PEGAR_PUBKEY_AQUI' | sudo tee -a /Users/linkedin-bot/.ssh/authorized_keys >/dev/null
 sudo chown -R linkedin-bot:staff /Users/linkedin-bot/.ssh
-sudo chmod 700 /Users/linkedin-bot/.ssh && sudo chmod 600 /Users/linkedin-bot/.ssh/authorized_keys
+sudo chmod 700 /Users/linkedin-bot/.ssh
+sudo chmod 600 /Users/linkedin-bot/.ssh/authorized_keys
 ```
-*(En el rehearsal 2026-06-01 esto quedó scripteado en `/Users/Shared/setup-ssh-bot.sh`.)*
 
-**Verificar** (sin password, por llave):
+#### Setup en la Mac del operador (una sola vez)
+
 ```bash
-ssh -o BatchMode=yes linkedin-bot@<IP-tailnet> whoami   # → linkedin-bot
+# 1) Generar llave SSH si no tenés una (solo si ~/.ssh/id_ed25519 no existe).
+ls ~/.ssh/id_ed25519 2>/dev/null || ssh-keygen -t ed25519 -C "$(whoami)@$(hostname)" -N "" -f ~/.ssh/id_ed25519
+
+# 2) Copiar la llave pública → pasársela al admin del host para el paso 3 de arriba.
+cat ~/.ssh/id_ed25519.pub
+# Ejemplo de salida: ssh-ed25519 AAAAC3Nz... tu@maquina
+
+# 3) Obtener la IP de Tailscale del host (una vez que Tailscale esté instalado en ambos).
+#    En el host: Settings → Tailscale → la IP empieza con 100.x
+#    O desde tu terminal: tailscale status | grep "linkedin-bot\|<nombre-del-host>"
+
+# 4) Guardar un alias para no tipear siempre la IP.
+echo 'alias ssh-bot="ssh linkedin-bot@<IP-TAILNET>"' >> ~/.zshrc && source ~/.zshrc
 ```
 
-**Uso típico** (desde la máquina del operador):
+#### Verificar conexión (desde la Mac del operador)
+
 ```bash
-HOST=linkedin-bot@<IP-tailnet>
-ssh $HOST 'tail -f /Users/Shared/bot-daemon.log'                # seguir el log en vivo
-ssh $HOST 'ls -t ~/session-replay/extension/.debug/*/ | head'   # capturas de cuelgues
-ssh $HOST 'cat ~/session-replay/extension/.debug/<runId>/*.json'# URL/consola del cuelgue
-ssh $HOST 'zsh /Users/Shared/start-bot-daemon.sh'               # reinicio LIMPIO del daemon
-ssh $HOST 'cp /Users/Shared/driver-daemon.mjs ~/session-replay/extension/driver-daemon.mjs'  # desplegar código
+ssh -o BatchMode=yes linkedin-bot@<IP-TAILNET> whoami   # → linkedin-bot
 ```
 
-**Caveats (importantes):**
+#### Comandos de uso cotidiano
+
+```bash
+HOST="linkedin-bot@<IP-TAILNET>"
+
+# Ver log del daemon en vivo
+ssh $HOST 'tail -f ~/Library/Logs/session-replay/driver-daemon.log'
+
+# Estado de los servicios
+ssh $HOST 'cd ~/session-replay && make services-status'
+
+# Reiniciar el daemon (limpio: mata Chrome huérfano primero)
+ssh $HOST 'cd ~/session-replay && make daemon-restart'
+
+# Ver capturas de debug del último run que se colgó
+ssh $HOST 'ls -lt ~/session-replay/extension/.debug/ | head'
+ssh $HOST 'cat ~/session-replay/extension/.debug/<runId>/debug-*.json'
+
+# Desplegar código nuevo al host
+scp extension/driver-daemon.mjs $HOST:~/session-replay/extension/
+ssh $HOST 'cd ~/session-replay && make daemon-restart'
+```
+
+#### Caveats críticos
+
 - **Headed Chrome desde SSH funciona SOLO si `linkedin-bot` tiene sesión GUI activa**
-  (logueado por FUS): el proceso SSH alcanza el WindowServer de esa sesión. Sin sesión
-  GUI, todo comando gráfico (el daemon, Chrome) falla. Regla: mantené la sesión del bot
-  logueada en pantalla. (Validado 2026-06-01: smoke test headed 2/2 OK por SSH.)
-- El shell SSH **no hereda el PATH de Homebrew** → usá ruta completa `/opt/homebrew/bin/node`.
-- Solo por red privada (localhost en una sola Mac; Tailscale entre máquinas). El puerto 22
-  **nunca se expone a internet**. Autenticación por **llave**, no password. Usuario `linkedin-bot`
-  es standard (sin admin), así que el alcance del acceso está acotado.
+  (logueada por Fast User Switching). Sin sesión GUI, todo comando gráfico (daemon,
+  Chrome) falla silenciosamente. Regla: mantener la sesión del bot logueada. (Validado
+  2026-06-01: smoke test headed desde SSH OK con FUS activo.)
+- El shell SSH **no hereda el PATH de Homebrew** → siempre usar ruta completa
+  `/opt/homebrew/bin/node`. `make` resuelve esto solo (el Makefile fija el PATH).
+- El puerto 22 **nunca se expone a internet**. Autenticación solo por llave, no
+  password. El usuario `linkedin-bot` es standard (sin admin), así que el alcance
+  de lo accesible está acotado al home del bot y directorios compartidos.
 
-**(b) Artefactos que el daemon reporta al backend** — para cuando no hay shell a mano:
+---
 
-- **Logs del daemon:** stdout con timestamps (`[dbg HH:MM:SS] …`) — inicio de cada
-  step con URL/título, conteos, y errores de consola de la página. El operador los ve
-  por VNC (`tail -f` del log); launchd los escribe a `~/Library/Logs/session-replay/`.
-- **Watchdog anti-cuelgue:** si un run supera `RUN_WATCHDOG_MS` (default 240000ms), el
-  daemon **captura el estado de la página y aborta limpio** (pausa el run) en vez de
-  colgarse en silencio. Cubre incluso un `page.evaluate` sin timeout (la causa típica
-  de un cuelgue mudo).
+### 11b. Artefactos de debug que el daemon reporta al backend
+
+Para cuando el operador no puede abrir una terminal (ej. solo tiene el dashboard):
+
+- **Logs con timestamps** (`[dbg HH:MM:SS] …`) — inicio de cada step con URL/título,
+  conteos, y errores de consola de la página. launchd los escribe a
+  `~/Library/Logs/session-replay/driver-daemon.log`.
+- **Watchdog anti-cuelgue:** si un run supera `RUN_WATCHDOG_MS` (default 240 s), el
+  daemon captura el estado de la página y aborta limpio (pausa el run) en vez de
+  colgarse en silencio.
 - **Captura de página (`captureDebug`):** guarda screenshot + HTML + consola en
-  `extension/.debug/<runId>/` (para el operador por VNC) **y postea** URL/título/HTML
-  (8KB)/consola al backend.
-- **Recuperar la captura en remoto** (lo que ve Claude/un operador sin shell):
+  `extension/.debug/<runId>/` y postea URL/título/HTML/consola al backend.
+- **Recuperar la captura sin terminal:**
   ```bash
+  API_KEY="dev-api-key-change-in-production"
   curl -s -H "X-API-Key: $API_KEY" \
-    "http://<IP-tailnet>:8081/v1/runs/<RUN_ID>/events?event_type=debug" | python3 -m json.tool
+    "http://<IP-TAILNET>:8081/v1/runs/<RUN_ID>/events?event_type=debug" | python3 -m json.tool
   ```
-  El `payload` trae `reason`, `url`, `title`, `html_excerpt`, `console`, `screenshot_path`.
+  El campo `payload` trae `reason`, `url`, `title`, `html_excerpt`, `console`,
+  `screenshot_path`.
 
-**Reinicio limpio del daemon (importante):** NO hagas un `pkill` en seco del daemon —
-deja el Chrome huérfano, bloquea el perfil y causa un "search → cuelgue" (observado
-2026-06-01). El wrapper de arranque ya mata el daemon **y** su Chrome (por ruta de
-perfil, scoped al usuario) antes de relanzar. En producción (launchd) el `KeepAlive`
-reinicia; al cambiar código, parar/arrancar el LaunchAgent hace el reinicio limpio.
+**Reinicio limpio del daemon:** NO hagas `pkill -f driver-daemon` en seco — deja
+Chrome huérfano, bloquea el perfil y causa un "search → cuelgue mudo" (observado
+2026-06-01). Usar siempre `make daemon-restart` o parar/arrancar el LaunchAgent
+(`launchctl unload/load`), que el wrapper ya mata el Chrome scoped al usuario antes
+de relanzar.
