@@ -260,14 +260,24 @@ class WebhookTriggerService:
             "seniority_level": "",
             "employment_model": "",
             "internal_area": "",
+            # candidate_count: per-fire knob; the flat-payload webhook path sets it
+            # from the payload (default 2). trigger_now has no payload count, so
+            # mirror that default here so templates using {candidate_count} render.
+            "candidate_count": "2",
         }
-        synthetic = WebhookTrigger(
+        # Use the real configured trigger so the run's event_kind matches the
+        # workflow's flow (e.g. linkedin_lead_search), not a hardcoded default.
+        # The daemon branches on origin.event_kind, so mislabeling a lead-search
+        # run as new_job_position drives the wrong flow (applicant for-each on a
+        # lead plan → "Step N not in snapshot").
+        configured = await self.list_triggers(workflow_id=workflow_id, connector_id=connector_id)
+        trigger = configured[0] if configured else WebhookTrigger(
             connector_id=connector_id,
             workflow_id=workflow_id,
             event_kind=EVENT_KIND_NEW_JOB_POSITION,
         )
         run_id = await self._fire(
-            synthetic,
+            trigger,
             job_data,
             execution_options=execution_options,
             idempotency_key=idempotency_key,
@@ -327,6 +337,9 @@ class WebhookTriggerService:
             "event_kind": trigger.event_kind,
             "trigger_id": str(trigger.id) if trigger.id else None,
             "job_payload": job_data,
+            # Daemon decides hardcoded-vs-generic per run from this (sourced from
+            # the workflow, stamped into the snapshot by create_run).
+            "execution_mode": (run.workflow_snapshot or {}).get("workflow", {}).get("execution_mode"),
             # QA testing knobs (default empty for production webhook/replay fires):
             # execution_options.{mode,max_candidates,push_to_odoo,label_outputs}
             # is read by the daemon (scrape cap + test tagging) and the push hook.

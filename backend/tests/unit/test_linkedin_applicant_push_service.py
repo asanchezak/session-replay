@@ -16,6 +16,7 @@ def test_build_pre_extracted_keeps_only_canonical_non_empty_fields():
     }
 
     assert _build_pre_extracted(profile) == {
+        "profile_url": "https://www.linkedin.com/in/test-person",
         "full_name": "Test Person",
         "headline": "Engineer",
         "skills": ["Python"],

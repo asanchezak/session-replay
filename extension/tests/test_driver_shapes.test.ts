@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultEmptyValue, normalizeShape, readExtractShapes, shapeToPrompt, shapeToSchema } from "../driver-shapes.mjs";
+import { defaultEmptyValue, normalizeShape, readExtractShapes, readExtractStrategy, shapeToPrompt, shapeToSchema } from "../driver-shapes.mjs";
 
 describe("driver-shapes", () => {
   it("builds a strict schema for string lists", () => {
@@ -79,5 +79,37 @@ describe("driver-shapes", () => {
       extract_hints: "Summary only.",
     }]);
     expect(defaultEmptyValue(shapes[0]!)).toBe("");
+  });
+});
+
+describe("readExtractStrategy", () => {
+  it("defaults to linkedin_profile when no strategy is declared", () => {
+    expect(readExtractStrategy({})).toBe("linkedin_profile");
+    expect(readExtractStrategy({ methods: [] })).toBe("linkedin_profile");
+    expect(readExtractStrategy({ methods: [{ kind: "extract_shapes", shapes: [] }] })).toBe("linkedin_profile");
+  });
+
+  it("reads a dedicated extract_strategy method", () => {
+    const step = { methods: [{ kind: "extract_strategy", strategy: "generic_schema" }] };
+    expect(readExtractStrategy(step)).toBe("generic_schema");
+  });
+
+  it("reads a strategy field on the extract_shapes method", () => {
+    const step = { methods: [{ kind: "extract_shapes", strategy: "generic_schema", shapes: [] }] };
+    expect(readExtractStrategy(step)).toBe("generic_schema");
+  });
+
+  it("prefers the dedicated extract_strategy method over the extract_shapes field", () => {
+    const step = {
+      methods: [
+        { kind: "extract_shapes", strategy: "generic_schema", shapes: [] },
+        { kind: "extract_strategy", strategy: "linkedin_profile" },
+      ],
+    };
+    expect(readExtractStrategy(step)).toBe("linkedin_profile");
+  });
+
+  it("ignores a blank strategy and falls back to the default", () => {
+    expect(readExtractStrategy({ methods: [{ kind: "extract_strategy", strategy: "   " }] })).toBe("linkedin_profile");
   });
 });

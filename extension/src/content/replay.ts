@@ -1,4 +1,16 @@
 import { captureDomSnippet } from "./dom";
+// Shared, runtime-agnostic step-interpretation logic (single source of truth,
+// also used by the Playwright daemon's selector-resolve.mjs). Keeps the
+// extension and daemon selector/condition logic from drifting.
+import {
+  orderSelectorChain,
+  isDangerousXPath,
+  normalizeText as sharedNormalizeText,
+  parseAccessibility,
+  parseShadowCss,
+  parseAnchor,
+  evaluateSuccessCondition,
+} from "../behavior/step-interpreter.mjs";
 
 // Keep well below the command-executor's 15 s hard timeout so the content
 // script can return ELEMENT_BLOCKED rather than letting the executor time out.
@@ -165,9 +177,6 @@ export interface StepResult {
   via_method_index?: number;
 }
 
-function _normalizeForCheck(value: string): string {
-  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
-}
 
 // Shadow-DOM-aware query: tries root.querySelector first, then recurses into
 // every shadow root in the subtree. LinkedIn-style overlays mount their
@@ -211,67 +220,55 @@ function _verifySuccessCondition(
   const ctype = String(condition.type || "").toLowerCase().trim();
   if (!ctype) return { ok: true };
 
+  // Gather only the DOM value the shared predicate needs for this condition
+  // type, then delegate the actual comparison to the shared step-interpreter
+  // (single source of truth, also used by the daemon).
+  const values: {
+    pageText?: string;
+    currentUrl?: string;
+    inputValue?: string | null;
+    selectorFound?: boolean;
+  } = {};
+
   if (ctype === "visible_text_contains") {
-    const expected = _normalizeForCheck(String(condition.value || ""));
-    if (!expected) return { ok: true };
-    const pageText = _normalizeForCheck(document.body?.innerText || "");
-    if (pageText.includes(expected)) return { ok: true };
-    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:visible_text_contains" };
-  }
-
-  if (ctype === "url_contains") {
-    const expected = String(condition.value || "");
-    if (!expected) return { ok: true };
-    if ((window.location.href || "").includes(expected)) return { ok: true };
-    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:url_contains" };
-  }
-
-  if (ctype === "input_value_contains") {
-    const expected = _normalizeForCheck(String(condition.value || ""));
-    if (!expected) return { ok: true };
+    values.pageText = document.body?.innerText || "";
+  } else if (ctype === "url_contains") {
+    values.currentUrl = window.location.href || "";
+  } else if (ctype === "input_value_contains") {
     const candidate = element || findElementBySelectors(step.selector_chain || []);
-    if (!candidate) return { ok: false, reason: "SUCCESS_CONDITION_FAILED:input_value_contains_no_target" };
-    let observed = "";
-    if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
-      observed = candidate.value || "";
+    if (!candidate) {
+      values.inputValue = null;
+    } else if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+      values.inputValue = candidate.value || "";
     } else if (candidate instanceof HTMLElement && candidate.isContentEditable) {
-      observed = candidate.textContent || "";
+      values.inputValue = candidate.textContent || "";
     } else {
-      observed = (candidate as HTMLElement).textContent || "";
+      values.inputValue = (candidate as HTMLElement).textContent || "";
     }
-    if (_normalizeForCheck(observed).includes(expected)) return { ok: true };
-    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:input_value_contains_mismatch" };
-  }
-
-  if (ctype === "selector_exists") {
+  } else if (ctype === "selector_exists") {
     const selector = String(condition.selector || "");
     if (selector) {
       try {
         const found = selector.startsWith("/") || selector.startsWith("(")
           ? document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
           : document.querySelector(selector);
-        if (found) return { ok: true };
+        values.selectorFound = !!found;
       } catch {
+        // Preserve the specific invalid-selector reason (the shared predicate
+        // only distinguishes found/not-found).
         return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_invalid_selector" };
       }
-      return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_not_found" };
+    } else {
+      values.selectorFound = !!findElementBySelectors(step.selector_chain || []);
     }
-    const found = findElementBySelectors(step.selector_chain || []);
-    if (found) return { ok: true };
-    return { ok: false, reason: "SUCCESS_CONDITION_FAILED:selector_exists_not_found" };
   }
 
-  return { ok: true };
+  return evaluateSuccessCondition(condition, values);
 }
 
+// Delegates to the shared step-interpreter (single source of truth).
 function normalizeText(value: string): string {
-  return (value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\n\t]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+  return sharedNormalizeText(value);
 }
 
 function interactiveCandidates(): HTMLElement[] {
@@ -282,7 +279,7 @@ function interactiveCandidates(): HTMLElement[] {
 }
 
 function findElementBySelectors(chain: SelectorSet[]): Element | null {
-  const sorted = [...chain].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const sorted = orderSelectorChain(chain);
   for (const sel of sorted) {
     try {
       let element: Element | null = null;
@@ -320,15 +317,9 @@ function findElementBySelectors(chain: SelectorSet[]): Element | null {
 // Walks shadow_css path: host_chain identifies nested shadow hosts; target
 // is queried inside the innermost shadow root.
 function findElementByShadowCss(raw: string): Element | null {
-  let parsed: { host_chain?: string[]; target?: string };
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const hostChain = Array.isArray(parsed.host_chain) ? parsed.host_chain : [];
-  const target = String(parsed.target || "");
-  if (!target) return null;
+  const parsed = parseShadowCss(raw);
+  if (!parsed) return null;
+  const { hostChain, target } = parsed;
 
   let root: ParentNode | null = document;
   for (const hostSel of hostChain) {
@@ -392,37 +383,7 @@ function findElementByText(text: string): Element | null {
 }
 
 function findElementByAccessibility(data: string): Element | null {
-  let role = "";
-  let label = "";
-
-  try {
-    const parsed = JSON.parse(data);
-    if (Array.isArray(parsed)) {
-      role = String(parsed[0] || "");
-      label = String(parsed[1] || "");
-    } else if (parsed && typeof parsed === "object") {
-      role = String((parsed as any).role || "");
-      label = String((parsed as any).label || (parsed as any).name || "");
-    }
-  } catch {
-    const bracketPattern = data.match(/^([a-zA-Z]+)\s*\[\s*text\s*=\s*['"](.+?)['"]\s*\]$/);
-    if (bracketPattern) {
-      role = bracketPattern[1] || "";
-      label = bracketPattern[2] || "";
-    } else if (data.includes("|")) {
-      const parts = data.split("|");
-      role = parts[0] || "";
-      label = parts[1] || "";
-    } else {
-      const roleWord = data.match(/^(button|link|textbox|combobox|menuitem|tab)\s+(.+)$/i);
-      if (roleWord) {
-        role = roleWord[1] || "";
-        label = roleWord[2] || "";
-      } else {
-        label = data;
-      }
-    }
-  }
+  const { role, label } = parseAccessibility(data);
 
   const normalizedLabel = normalizeText(label);
   if (normalizedLabel) {
@@ -462,8 +423,7 @@ function findElementByAccessibility(data: string): Element | null {
 }
 
 function findElementByXPath(xpath: string): Element | null {
-  const DANGEROUS_XPATH = /count\(|string-length\(|substring\(|name\(|translate\(|normalize-space\(/i;
-  if (DANGEROUS_XPATH.test(xpath)) {
+  if (isDangerousXPath(xpath)) {
     return null;
   }
   const result = document.evaluate(
@@ -477,30 +437,24 @@ function findElementByXPath(xpath: string): Element | null {
 }
 
 function findElementByAnchor(value: string): Element | null {
-  try {
-    const parsed: AnchorSelectorValue = JSON.parse(value);
-    const anchorEl = document.querySelector(parsed.anchor_selector);
-    if (!anchorEl) return null;
+  const parsed = parseAnchor(value);
+  if (!parsed) return null;
+  const anchorEl = document.querySelector(parsed.anchorSelector);
+  if (!anchorEl) return null;
 
-    const anchorRect = anchorEl.getBoundingClientRect();
-    const offsetX = parsed.offset_x || 0;
-    const offsetY = parsed.offset_y || 0;
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const targetX = anchorRect.left + parsed.offsetX;
+  const targetY = anchorRect.top + parsed.offsetY;
 
-    const targetX = anchorRect.left + offsetX;
-    const targetY = anchorRect.top + offsetY;
-
-    let candidate = document.elementFromPoint(targetX + 1, targetY + 1);
-    if (candidate && candidate !== document.body && candidate !== document.documentElement) {
-      return candidate;
-    }
-    // Fallback: search inside the anchor element for the relation direction
-    if (parsed.relation === "inside") {
-      return anchorEl.querySelector("*:first-child");
-    }
-    return null;
-  } catch {
-    return null;
+  const candidate = document.elementFromPoint(targetX + 1, targetY + 1);
+  if (candidate && candidate !== document.body && candidate !== document.documentElement) {
+    return candidate;
   }
+  // Fallback: search inside the anchor element for the relation direction
+  if (parsed.relation === "inside") {
+    return anchorEl.querySelector("*:first-child");
+  }
+  return null;
 }
 
 function simulateClick(element: Element): boolean {

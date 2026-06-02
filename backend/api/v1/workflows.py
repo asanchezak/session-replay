@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from ai.client import get_ai_provider
 from ai.prompts import (
@@ -27,7 +28,12 @@ logger = logging.getLogger(__name__)
 
 
 class SelectorSet(BaseModel):
-    type: str = Field(pattern=r"^(css|text|accessibility|xpath)$")
+    # All six strategies the WorkflowStep model + the runtime executors (extension
+    # replay.ts and the daemon's selector-resolve.mjs) support. `anchor` and
+    # `shadow_css` were previously rejected here even though both executors resolve
+    # them — they are needed for shadow-DOM overlays (LinkedIn chat) and
+    # offset-anchored elements.
+    type: str = Field(pattern=r"^(css|text|accessibility|xpath|anchor|shadow_css)$")
     value: str = Field(min_length=1)
 
 
@@ -50,7 +56,7 @@ class CreateWorkflowRequest(BaseModel):
 
 class AddStepRequest(BaseModel):
     step_index: int
-    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract", "for_each"]
+    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract", "for_each", "linkedin_people_search", "linkedin_paginate_next"]
     intent: str | None = None
     selector_chain: list[SelectorSet] | None = None
     value: str | None = None
@@ -465,6 +471,7 @@ async def list_workflows(
             "description": w.description,
             "status": w.status,
             "workflow_type": w.workflow_type,
+            "execution_mode": w.execution_mode,
             "version": w.version,
             "target_url": w.target_url,
             "created_at": w.created_at.isoformat(),
@@ -557,6 +564,7 @@ async def get_workflow(
         "target_url": workflow.target_url,
         "status": workflow.status,
         "workflow_type": workflow.workflow_type,
+        "execution_mode": workflow.execution_mode,
         "version": workflow.version,
         "config": workflow.config or {},
         "created_at": workflow.created_at.isoformat(),
@@ -998,6 +1006,10 @@ async def run_workflow(
 class RunWithParamsRequest(BaseModel):
     runtime_params: dict[str, Any] = Field(default_factory=dict, description="key-value pairs for parameter substitution")
     execution_goal: str | None = Field(default=None, description="Optional per-run goal override")
+    # Where the run executes. "browser" (default): the caller (extension) drives
+    # it via the agent protocol. "daemon": tag the run so the unattended daemon
+    # picks it up and drives it; the caller must NOT also run the agent loop.
+    execution_target: Literal["browser", "daemon"] = Field(default="browser")
 
 
 @router.post("/{workflow_id}/run-with-params")
@@ -1052,6 +1064,17 @@ async def run_workflow_with_parameters(
             execution_plan=execution_plan,
             execution_goal=req.execution_goal,
         )
+        if req.execution_target == "daemon":
+            # Tag the run for the unattended daemon to pick up (it broadens its
+            # poll filter to include origin.execution_target == "daemon"). The
+            # extension does NOT run the agent loop for these — the daemon drives.
+            run.origin = {
+                "execution_target": "daemon",
+                "execution_mode": workflow.execution_mode,
+                "execution_options": {},
+            }
+            flag_modified(run, "origin")
+            await db.flush()
         run = await svc.transition(str(run.id), RunStatus.RUNNING)
     except NotFoundError:
         return _error("NOT_FOUND", "Workflow not found", status=404)
@@ -1062,6 +1085,7 @@ async def run_workflow_with_parameters(
         "status": run.status,
         "current_step_index": run.current_step_index,
         "total_steps": run.total_steps,
+        "execution_target": req.execution_target,
         "execution_plan": execution_plan,
     }
 

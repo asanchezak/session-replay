@@ -50,9 +50,14 @@ def _build_steps() -> list[dict]:
     # The daemon's lead branch ignores the step `methods` (it has a dedicated
     # scrapeSearchPeople DOM routine), but we declare the output shape here so
     # the workflow's output spec / template are self-describing.
+    # `strategy: linkedin_search_people` routes the daemon's extract step to its
+    # scrapeSearchPeople DOM routine (Phase B/C). Only consulted on the generic
+    # preamble path (DAEMON_GENERIC_PREAMBLE=1); the legacy hardcoded lead branch
+    # ignores step methods and calls scrapeSearchPeople directly.
     search_extract_methods = [
         {
             "kind": "extract_shapes",
+            "strategy": "linkedin_search_people",
             "shapes": [
                 {
                     "key": "people",
@@ -92,9 +97,12 @@ def _build_steps() -> list[dict]:
         },
         {
             "step_index": 2,
-            "action_type": "navigate",
+            # linkedin_people_search → the daemon's humanized typeahead + "People"
+            # pill click (NOT a cold deep-link to /search/results/, which is a
+            # behavioural-analytics tell). `value` is the deep-link fallback.
+            "action_type": "linkedin_people_search",
             "value": SEARCH_URL_TEMPLATE,
-            "intent": "Open LinkedIn people search",
+            "intent": "Open LinkedIn people search (humanized typeahead + People filter)",
             "methods": None,
             "selector_chain": None,
             "success_condition": None,
@@ -168,6 +176,8 @@ async def main() -> None:
             status="active",
             version=1,
             workflow_type="user",
+            # Bespoke daemon flow (steps-0-5 preamble), not the generic interpreter.
+            execution_mode="hardcoded",
         )
         session.add(wf)
         await session.flush()

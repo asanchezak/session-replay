@@ -2674,10 +2674,24 @@ async function executeAgentRun(
   return { id: runId, status: finalStatus, total_steps: totalSteps };
 }
 
+// Create a run tagged for the unattended daemon and hand off — do NOT run the
+// agent loop here (the daemon polls it up and drives it via the run protocol).
+// The caller shows status by polling GET /v1/runs/{id} + links to the dashboard.
+async function enqueueDaemonRun(
+  workflowId: string,
+  goal?: string,
+  runtimeParams?: Record<string, unknown>,
+): Promise<{ id: string; status: string; total_steps: number }> {
+  const run = await apiClient.runWithParams(workflowId, runtimeParams || {}, goal, "daemon");
+  log.log(`[Daemon] Enqueued run ${run.id} for workflow ${workflowId} — daemon will drive it`);
+  return { id: run.id, status: run.status || "running", total_steps: run.total_steps || 0 };
+}
+
 registerServiceWorkerListeners({
   canceledRuns,
   sendOverlay,
   executeAgentRun,
+  enqueueDaemonRun,
   executeStepOnTab,
   analyzePageStep,
   analyzeLivePage,

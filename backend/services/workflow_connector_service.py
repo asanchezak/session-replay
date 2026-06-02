@@ -27,7 +27,7 @@ class WorkflowConnectorService:
     TEMPLATE_FIELDS = {
         "job_id", "job_title", "job_description", "job_description_short", "job_url",
         "department", "company", "job_location",
-        "seniority_level", "employment_model", "internal_area",
+        "seniority_level", "employment_model", "internal_area", "candidate_count",
     }
 
     def __init__(self, session: AsyncSession):
@@ -235,6 +235,9 @@ class WorkflowConnectorService:
             "seniority_level": "",
             "employment_model": "",
             "internal_area": "",
+            # Per-fire count is unknown on the connector-fetch path; mirror the
+            # webhook default so {candidate_count} templates still render.
+            "candidate_count": "2",
         }
 
     def _validate_template(self, template: str) -> None:

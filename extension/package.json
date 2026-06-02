@@ -9,7 +9,8 @@
     "lint": "tsc --noEmit && eslint src/",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e:local-harness": "playwright test e2e/local-cross-site-dependency.spec.ts"
+    "test:e2e:local-harness": "playwright test e2e/local-cross-site-dependency.spec.ts",
+    "test:resolve": "playwright test e2e/selector-resolve.spec.ts"
   },
   "dependencies": {
     "pg-promise": "^12.6.2",

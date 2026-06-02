@@ -21,10 +21,11 @@ type ConnStatus = {
 
 function App() {
   const [state, setState] = useState<PopupState>({ type: "idle" });
-  const [workflows, setWorkflows] = useState<Array<{ id: string; name: string }>>([]);
+  const [workflows, setWorkflows] = useState<Array<{ id: string; name: string; execution_mode?: string }>>([]);
   const [showWorkflows, setShowWorkflows] = useState(false);
   const [running, setRunning] = useState<string | null>(null);
   const [pendingRun, setPendingRun] = useState<{ id: string; name: string } | null>(null);
+  const [daemonRun, setDaemonRun] = useState<{ id: string; name: string; status: string; current?: number; total?: number } | null>(null);
   const [lastRecordedId, setLastRecordedId] = useState<string | null>(null);
   const [recordedPrompt, setRecordedPrompt] = useState<string>("");
   const [showSettings, setShowSettings] = useState(false);
@@ -159,6 +160,36 @@ function App() {
     });
   };
 
+  // Enqueue a run for the unattended daemon (no in-browser agent loop). The
+  // daemon polls it up and drives it; we just show status + a dashboard link.
+  const runOnDaemon = async (workflowId: string, name: string) => {
+    setRunning(workflowId);
+    const resp = await sendMessage({ type: "RUN_ON_DAEMON", workflowId });
+    setRunning(null);
+    if (resp?.type === "DAEMON_RUN_QUEUED" && resp?.run?.id) {
+      setShowWorkflows(false);
+      setDaemonRun({ id: resp.run.id, name, status: resp.run.status || "running", total: resp.run.total_steps });
+      return;
+    }
+    setState({ type: "error", message: String(resp?.error || "Failed to enqueue daemon run") });
+  };
+
+  // Poll the daemon run's status while the view is open (popup is ephemeral;
+  // the dashboard link is the durable view).
+  useEffect(() => {
+    if (!daemonRun?.id) return;
+    if (["completed", "failed", "canceled"].includes(daemonRun.status)) return;
+    const id = setInterval(async () => {
+      const resp = await sendMessage({ type: "GET_RUN_STATUS", runId: daemonRun.id });
+      if (resp?.type === "RUN_STATUS" && resp?.run) {
+        setDaemonRun((prev) => prev && prev.id === resp.run.id
+          ? { ...prev, status: resp.run.status, current: resp.run.current_step_index, total: resp.run.total_steps }
+          : prev);
+      }
+    }, 2500);
+    return () => clearInterval(id);
+  }, [daemonRun?.id, daemonRun?.status]);
+
   const toggleRecording = async () => {
     const [tab] = await chrome.tabs.query({ url: ["*://*/*", "file://*/*"] });
     const activeTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
@@ -292,12 +323,19 @@ function App() {
           onSkip={() => runWorkflow(pendingRun.id)}
         />
       )}
-      {state.type === "idle" && showWorkflows && !pendingRun && (
+      {state.type === "idle" && showWorkflows && !pendingRun && !daemonRun && (
         <WorkflowListView
           workflows={workflows}
           running={running}
           onRun={(id, name) => setPendingRun({ id, name })}
+          onRunDaemon={(id, name) => runOnDaemon(id, name)}
           onBack={() => setShowWorkflows(false)}
+        />
+      )}
+      {state.type === "idle" && daemonRun && (
+        <DaemonRunView
+          run={daemonRun}
+          onBack={() => { setDaemonRun(null); setShowWorkflows(false); }}
         />
       )}
       {state.type === "recording" && (
@@ -347,11 +385,12 @@ function openDashboard() {
 }
 
 function WorkflowListView({
-  workflows, running, onRun, onBack,
+  workflows, running, onRun, onRunDaemon, onBack,
 }: {
-  workflows: Array<{ id: string; name: string }>;
+  workflows: Array<{ id: string; name: string; execution_mode?: string }>;
   running: string | null;
   onRun: (id: string, name: string) => void;
+  onRunDaemon: (id: string, name: string) => void;
   onBack: () => void;
 }) {
   return (
@@ -382,34 +421,84 @@ function WorkflowListView({
         maxHeight: "300px", overflowY: "auto",
         display: "flex", flexDirection: "column", gap: "4px",
       }}>
-        {workflows.map((wf) => (
-          <button
-            key={wf.id}
-            onClick={() => onRun(wf.id, wf.name)}
-            disabled={running === wf.id}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "10px 12px", borderRadius: "6px", border: "1px solid #2D3148",
-              background: running === wf.id ? "#6C5CE7" : "#1A1D27",
-              color: "#E8EAED", fontSize: "12px", cursor: "pointer",
-              textAlign: "left", width: "100%",
-            }}
-          >
-            <span style={{
-              overflow: "hidden", textOverflow: "ellipsis",
-              whiteSpace: "nowrap", flex: 1,
-            }}>
-              {wf.name}
-            </span>
-            <span style={{
-              color: running === wf.id ? "#fff" : "#6C5CE7",
-              fontSize: "11px", marginLeft: "8px",
-            }}>
-              {running === wf.id ? "Starting..." : "▶ Run"}
-            </span>
-          </button>
-        ))}
+        {workflows.map((wf) => {
+          const isGeneric = wf.execution_mode === "generic";
+          const busy = running === wf.id;
+          return (
+            <div
+              key={wf.id}
+              style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: "8px 10px", borderRadius: "6px", border: "1px solid #2D3148",
+                background: "#1A1D27",
+              }}
+            >
+              <span style={{
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                flex: 1, color: "#E8EAED", fontSize: "12px",
+              }} title={wf.name}>
+                {wf.name}
+              </span>
+              <button
+                onClick={() => onRun(wf.id, wf.name)}
+                disabled={busy}
+                title="Replay this workflow in your browser"
+                style={{
+                  border: "1px solid #6C5CE7", background: "transparent", color: "#6C5CE7",
+                  borderRadius: "5px", padding: "5px 8px", fontSize: "11px", cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {busy ? "…" : "▶ Browser"}
+              </button>
+              {isGeneric && (
+                <button
+                  onClick={() => onRunDaemon(wf.id, wf.name)}
+                  disabled={busy}
+                  title="Run this workflow on the unattended daemon"
+                  style={{
+                    border: "none", background: "#6C5CE7", color: "#fff",
+                    borderRadius: "5px", padding: "5px 8px", fontSize: "11px", cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {busy ? "…" : "☁ Daemon"}
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
+    </div>
+  );
+}
+
+function DaemonRunView({
+  run, onBack,
+}: {
+  run: { id: string; name: string; status: string; current?: number; total?: number };
+  onBack: () => void;
+}) {
+  const terminal = ["completed", "failed", "canceled"].includes(run.status);
+  const color = run.status === "completed" ? "#00B894" : run.status === "failed" ? "#E17055" : "#6C5CE7";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: "13px", fontWeight: 500, color: "#E8EAED" }}>☁ Running on daemon</span>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: "#6C5CE7", fontSize: "12px", cursor: "pointer" }}>← Back</button>
+      </div>
+      <div style={{ padding: "12px", borderRadius: "6px", background: "#1A1D27", display: "flex", flexDirection: "column", gap: "6px" }}>
+        <span style={{ color: "#E8EAED", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={run.name}>{run.name}</span>
+        <span style={{ color, fontSize: "12px", fontWeight: 500 }}>
+          {terminal ? run.status : "running"}{typeof run.current === "number" && typeof run.total === "number" && run.total > 0 ? ` · step ${run.current}/${run.total}` : ""}
+        </span>
+      </div>
+      <button
+        onClick={() => chrome.tabs.create({ url: `${DASHBOARD_ORIGIN}/runs/${run.id}` })}
+        style={{ width: "100%", padding: "10px", borderRadius: "6px", border: "1px solid #2D3148", background: "transparent", color: "#74B9FF", fontSize: "12px", cursor: "pointer" }}
+      >
+        Open in dashboard ↗
+      </button>
     </div>
   );
 }

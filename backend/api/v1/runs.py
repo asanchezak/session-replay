@@ -192,6 +192,12 @@ async def get_run(
         "extracted_data": run.extracted_data or [],
         "resolved_parameters": (run.workflow_snapshot or {}).get("resolved_parameters", {}),
         "connector_resolution": (run.workflow_snapshot or {}).get("connector_resolution", []),
+        # The plan steps the daemon's generic loop interprets. After
+        # expand_for_each this is the materialized list (it overwrites
+        # snapshot["steps"]); before/without it, the seeded 0..N steps. Exposing
+        # it lets the daemon drive the plan from step 0 instead of hardcoding a
+        # preamble (Phase C). Additive — existing consumers ignore extra fields.
+        "workflow_snapshot": {"steps": (run.workflow_snapshot or {}).get("steps", [])},
         "origin": run.origin or None,
         "linkedin_applicants": run.linkedin_applicants or [],
     }
@@ -860,3 +866,50 @@ async def report_extraction(
     await db.flush()
 
     return {"status": "recorded", "records": len(req.data)}
+
+
+class DebugCaptureRequest(BaseModel):
+    """A snapshot of the page state when a step stalled or errored, posted by the
+    daemon so it's retrievable remotely (GET /v1/runs/{id}/events?event_type=debug)
+    without shell access to the host machine."""
+
+    step_index: int | None = None
+    reason: str | None = None
+    url: str | None = None
+    title: str | None = None
+    html_excerpt: str | None = None
+    console: list[str] = Field(default_factory=list)
+    screenshot_path: str | None = None
+
+
+@router.post("/{run_id}/debug")
+async def report_debug(
+    run_id: str,
+    req: DebugCaptureRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Store a daemon-side debug capture as an event so it can be read back over
+    Tailscale (the host machine has no shell access for the operator/Claude)."""
+    svc = ExecutionService(db)
+    try:
+        await svc.get_run(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+
+    audit = AuditService(db)
+    await audit.append(AppendEvent(
+        event_type="debug",
+        payload={
+            "step_index": req.step_index,
+            "reason": req.reason,
+            "url": req.url,
+            "title": req.title,
+            "html_excerpt": req.html_excerpt,
+            "console": req.console,
+            "screenshot_path": req.screenshot_path,
+        },
+        run_id=run_id,
+        actor_type="extension",
+    ))
+    await db.flush()
+    return {"status": "recorded"}

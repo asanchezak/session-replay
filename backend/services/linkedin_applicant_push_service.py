@@ -95,9 +95,14 @@ def _summaries_from_push_results(results: list[dict]) -> list[dict]:
 
 
 def _build_pre_extracted(profile: dict) -> dict:
+    # Easy Recruit (akodoo) reads pre_extracted to SKIP its redundant extraction
+    # agents (~40% AI cost + 30-120s/applicant). Include profile_url here too —
+    # the analyzer's overview reads pre_extracted["profile_url"] for the LinkedIn
+    # URL, but it isn't in CANONICAL_PROFILE_FIELDS (those are AI-extracted fields).
+    fields = (*CANONICAL_PROFILE_FIELDS, "profile_url")
     return {
         key: profile.get(key)
-        for key in CANONICAL_PROFILE_FIELDS
+        for key in fields
         if profile.get(key) not in (None, "", [], {})
     }
 

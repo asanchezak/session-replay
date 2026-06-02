@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
+import ExecutionModeBadge from "../components/ExecutionModeBadge";
 import { PhaseTimeline } from "../components/PhaseTimeline";
 import { ConfidenceIndicator } from "../components/ConfidenceIndicator";
 import { OutputSchemaPreview } from "../components/OutputSchemaPreview";
@@ -71,6 +72,7 @@ interface WorkflowDetail {
   target_url?: string;
   status: string;
   workflow_type: string;
+  execution_mode?: string;
   version: number;
   steps: Step[];
   analysis: Analysis | null;
@@ -673,6 +675,7 @@ export default function WorkflowDetailPage() {
               {data.workflow_type === "system" ? <Settings2 size={11} /> : <User size={11} />}
               {data.workflow_type === "system" ? "System" : "My Workflow"}
             </span>
+            <ExecutionModeBadge mode={data.execution_mode} />
             {data.status === "archived" && <StatusBadge status="archived" size="sm" />}
             <span>Version {data.version}</span>
             {data.target_url && <span>{data.target_url}</span>}

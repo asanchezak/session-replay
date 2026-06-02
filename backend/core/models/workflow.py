@@ -43,6 +43,15 @@ class Workflow(Base, TimestampMixin, UUIDMixin):
     # Not used by core execution; consumed by action_type handlers that need
     # workflow-level state (today: open_message_drafts).
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # How the daemon runs this workflow: "hardcoded" (a bespoke daemon flow —
+    # the lead/applicant steps-0-5 preamble) or "generic" (the plan-interpreter
+    # drives the recorded steps). New ORM rows default "generic" (the interpreter
+    # is how recorded workflows run); existing rows backfill to "hardcoded" via
+    # the migration server_default. Surfaced as a dashboard badge and threaded
+    # into run.origin so the daemon decides hardcoded-vs-generic per run.
+    execution_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="generic", server_default="hardcoded"
+    )
 
 
 class WorkflowStep(Base, TimestampMixin, UUIDMixin):

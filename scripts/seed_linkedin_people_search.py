@@ -31,6 +31,7 @@ from core.models.analysis import (
 )
 from core.models.workflow import Workflow, WorkflowStep
 from services.template_service import TemplateService
+from ai.extraction_shapes import FIELD_SHAPES, normalize_field_key, shape_to_dict
 
 
 WORKFLOW_NAME = "LinkedIn People Search"
@@ -40,35 +41,27 @@ SEARCH_URL_TEMPLATE = (
 )
 
 
+def _profile_shape(key: str, label: str) -> dict:
+    """Build a seed shape, deriving kind/item_keys/extract_hints from the shared
+    FIELD_SHAPES registry — the single source of truth (backend/ai/extraction_shapes.py).
+    Keeps the seed from drifting (it used to lack the registry's extract_hints).
+    Fields absent from the registry (topcard scalars like full_name/headline)
+    default to a plain scalar."""
+    shape = FIELD_SHAPES.get(normalize_field_key(key))
+    if shape is None:
+        return {"key": key, "label": label, "kind": "scalar", "item_keys": None}
+    return {"key": key, "label": label, **shape_to_dict(shape)}
+
+
 PROFILE_EXTRACT_SHAPES = [
-    {"key": "full_name", "label": "Full Name", "kind": "scalar", "item_keys": None},
-    {"key": "headline", "label": "Headline", "kind": "scalar", "item_keys": None},
-    {"key": "about", "label": "About", "kind": "scalar", "item_keys": None},
-    {"key": "skills", "label": "Skills", "kind": "string_list", "item_keys": None},
-    {
-        "key": "projects",
-        "label": "Projects",
-        "kind": "record_list",
-        "item_keys": ["name", "description", "dates"],
-    },
-    {
-        "key": "experience",
-        "label": "Experience",
-        "kind": "record_list",
-        "item_keys": ["title", "company", "location", "dates", "description"],
-    },
-    {
-        "key": "education",
-        "label": "Education",
-        "kind": "record_list",
-        "item_keys": ["school", "degree", "field", "dates"],
-    },
-    {
-        "key": "certifications",
-        "label": "Certifications",
-        "kind": "record_list",
-        "item_keys": ["name", "issuer", "issued"],
-    },
+    _profile_shape("full_name", "Full Name"),
+    _profile_shape("headline", "Headline"),
+    _profile_shape("about", "About"),
+    _profile_shape("skills", "Skills"),
+    _profile_shape("projects", "Projects"),
+    _profile_shape("experience", "Experience"),
+    _profile_shape("education", "Education"),
+    _profile_shape("certifications", "Certifications"),
 ]
 
 
@@ -82,6 +75,9 @@ def _build_steps() -> list[dict]:
     search_extract_methods = [
         {
             "kind": "extract_shapes",
+            # strategy linkedin_search_urls → the daemon's scrapeSearchProfileUrls
+            # DOM routine (Phase C generic path). Legacy hardcoded path ignores it.
+            "strategy": "linkedin_search_urls",
             "shapes": [
                 {
                     "key": "profile_urls",
@@ -145,9 +141,10 @@ def _build_steps() -> list[dict]:
         },
         {
             "step_index": 2,
-            "action_type": "navigate",
+            # Humanized typeahead + "People" pill click (deep-link fallback in value).
+            "action_type": "linkedin_people_search",
             "value": SEARCH_URL_TEMPLATE,
-            "intent": "Open LinkedIn people search",
+            "intent": "Open LinkedIn people search (humanized typeahead + People filter)",
             "methods": None,
             "selector_chain": None,
             "success_condition": None,
@@ -163,9 +160,10 @@ def _build_steps() -> list[dict]:
         },
         {
             "step_index": 4,
-            "action_type": "navigate",
+            # Click "Next" like a human (deep-link fallback in value).
+            "action_type": "linkedin_paginate_next",
             "value": SEARCH_URL_TEMPLATE + "&page=2",
-            "intent": "Go to search results page 2",
+            "intent": "Go to search results page 2 (human Next click)",
             "methods": None,
             "selector_chain": None,
             "success_condition": None,
@@ -255,6 +253,8 @@ async def main() -> None:
             status="active",
             version=1,
             workflow_type="user",
+            # Bespoke daemon flow (steps-0-5 preamble), not the generic interpreter.
+            execution_mode="hardcoded",
         )
         session.add(wf)
         await session.flush()
