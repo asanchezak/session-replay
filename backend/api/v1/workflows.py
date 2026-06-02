@@ -27,7 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class SelectorSet(BaseModel):
-    type: str = Field(pattern=r"^(css|text|accessibility|xpath)$")
+    # All six strategies the WorkflowStep model + the runtime executors (extension
+    # replay.ts and the daemon's selector-resolve.mjs) support. `anchor` and
+    # `shadow_css` were previously rejected here even though both executors resolve
+    # them — they are needed for shadow-DOM overlays (LinkedIn chat) and
+    # offset-anchored elements.
+    type: str = Field(pattern=r"^(css|text|accessibility|xpath|anchor|shadow_css)$")
     value: str = Field(min_length=1)
 
 
@@ -50,7 +55,7 @@ class CreateWorkflowRequest(BaseModel):
 
 class AddStepRequest(BaseModel):
     step_index: int
-    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract", "for_each"]
+    action_type: Literal["click", "type", "select", "submit", "scroll", "navigate", "hover", "copy", "paste", "tab_change", "extract", "for_each", "linkedin_people_search", "linkedin_paginate_next"]
     intent: str | None = None
     selector_chain: list[SelectorSet] | None = None
     value: str | None = None

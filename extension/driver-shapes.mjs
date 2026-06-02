@@ -22,6 +22,26 @@ export function readExtractShapes(step) {
   return shapes.map(normalizeShape).filter(Boolean);
 }
 
+// Which extract STRATEGY a step asks for: "linkedin_profile" (the default —
+// scrapeProfileFull, visiting /details/ subpages with the LinkedIn parsers) or
+// "generic_schema" (extract the requested shapes from the CURRENT page's text,
+// no subpage navigation, no site-specific structure). Read from a dedicated
+// `{kind:"extract_strategy", strategy:"..."}` method, or a `strategy` field on
+// the `extract_shapes` method. Unknown/missing → "linkedin_profile" (safe default
+// = today's behavior).
+export function readExtractStrategy(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const stratEntry = methods.find((m) => m && typeof m === "object" && m.kind === "extract_strategy");
+  if (stratEntry && typeof stratEntry.strategy === "string" && stratEntry.strategy.trim()) {
+    return stratEntry.strategy.trim();
+  }
+  const shapesEntry = methods.find((m) => m && typeof m === "object" && m.kind === "extract_shapes");
+  if (shapesEntry && typeof shapesEntry.strategy === "string" && shapesEntry.strategy.trim()) {
+    return shapesEntry.strategy.trim();
+  }
+  return "linkedin_profile";
+}
+
 export function defaultEmptyValue(shape) {
   if (shape.kind === "string_list" || shape.kind === "record_list") return [];
   return "";

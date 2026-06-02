@@ -62,6 +62,33 @@ export function pickDwellMs(min, max, rand = cryptoRandom) {
   return Math.floor(min + (max - min) * Math.min(1, r));
 }
 
+// Noise-break scroll-tick count and reading-dwell, moved VERBATIM out of the
+// daemon's executeNoiseBreakDaemon so the noise timing is unit-testable while the
+// rand-draw sequence stays byte-for-byte identical (each consumes exactly ONE
+// rand draw, called in the same position as before). `hasTarget` = whether the
+// kind navigated to a URL/candidate first (search_bounce w/ a lastSearchUrl,
+// profile_hover w/ a candidate), which the original code paired with a smaller
+// scroll range. See test_noise_schedule.test.ts (seed-equivalence golden).
+export function pickNoiseScrollTicks(kind, hasTarget, rand) {
+  switch (kind) {
+    case "search_bounce": return hasTarget ? 2 + Math.floor(rand() * 2) : 2 + Math.floor(rand() * 3);
+    case "feed_scroll": return 2 + Math.floor(rand() * 3);
+    case "profile_hover": return hasTarget ? 1 + Math.floor(rand() * 2) : 2 + Math.floor(rand() * 3);
+    case "idle_scroll":
+    default: return 2 + Math.floor(rand() * 3);
+  }
+}
+
+export function pickNoiseDwellMs(kind, hasTarget, rand) {
+  switch (kind) {
+    case "search_bounce": return 5000 + Math.floor(rand() * 7000);
+    case "feed_scroll": return 8000 + Math.floor(rand() * 12000);
+    case "profile_hover": return hasTarget ? 3000 + Math.floor(rand() * 5000) : 5000 + Math.floor(rand() * 10000);
+    case "idle_scroll":
+    default: return 5000 + Math.floor(rand() * 10000);
+  }
+}
+
 // Cubic-bezier path between two points with two randomized control points, so
 // successive mouse moves aren't identically shaped. Returns `steps` points
 // (excluding the origin). `rand` defaults to CSPRNG entropy.

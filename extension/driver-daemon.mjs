@@ -22,11 +22,13 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import { defaultEmptyValue, readExtractShapes, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
+import { defaultEmptyValue, readExtractShapes, readExtractStrategy, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
 import { STEALTH_INIT } from "./src/shared/stealth.mjs";
 import {
   mulberry32,
   pickDwellMs,
+  pickNoiseDwellMs,
+  pickNoiseScrollTicks,
   shuffleInPlace,
 } from "./src/behavior/stealth-core.mjs";
 import { createAccountStateStore } from "./src/behavior/account-state.mjs";
@@ -38,6 +40,8 @@ import {
 } from "./src/behavior/profile-parsers.mjs";
 import { experienceParasCore, sectionListItemsCore, subpageTextCore } from "./src/behavior/profile-dom.mjs";
 import { prepareConnectNoteDialog, NOTE_TEXTAREA_SELECTOR } from "./src/behavior/connect-compose-core.mjs";
+import { PHASE_A_VERBS, resolveLocator, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
+import { evaluateSuccessCondition, successConditionInputs } from "./src/behavior/step-interpreter.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,6 +55,13 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || "5000");
 // hanging silently. Critical for remote hosts (Fernanda's Mac) where there is no
 // shell to inspect a stuck Chrome. Tune via RUN_WATCHDOG_MS.
 const RUN_WATCHDOG_MS = Number(process.env.RUN_WATCHDOG_MS || "240000");
+// Phase C ship-dark switch. OFF (default): the lead flow runs the hardcoded
+// steps-0-5 preamble (byte-for-byte unchanged). ON: the daemon instead drives
+// steps 0-5 from the backend plan via the generic loop (linkedin_people_search
+// + linkedin_search_people extract strategy). The ON path has intentionally
+// different-but-humanized timing and MUST be diffed on a burner/test account
+// before being enabled in production — see plan Phase C + project memory.
+const GENERIC_PREAMBLE = process.env.DAEMON_GENERIC_PREAMBLE === "1";
 const DEBUG_DIR = path.resolve(__dirname, ".debug");
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 
@@ -740,6 +751,25 @@ async function scrapeProfileFull(page, url, extractShapes = []) {
   return result;
 }
 
+// Generic-schema extract strategy: pull the requested shapes out of the CURRENT
+// page's text via the same per-shape AI extractor scrapeProfileFull uses — but
+// with NO LinkedIn structure (no /details/ subpage navigation, no top-card, no
+// site-specific parsers). For a recorded non-profile extract step where the page
+// already holds the data. Empty shapes → just page_title + url.
+async function scrapeGenericByShapes(page, url, extractShapes = []) {
+  const pageText = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
+  const result = {
+    page_title: await page.title().catch(() => ""),
+    url,
+  };
+  for (const shape of extractShapes) {
+    if (!shape?.key) continue;
+    const parsed = await aiExtractByShape(shape, pageText);
+    result[shape.key] = parsed && parsed[shape.key] != null ? parsed[shape.key] : defaultEmptyValue(shape);
+  }
+  return result;
+}
+
 // ── Run driver ──────────────────────────────────────────────────────────────
 
 // Reach the People search results the way a human does: click the global
@@ -844,43 +874,87 @@ async function executeNoiseBreakDaemon(page, kind, seed, lastSearchUrl, seenPool
     if (!url) return;
     await safeGoto(page, url, `noise:${kind}`);
   };
+  // Scroll-tick / dwell formulas live in pickNoiseScrollTicks / pickNoiseDwellMs
+  // (stealth-core.mjs) — moved verbatim, called in the SAME position so the
+  // rand-draw order is byte-for-byte identical (seed-equivalence-tested). Noise
+  // URLs stay runtime: the backend can't know lastSearchUrl / seenPool, only the
+  // static feed URL (so feed_scroll's URL is the one candidate for data-driving,
+  // not worth a contract change — see plan's Phase B caveat).
   switch (kind) {
     case "search_bounce": {
       if (lastSearchUrl) {
         await nav(lastSearchUrl);
-        await humanScrollSeeded(page, 2 + Math.floor(rand() * 2), rand);
-        await sleep(5000 + Math.floor(rand() * 7000));
+        await humanScrollSeeded(page, pickNoiseScrollTicks(kind, true, rand), rand);
+        await sleep(pickNoiseDwellMs(kind, true, rand));
         return;
       }
-      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
-      await sleep(5000 + Math.floor(rand() * 7000));
+      await humanScrollSeeded(page, pickNoiseScrollTicks(kind, false, rand), rand);
+      await sleep(pickNoiseDwellMs(kind, false, rand));
       return;
     }
     case "feed_scroll": {
       await nav("https://www.linkedin.com/feed/");
-      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
-      await sleep(8000 + Math.floor(rand() * 12000));
+      await humanScrollSeeded(page, pickNoiseScrollTicks(kind, false, rand), rand);
+      await sleep(pickNoiseDwellMs(kind, false, rand));
       return;
     }
     case "profile_hover": {
       const candidate = seenPool.length ? seenPool[Math.floor(rand() * seenPool.length)] : null;
       if (candidate) {
         await nav(candidate);
-        await humanScrollSeeded(page, 1 + Math.floor(rand() * 2), rand);
-        await sleep(3000 + Math.floor(rand() * 5000));
+        await humanScrollSeeded(page, pickNoiseScrollTicks(kind, true, rand), rand);
+        await sleep(pickNoiseDwellMs(kind, true, rand));
         return;
       }
-      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
-      await sleep(5000 + Math.floor(rand() * 10000));
+      await humanScrollSeeded(page, pickNoiseScrollTicks(kind, false, rand), rand);
+      await sleep(pickNoiseDwellMs(kind, false, rand));
       return;
     }
     case "idle_scroll":
     default: {
-      await humanScrollSeeded(page, 2 + Math.floor(rand() * 3), rand);
-      await sleep(5000 + Math.floor(rand() * 10000));
+      await humanScrollSeeded(page, pickNoiseScrollTicks(kind, false, rand), rand);
+      await sleep(pickNoiseDwellMs(kind, false, rand));
       return;
     }
   }
+}
+
+// Playwright adapter for the shared success-condition predicate: fetch ONLY the
+// page values this condition type needs, then delegate the comparison to the
+// shared evaluateSuccessCondition (same logic the extension's replay.ts uses).
+// Best-effort: a failed/unknown condition never throws.
+async function checkSuccessConditionDaemon(page, step, target) {
+  const cond = step && step.success_condition;
+  if (!cond || typeof cond !== "object" || !cond.type) return { ok: true };
+  const need = successConditionInputs(cond);
+  const values = {};
+  try {
+    if (need.includes("pageText")) {
+      values.pageText = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
+    }
+    if (need.includes("currentUrl")) {
+      values.currentUrl = page.url();
+    }
+    if (need.includes("inputValue")) {
+      if (target && target.handle) {
+        values.inputValue = await target.handle.inputValue().catch(async () => {
+          return await target.handle.textContent().catch(() => null);
+        });
+      } else {
+        values.inputValue = null;
+      }
+    }
+    if (need.includes("selectorFound")) {
+      const sel = String(cond.selector || "");
+      if (sel) {
+        const loc = (sel.startsWith("/") || sel.startsWith("(")) ? page.locator(`xpath=${sel}`) : page.locator(sel);
+        values.selectorFound = await loc.count().then((c) => c > 0).catch(() => false);
+      } else {
+        values.selectorFound = !!target;
+      }
+    }
+  } catch { /* best-effort: fall through to evaluate with whatever we gathered */ }
+  return evaluateSuccessCondition(cond, values);
 }
 
 // Pause the run on a detected wall + trip the account circuit breaker.
@@ -1004,6 +1078,14 @@ async function driveRun(run) {
       await ctx.close().catch(() => {});
     }, RUN_WATCHDOG_MS);
 
+    // Phase C ship-dark: when DAEMON_GENERIC_PREAMBLE is ON, skip the hardcoded
+    // steps-0-5 preamble (and the imperative expandForEach) below and let the
+    // generic loop drive the whole plan from the snapshot — lead via
+    // linkedin_people_search + linkedin_search_people, applicant additionally via
+    // linkedin_paginate_next + linkedin_search_urls + a for_each step arm. OFF
+    // (default) → the preamble + imperative expansion run exactly as before.
+    let expansion = null;
+    if (!GENERIC_PREAMBLE) {
     // step 0 — feed warm-up (real users don't deep-link cold to search).
     await safeGoto(page, "https://www.linkedin.com/feed/", "feed");
     await sleep(jitter(2500, 1500));
@@ -1081,16 +1163,20 @@ async function driveRun(run) {
       return;
     }
 
-    const expansion = await expandForEach(runId, 6);
+    expansion = await expandForEach(runId, 6);
     console.log(`  step 6: for_each expanded into ${expansion.iterations} iterations`);
     await reportStepResult(runId, 6, "for_each");
+    }
 
     let cur = await getRun(runId);
-    const steps = (cur.workflow_snapshot && cur.workflow_snapshot.steps) || expansion.steps || [];
+    // `let` (not const): an in-loop for_each arm (generic applicant path) grows
+    // the snapshot, so we re-read steps from the freshly-fetched run each pass.
+    let steps = (cur.workflow_snapshot && cur.workflow_snapshot.steps) || (expansion && expansion.steps) || [];
 
     while (cur.current_step_index < cur.total_steps && cur.status === "running") {
       const idx = cur.current_step_index;
       lastIdx = idx;
+      steps = (cur.workflow_snapshot && cur.workflow_snapshot.steps) || (expansion && expansion.steps) || steps;
       const step = steps[idx] || {};
       const action = String(step.action_type || "");
       const value = String(step.value || "");
@@ -1117,24 +1203,86 @@ async function driveRun(run) {
           }
           await reportStepResult(runId, idx, "navigate");
         } else if (action === "extract") {
-          // Budget gate: pause-and-resume rather than drop candidates.
-          const reason = budgetExhaustedReason();
-          if (reason) {
-            console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
-            await pauseRun(runId, reason, idx);
-            blocked = true;
-            break;
+          // Pluggable extract strategy (Phase B): "linkedin_search_people" (lead
+          // search-results scrape — NOT a profile view, so it skips the
+          // profile-view budget gate + recordProfileView), else "generic_schema"
+          // / "linkedin_profile" (default — a profile view, budget-gated).
+          const shapes = readExtractShapes(step);
+          const strategy = readExtractStrategy(step);
+          if (strategy === "linkedin_search_people") {
+            lastIdx = idx; mark = `search-scrape:${idx}`;
+            const people = await scrapeSearchPeople(page);
+            seenPool.push(...people.map((p) => p.profile_url));
+            dbg(`step${idx} scraped ${people.length} people (search extract)`);
+            console.log(`  step ${idx}: ${people.length} people (search extract)`);
+            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people });
+            await reportStepResult(runId, idx, "extract");
+          } else if (strategy === "linkedin_search_urls") {
+            // Applicant search scrape: just the /in/ URLs the for_each iterates.
+            // Not a profile view — no budget gate / recordProfileView.
+            lastIdx = idx; mark = `search-urls:${idx}`;
+            const urls = await scrapeSearchProfileUrls(page);
+            seenPool.push(...urls);
+            dbg(`step${idx} scraped ${urls.length} profile URLs (search extract)`);
+            console.log(`  step ${idx}: ${urls.length} URLs (search extract)`);
+            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: urls });
+            await reportStepResult(runId, idx, "extract");
+          } else {
+            // Budget gate: pause-and-resume rather than drop candidates.
+            const reason = budgetExhaustedReason();
+            if (reason) {
+              console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
+              await pauseRun(runId, reason, idx);
+              blocked = true;
+              break;
+            }
+            // Capture profile URL BEFORE scrapeProfileFull navigates through
+            // /details/<section>/ subpages, otherwise page.url() returns the
+            // last subpage instead of the canonical /in/<slug>/.
+            const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
+            const data = strategy === "generic_schema"
+              ? await scrapeGenericByShapes(page, profileUrl, shapes)
+              : await scrapeProfileFull(page, profileUrl, shapes);
+            recordProfileView();
+            if (strategy === "generic_schema") {
+              console.log(`  step ${idx}: generic_schema extract "${data.page_title || ""}" keys=[${Object.keys(data).filter((k) => k !== "page_title" && k !== "url").join(",")}]`);
+            } else {
+              console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${(data.education || []).length} skills=${(data.skills || []).length} certs=${(data.certifications || []).length}`);
+            }
+            await postExtraction(runId, idx, profileUrl, data);
+            await reportStepResult(runId, idx, "extract");
+            profileExtractCount += 1;
           }
-          // Capture profile URL BEFORE scrapeProfileFull navigates through
-          // /details/<section>/ subpages, otherwise page.url() returns the
-          // last subpage instead of the canonical /in/<slug>/.
-          const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
-          const data = await scrapeProfileFull(page, profileUrl, readExtractShapes(step));
-          recordProfileView();
-          console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${data.education.length} skills=${data.skills.length} certs=${data.certifications.length}`);
-          await postExtraction(runId, idx, profileUrl, data);
-          await reportStepResult(runId, idx, "extract");
-          profileExtractCount += 1;
+        } else if (action === "linkedin_people_search") {
+          // Humanized people-search navigation (typeahead + "People" pill click,
+          // deep-link fallback) — the exact step-2 behavior, dispatched from the
+          // plan instead of hardcoded. Used by the Phase C generic lead path.
+          lastIdx = idx; mark = "search-nav";
+          const deepLink = /^https?:/.test(value) ? value : searchUrl;
+          dbg(`step${idx} linkedin_people_search for "${jobTitle}"`);
+          lastSearchUrl = await navigateToPeopleSearch(page, jobTitle, deepLink, orand);
+          recordSearch();
+          await sleep(jitter(3000, 1500));
+          await reportStepResult(runId, idx, "linkedin_people_search");
+        } else if (action === "linkedin_paginate_next") {
+          // Applicant page-2: click "Next" like a human, deep-link fallback —
+          // the exact hardcoded step-4 behavior, dispatched from the plan.
+          lastIdx = idx; mark = "paginate-next";
+          const wentNext = await clickPaginationNext(page, orand);
+          if (!wentNext) {
+            const fallback = /^https?:/.test(value) ? value : searchUrlP2;
+            await safeGoto(page, fallback, "search-p2");
+            await sleep(jitter(3000, 1500));
+          }
+          lastSearchUrl = page.url();
+          await reportStepResult(runId, idx, "linkedin_paginate_next");
+        } else if (action === "for_each") {
+          // Generic applicant path: expand the for_each in-loop (the legacy path
+          // does this imperatively before the loop). expandForEach grows the
+          // snapshot; the steps refresh at the loop top picks up the new steps.
+          expansion = await expandForEach(runId, idx);
+          console.log(`  step ${idx}: for_each expanded into ${expansion.iterations} iterations`);
+          await reportStepResult(runId, idx, "for_each");
         } else if (action === "noise_break") {
           const kind = step._noise_kind || "idle_scroll";
           const seed = step._noise_seed != null ? step._noise_seed : Math.floor(Math.random() * 0xffffffff);
@@ -1163,6 +1311,52 @@ async function driveRun(run) {
             if (i < targets.length - 1 && pacingMs > 0) await sleep(pacingMs);
           }
           await reportStepResult(runId, idx, "open_message_drafts");
+        } else if (PHASE_A_VERBS.has(action)) {
+          // Generic interactive verbs (click/type) resolved from the recorded
+          // selector_chain — the daemon's first plan-driven dispatch (mirrors the
+          // extension's replay.ts executeStep: primary selector_chain, then ONE
+          // level of methods[] fallback). Anti-bot: routes through the SAME
+          // moveMouseAlongBezier (single shared cursor) + typeHumanLike the rest
+          // of the daemon uses, seeded by the run RNG `orand`; nothing about HOW a
+          // verb is timed changes. A thrown BlockerError propagates to the catch
+          // below (pause without advancing). On NO resolution we soft-miss (log +
+          // report success + advance): a step-result success:false would FAIL the
+          // whole run (the backend has no per-step retry/heal), so best-effort
+          // here matches the daemon's existing transient-error policy.
+          const attempts = [{ selector_chain: step.selector_chain, action_type: action, value }];
+          if (Array.isArray(step.methods)) {
+            for (const m of step.methods) {
+              if (m && Array.isArray(m.selector_chain) && m.selector_chain.length) {
+                attempts.push({
+                  selector_chain: m.selector_chain,
+                  action_type: m.action_type || action,
+                  value: m.value !== undefined ? String(m.value) : value,
+                });
+              }
+            }
+          }
+          let acted = false;
+          let actedTarget = null;
+          for (const a of attempts) {
+            const target = await resolveLocator(page, a.selector_chain);
+            if (!target) continue;
+            if (a.action_type === "type") {
+              acted = await typeResolved(page, target, a.value, { moveMouseAlongBezier, typeHumanLike, orand });
+            } else {
+              acted = await clickResolved(page, target, { moveMouseAlongBezier, orand });
+            }
+            if (acted) { actedTarget = target; break; }
+          }
+          if (!acted) {
+            console.log(`  step ${idx}: ${action} — no selector resolved (soft-miss, advancing)`);
+          } else if (step.success_condition) {
+            // Verify the recorded success condition via the SHARED predicate
+            // (same logic as replay.ts). Soft: log on mismatch, still advance —
+            // a step-result success:false would fail the whole run.
+            const verdict = await checkSuccessConditionDaemon(page, step, actedTarget);
+            if (!verdict.ok) console.log(`  step ${idx}: ${action} success_condition not met (${verdict.reason}) — soft, advancing`);
+          }
+          await reportStepResult(runId, idx, action);
         } else {
           await reportStepResult(runId, idx, action || "noop");
         }

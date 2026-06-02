@@ -192,6 +192,12 @@ async def get_run(
         "extracted_data": run.extracted_data or [],
         "resolved_parameters": (run.workflow_snapshot or {}).get("resolved_parameters", {}),
         "connector_resolution": (run.workflow_snapshot or {}).get("connector_resolution", []),
+        # The plan steps the daemon's generic loop interprets. After
+        # expand_for_each this is the materialized list (it overwrites
+        # snapshot["steps"]); before/without it, the seeded 0..N steps. Exposing
+        # it lets the daemon drive the plan from step 0 instead of hardcoding a
+        # preamble (Phase C). Additive — existing consumers ignore extra fields.
+        "workflow_snapshot": {"steps": (run.workflow_snapshot or {}).get("steps", [])},
         "origin": run.origin or None,
         "linkedin_applicants": run.linkedin_applicants or [],
     }

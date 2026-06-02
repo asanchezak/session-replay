@@ -126,6 +126,30 @@ async def test_runs_basic_routes_direct(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_run_exposes_workflow_snapshot_steps(db_session):
+    # Phase C: the daemon's generic loop drives the plan from run.workflow_snapshot
+    # .steps, so GET /v1/runs/{id} must expose it (the seeded step's action_type
+    # is what the daemon dispatches on). Self-contained (does not use _seed_run,
+    # whose update_status(active) hits a pre-existing StateTransitionError).
+    wf_svc = WorkflowService(db_session)
+    wf = await wf_svc.create(name="snap-exposure", target_url="https://example.test")
+    await wf_svc.add_step(
+        workflow_id=str(wf.id),
+        step_index=0,
+        action_type="linkedin_people_search",
+        intent="search",
+        value="https://www.linkedin.com/search/results/people/",
+    )
+    run = await ExecutionService(db_session).create_run(str(wf.id))
+    result = await get_run(str(run.id), db=db_session)
+    snap = result.get("workflow_snapshot")
+    assert snap is not None, "GET must expose workflow_snapshot"
+    steps = snap.get("steps") or []
+    assert len(steps) == 1
+    assert steps[0]["action_type"] == "linkedin_people_search"
+
+
+@pytest.mark.asyncio
 async def test_runs_error_paths_direct(db_session, monkeypatch):
     fake = str(uuid.uuid4())
     nf = await get_run(fake, db=db_session)

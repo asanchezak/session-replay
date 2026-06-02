@@ -75,6 +75,9 @@ def _build_steps() -> list[dict]:
     search_extract_methods = [
         {
             "kind": "extract_shapes",
+            # strategy linkedin_search_urls → the daemon's scrapeSearchProfileUrls
+            # DOM routine (Phase C generic path). Legacy hardcoded path ignores it.
+            "strategy": "linkedin_search_urls",
             "shapes": [
                 {
                     "key": "profile_urls",
@@ -138,9 +141,10 @@ def _build_steps() -> list[dict]:
         },
         {
             "step_index": 2,
-            "action_type": "navigate",
+            # Humanized typeahead + "People" pill click (deep-link fallback in value).
+            "action_type": "linkedin_people_search",
             "value": SEARCH_URL_TEMPLATE,
-            "intent": "Open LinkedIn people search",
+            "intent": "Open LinkedIn people search (humanized typeahead + People filter)",
             "methods": None,
             "selector_chain": None,
             "success_condition": None,
@@ -156,9 +160,10 @@ def _build_steps() -> list[dict]:
         },
         {
             "step_index": 4,
-            "action_type": "navigate",
+            # Click "Next" like a human (deep-link fallback in value).
+            "action_type": "linkedin_paginate_next",
             "value": SEARCH_URL_TEMPLATE + "&page=2",
-            "intent": "Go to search results page 2",
+            "intent": "Go to search results page 2 (human Next click)",
             "methods": None,
             "selector_chain": None,
             "success_condition": None,
