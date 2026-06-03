@@ -5,6 +5,7 @@ import StatusBadge from "../components/StatusBadge";
 import InterventionModal from "../components/InterventionModal";
 import Banner from "../components/Banner";
 import StepScreenshots from "../components/StepScreenshots";
+import FlowManifest from "../components/FlowManifest";
 import { useApi } from "../hooks/useApi";
 import { logger } from "../lib/logger";
 import { formatTime, formatTimeShort } from "../lib/formatTime";
@@ -1152,6 +1153,7 @@ export default function RunDetailPage() {
       )}
 
       {/* Step Timeline */}
+      {activeTab === "timeline" && runId && <FlowManifest runId={runId} />}
       {activeTab === "timeline" && (
         <Card>
           {displaySteps.length === 0 ? (

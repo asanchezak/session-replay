@@ -255,6 +255,48 @@ async function uploadStepShot(page, label) {
   } catch (e) { dbg(`step shot failed: ${e.message || e}`); }
 }
 
+// ── Hardcoded-flow manifest (legibility) ─────────────────────────────────────
+// The daemon's preamble flow is hardcoded (not a recorded workflow), so we emit
+// a human-readable manifest of the steps it WILL run, as a flow_manifest JSON
+// artifact. The dashboard renders it so a reviewer can see what the daemon does
+// at each step — and map it to the per-step screenshots (same indices/labels).
+function buildFlowManifest(isLeadRun, jobTitle) {
+  const steps = [
+    { index: 0, action: "navigate", label: "feed",
+      desc: "Calentamiento: abre el feed de LinkedIn (un usuario real no entra en frío a la búsqueda)." },
+    { index: 1, action: "noise_break", label: "idle",
+      desc: "Ruido humano: scroll variado + pausa de lectura (el cursor no se congela)." },
+    { index: 2, action: "navigate", label: "search-p1",
+      desc: `Búsqueda de personas, página 1: tipea "${jobTitle}" en el buscador global y aplica el filtro People.` },
+    { index: 3, action: "extract", label: "scrape-p1",
+      desc: isLeadRun
+        ? "Extrae nombre + headline + URL de perfil de los resultados de la página 1."
+        : "Extrae las URLs de perfil (/in/) de la página 1." },
+    { index: 4, action: "navigate", label: "search-p2",
+      desc: "Navega a la página 2 de resultados." },
+    { index: 5, action: "extract", label: "scrape-p2",
+      desc: isLeadRun
+        ? "Extrae nombre + headline + URL de la página 2; el run completa (NO visita perfiles)."
+        : "Extrae las URLs de perfil de la página 2." },
+  ];
+  if (!isLeadRun) {
+    steps.push({ index: 6, action: "for_each", label: "candidates",
+      desc: "Por cada candidato: visita el perfil y scrapea sus secciones (about, experiencia, skills, educación, certificaciones), luego hace push a Odoo." });
+  }
+  return { flow: isLeadRun ? "linkedin_lead_search" : "new_job_position", job_title: jobTitle, hardcoded: true, steps };
+}
+
+async function uploadFlowManifest(runId, manifest) {
+  try {
+    const fd = new FormData();
+    fd.append("file", new Blob([JSON.stringify(manifest)], { type: "application/json" }), "flow_manifest.json");
+    await fetch(`${BACKEND}/v1/runs/${runId}/artifacts?artifact_type=flow_manifest`, {
+      method: "POST", headers: { "X-API-Key": API_KEY }, body: fd,
+    });
+    dbg(`[FLOW MANIFEST] ${manifest.steps.length} steps uploaded`);
+  } catch (e) { dbg(`flow manifest upload failed: ${e.message || e}`); }
+}
+
 async function safeGoto(page, url, label) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   recordPageLoad();
@@ -1107,6 +1149,9 @@ async function driveRun(run) {
   const searchUrlP2 = `${searchUrl}&page=2`;
 
   console.log(`\n[daemon] driving run ${runId} for "${jobTitle}"`);
+  // Emit a manifest of the hardcoded preamble so the dashboard can show what the
+  // daemon does at each step (the generic path drives a real plan, so skip it).
+  if (!useGeneric) await uploadFlowManifest(runId, buildFlowManifest(isLeadRun, jobTitle)).catch(() => {});
 
   const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
     channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
