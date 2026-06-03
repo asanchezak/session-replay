@@ -168,14 +168,20 @@ async function claimRun(runId) {
   }
 }
 
-// Find the oldest QUEUED run to claim. Runs rest in QUEUED (set by the webhook
-// ingress + the reconcile supervisor) until this daemon claims them via
-// POST /runs/{id}/start (QUEUED→RUNNING). Resting in QUEUED is deliberate: a
-// backlog built up while this host was offline survives indefinitely (no
-// wall-clock "freshness" cutoff), and picking the oldest gives FIFO drain.
+// Find the next daemon-owned run to drive.
+//
+// Primary source is QUEUED runs, which must be claimed atomically via
+// POST /runs/{id}/start. As a recovery path, also consider RUNNING/RECOVERING
+// runs for the same daemon-owned flows: a manual /agent/{id}/resume or
+// supervisor recovery can legitimately leave the backend in RUNNING while no
+// browser is actively driving. In that case the daemon must re-attach and
+// continue from current_step_index instead of waiting forever.
 async function findPendingRun() {
-  const list = await fetchJson(`${BACKEND}/v1/runs?limit=50&status=queued`);
-  const items = Array.isArray(list) ? list : list.items || [];
+  const statuses = ["queued", "running", "recovering"];
+  const buckets = await Promise.all(
+    statuses.map((status) => fetchJson(`${BACKEND}/v1/runs?limit=50&status=${status}`)),
+  );
+  const items = buckets.flatMap((list) => (Array.isArray(list) ? list : list.items || []));
   const watched = items.filter((r) => {
     if (!r.origin) return false;
     // Webhook/reconciler-driven LinkedIn flows (by event_kind) AND any run the
@@ -185,7 +191,7 @@ async function findPendingRun() {
       || r.origin.execution_target === "daemon";
     if (!isWatched) return false;
     if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) return false;
-    if (r.current_step_index > 0) return false;
+    if (r.status === "queued" && r.current_step_index > 0) return false;
     return true;
   });
   if (watched.length === 0) return null;
@@ -1477,8 +1483,7 @@ async function driveRun(run) {
             const t = targets[i];
             try {
               const profilePage = await ctx.newPage();
-              await profilePage.goto(t.profile_url, { waitUntil: "domcontentloaded", timeout: 60000 });
-              recordPageLoad();
+              await safeGoto(profilePage, t.profile_url, `message-draft:${i + 1}`);
               console.log(`    [${i + 1}/${targets.length}] opened ${t.name || t.profile_url}`);
             } catch (err) {
               console.log(`    [${i + 1}/${targets.length}] ${t.profile_url} -> error: ${err.message?.slice(0, 200)}`);
@@ -1644,7 +1649,7 @@ while (true) {
       const reason = isUserGeneric ? null : budgetExhaustedReason();
       if (reason) {
         skipLog(`budget exhausted (${reason}) — deferring run ${run.id} to next window`);
-      } else if (!(await claimRun(run.id))) {
+      } else if (run.status === "queued" && !(await claimRun(run.id))) {
         // Couldn't claim (lost race / not in QUEUED). No drive, no cooldown —
         // just poll again and let the next pass pick a fresh run.
       } else {

@@ -642,7 +642,7 @@ async def report_step_result(
     audit = AuditService(db)
 
     try:
-        run = await svc.get_run(run_id)
+        run = await svc.get_run_for_update(run_id)
     except NotFoundError:
         return _error("NOT_FOUND", "Run not found")
 
@@ -690,7 +690,10 @@ async def report_step_result(
 
     if req.success:
         run.error_summary = None
-        run = await svc.advance_step(run_id)
+        try:
+            run = await svc.advance_step(run_id, expected_step_index=req.step_index)
+        except StateTransitionError as e:
+            return _error("STATE_ERROR", str(e), status=409)
     else:
         run = await svc.fail(run_id, req.error or "Step failed")
     return {

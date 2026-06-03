@@ -18,7 +18,9 @@ export function useWorkflows(pollInterval?: number, workflowType?: "system" | "u
   const { data, loading, error, fetchData } = useApiData<WorkflowSummary[]>();
   const { request } = useApi();
 
-  const path = workflowType ? `/workflows?type=${workflowType}` : "/workflows";
+  const path = workflowType
+    ? `/workflows?type=${workflowType}&limit=1000`
+    : "/workflows?limit=1000";
 
   const refetch = useCallback(() => {
     fetchData("GET", path);

@@ -15,11 +15,11 @@ export interface RunSummary {
 export function useRuns(workflowId?: string) {
   const { data, loading, error, fetchData } = useApiData<RunSummary[]>();
   const { request } = useApi();
+  const params = workflowId ? `?workflow_id=${workflowId}&limit=1000` : "?limit=1000";
 
   useEffect(() => {
-    const params = workflowId ? `?workflow_id=${workflowId}` : "";
     fetchData("GET", `/runs${params}`);
-  }, [workflowId]);
+  }, [params, fetchData]);
 
   const cancelRun = async (runId: string) => {
     await request("POST", `/runs/${runId}/cancel`);
@@ -29,8 +29,14 @@ export function useRuns(workflowId?: string) {
     await request("DELETE", "/runs");
   };
 
-  return { runs: data || [], loading, error, refetch: () => {
-    const params = workflowId ? `?workflow_id=${workflowId}` : "";
-    fetchData("GET", `/runs${params}`);
-  }, cancelRun, deleteAllRuns };
+  return {
+    runs: data || [],
+    loading,
+    error,
+    refetch: () => {
+      fetchData("GET", `/runs${params}`);
+    },
+    cancelRun,
+    deleteAllRuns,
+  };
 }

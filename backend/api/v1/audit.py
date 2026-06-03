@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 @router.get("/{run_id}")
 async def get_audit_trail(
     run_id: str,
+    filter: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     logger.info("Getting audit trail run_id=%s", run_id)
@@ -40,11 +41,14 @@ async def get_audit_trail(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": "Run not found"}},
         )
-    result = await db.execute(
-        select(EventLog)
-        .where(EventLog.run_id == run_uuid)
-        .order_by(EventLog.created_at)
-    )
+    query = select(EventLog).where(EventLog.run_id == run_uuid)
+    if filter:
+        like = f"%{filter}%"
+        query = query.where(
+            (EventLog.event_type.ilike(like))
+            | (EventLog.actor_type.ilike(like))
+        )
+    result = await db.execute(query.order_by(EventLog.created_at))
     events = list(result.scalars().all())
 
     audit = AuditService(db)

@@ -378,7 +378,7 @@ async function fetchSupplementalSnapshots(
         return snapshots.filter((snapshot): snapshot is {
           section_name: string;
           page_url: string;
-          page_title?: string;
+          page_title: string | undefined;
           visible_text: string;
           dom_snippet: string;
           captured_at: string;
@@ -2124,7 +2124,7 @@ async function executeAgentRun(
               outcomes.push({ profile_url: t.profile_url, ok: false, reason: "tab_create_failed" });
               continue;
             }
-            await waitForTabLoadBestEffort(tab.id, 30000);
+            await waitForTabLoadBestEffort(tab.id, "open_message_drafts", 30000);
             outcomes.push({
               profile_url: t.profile_url,
               ok: true,

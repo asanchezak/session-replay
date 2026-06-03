@@ -489,6 +489,9 @@ chrome.runtime.onMessage.addListener(
   ) => {
     switch (msg.type) {
       case "EXECUTE_STEP":
+        if (window.top !== window) {
+          return false;
+        }
         executeStep((msg as BackgroundToContentMessage).step as StepToExecute).then((result) => {
           sendResponse({ type: "STEP_RESULT", ...result });
         });
@@ -549,6 +552,9 @@ chrome.runtime.onMessage.addListener(
           .catch(() => sendResponse({ type: "PREPARE_FOR_CAPTURE_RESULT", ok: false }));
         return true;
       case "EXECUTE_AGENT_COMMAND": {
+        if (window.top !== window) {
+          return false;
+        }
         const cmd = (msg as any).command as {
           action: string;
           selector_chain?: Array<{ type: string; value: string }>;

@@ -66,6 +66,22 @@ describe("useApi", () => {
       /Origin not allowed/,
     );
   });
+
+  it("postKeepalive prefixes API base exactly once", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    mockFetch(async (input, init) => {
+      calls.push({ input, init });
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    });
+
+    const { result } = renderHook(() => useApi());
+    act(() => {
+      result.current.postKeepalive("/runs/abc/tab-closed");
+    });
+
+    expect(String(calls[0]?.input)).toMatch(/\/v1\/runs\/abc\/tab-closed$/);
+    expect(String(calls[0]?.input)).not.toMatch(/\/v1\/v1\//);
+  });
 });
 
 describe("useApiData", () => {

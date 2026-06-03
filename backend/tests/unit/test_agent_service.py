@@ -1192,8 +1192,10 @@ async def test_last_chance_recovery_and_report_result_terminal_branches(db_sessi
         raise RuntimeError("resolve fail")
 
     monkeypatch.setattr(agent.ai_outcomes, "resolve_latest", _boom_resolve)
-    async def _force_advance(_run_id):
+    async def _force_advance(_run_id, *, expected_step_index=None):
         target = await agent.execution.get_run(_run_id)
+        if expected_step_index is not None:
+            assert target.current_step_index == expected_step_index
         target.current_step_index += 1
         await db_session.flush()
         return target

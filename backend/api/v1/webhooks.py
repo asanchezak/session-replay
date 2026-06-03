@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from services.webhook_trigger_service import (
     SUPPORTED_EVENT_KINDS,
-    ActiveRunConflict,
+    ActiveRunConflictError,
     WebhookTriggerService,
 )
 
@@ -95,7 +95,7 @@ async def trigger_workflow_now(
             idempotency_key=req.idempotency_key,
             triggered_by=req.triggered_by,
         )
-    except ActiveRunConflict as exc:
+    except ActiveRunConflictError as exc:
         return _err(409, "ACTIVE_RUN", str(exc))
     except ValueError as exc:
         return _err(400, "BAD_REQUEST", str(exc))

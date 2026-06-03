@@ -27,10 +27,11 @@ export default function SettingsPage() {
   const [autoRetry, setAutoRetry] = useState(3);
   const [retentionDays, setRetentionDays] = useState(90);
   const [deterministic, setDeterministic] = useState(false);
-  const [apiKey, setApiKey] = useState("sk-••••••••••••••••");
+  const [apiKey] = useState("sk-••••••••••••••••");
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const { request } = useApi();
 
@@ -52,9 +53,14 @@ export default function SettingsPage() {
           if (typeof data.settings.deterministic_only === "boolean") {
             setDeterministic(data.settings.deterministic_only);
           }
+          setLoadError(null);
         }
-      } catch {
-        // use defaults
+      } catch (err) {
+        if (!cancelled) {
+          setLoadError(
+            err instanceof Error ? err.message : "Failed to load settings",
+          );
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -63,6 +69,7 @@ export default function SettingsPage() {
   }, [request]);
 
   const handleSave = async () => {
+    if (loadError) return;
     setError(null);
     setSaved(false);
     try {
@@ -79,10 +86,6 @@ export default function SettingsPage() {
     }
   };
 
-  const handleRevoke = () => {
-    setApiKey("sk-" + Array.from({ length: 32 }, () => Math.random().toString(36)[2]).join(""));
-  };
-
   return (
     <div>
       <h1 className="text-xl font-semibold mb-4 text-[#E8EAED] flex items-center gap-2">
@@ -91,6 +94,14 @@ export default function SettingsPage() {
 
       {loading && (
         <div className="mb-4 text-[#9AA0B0] text-sm">Loading settings…</div>
+      )}
+
+      {loadError && (
+        <div className="mb-4">
+          <Banner type="error" title="Failed to load settings">
+            {loadError}. Saving is disabled until the current values are loaded from the backend.
+          </Banner>
+        </div>
       )}
 
       {saved && (
@@ -206,8 +217,12 @@ export default function SettingsPage() {
               >
                 {showKey ? "Hide" : "Show"}
               </button>
-              <button onClick={handleRevoke} className="text-xs text-[#E17055] hover:text-[#FF8A76]">
-                Revoke
+              <button
+                disabled
+                title="API key rotation is not implemented in the backend yet."
+                className="text-xs text-[#9AA0B0] cursor-not-allowed"
+              >
+                Revoke (Not implemented)
               </button>
             </div>
           </SettingRow>
@@ -238,7 +253,8 @@ export default function SettingsPage() {
       <div className="mt-6 flex justify-end">
         <button
           onClick={handleSave}
-          className="px-6 py-2 bg-[#6C5CE7] text-white text-sm rounded-md hover:bg-[#7C6EF7] transition-colors"
+          disabled={!!loadError}
+          className="px-6 py-2 bg-[#6C5CE7] text-white text-sm rounded-md hover:bg-[#7C6EF7] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           Save All Settings
         </button>

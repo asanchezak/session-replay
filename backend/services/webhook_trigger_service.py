@@ -37,7 +37,7 @@ NON_TERMINAL_STATUSES = (
 )
 
 
-class ActiveRunConflict(Exception):
+class ActiveRunConflictError(Exception):
     """Raised when a manual trigger is rejected because the workflow already
     has a non-terminal run in flight. Carries the existing run id."""
 
@@ -229,7 +229,7 @@ class WebhookTriggerService:
 
         active = await self._find_active_run(workflow_id)
         if active is not None:
-            raise ActiveRunConflict(str(active.id))
+            raise ActiveRunConflictError(str(active.id))
 
         connector = await self._get_connector_or_raise(connector_id)
         jobs = await self.connector_forum.fetch_jobs(connector, limit=25)

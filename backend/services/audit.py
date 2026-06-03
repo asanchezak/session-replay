@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.models.run import ExecutionRun
 from core.models.event import EventLog
 from core.utils import to_uuid
 
@@ -71,6 +72,13 @@ class AuditService:
         nonce = secrets.token_hex(32)
         now = datetime.now(UTC)
         run_uuid = to_uuid(event.run_id) if event.run_id else None
+
+        if run_uuid is not None:
+            await self.session.execute(
+                select(ExecutionRun.id)
+                .where(ExecutionRun.id == run_uuid)
+                .with_for_update()
+            )
 
         if previous_hash is None:
             result = await self.session.execute(

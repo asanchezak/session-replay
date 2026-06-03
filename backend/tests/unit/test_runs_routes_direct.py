@@ -15,6 +15,8 @@ from api.v1.runs import (
     FailRequest,
     HealResultRequest,
     HealStepRequest,
+    PauseRunRequest,
+    RecoverRunRequest,
     StepResultRequest,
     advance_step_run,
     cancel_run,
@@ -65,7 +67,6 @@ async def _seed_run(db_session, *, status: str = "running") -> tuple[str, str]:
         intent="click",
         selector_chain=[{"type": "css", "value": "#btn"}],
     )
-    await wf_svc.update_status(str(wf.id), "active")
     run = await ExecutionService(db_session).create_run(str(wf.id))
     if status == "running":
         run = await ExecutionService(db_session).transition(str(run.id), RunStatus.RUNNING)
@@ -87,7 +88,11 @@ async def test_runs_basic_routes_direct(db_session, monkeypatch):
     events = await get_run_events(run_id, limit=100, offset=0, event_type=None, db=db_session)
     assert isinstance(events, list)
 
-    pause = await pause_run(run_id, body={"reason": "manual"}, db=db_session)
+    pause = await pause_run(
+        run_id,
+        req=PauseRunRequest(reason="manual"),
+        db=db_session,
+    )
     assert pause["status"] == "waiting_for_user"
 
     resumed = await resume_run(run_id, db=db_session)
@@ -164,7 +169,7 @@ async def test_runs_error_paths_direct(db_session, monkeypatch):
         raise StateTransitionError("bad")
 
     monkeypatch.setattr("services.execution_service.ExecutionService.pause", _state)
-    state_pause = await pause_run(fake, body={"reason": "x"}, db=db_session)
+    state_pause = await pause_run(fake, req=PauseRunRequest(reason="x"), db=db_session)
     assert state_pause.status_code == 409
 
     monkeypatch.setattr("services.execution_service.ExecutionService.resume", _state)
@@ -234,6 +239,23 @@ async def test_runs_step_heal_and_extraction_direct(db_session, monkeypatch):
     )
     assert isinstance(mismatch, JSONResponse)
     assert mismatch.status_code == 409
+
+    run.status = RunStatus.RUNNING.value
+    run.current_step_index = 0
+    await db_session.flush()
+    first_success = await report_step_result(
+        run_id,
+        req=StepResultRequest(step_index=0, action_type="click", success=True),
+        db=db_session,
+    )
+    assert first_success["status"] in {"running", "completed"}
+    duplicate_success = await report_step_result(
+        run_id,
+        req=StepResultRequest(step_index=0, action_type="click", success=True),
+        db=db_session,
+    )
+    assert isinstance(duplicate_success, JSONResponse)
+    assert duplicate_success.status_code == 409
 
     run.status = RunStatus.RECOVERING.value
     await db_session.flush()
@@ -327,6 +349,10 @@ async def test_runs_create_and_delete_all_direct(db_session):
     deleted = await delete_all_runs(db=db_session)
     assert "runs" in deleted["deleted"]
 
-    missing = await recover_run(str(uuid.uuid4()), body={"step_index": 0}, db=db_session)
+    missing = await recover_run(
+        str(uuid.uuid4()),
+        req=RecoverRunRequest(step_index=0),
+        db=db_session,
+    )
     assert isinstance(missing, JSONResponse)
     assert missing.status_code == 404

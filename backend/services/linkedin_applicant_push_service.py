@@ -161,6 +161,7 @@ class LinkedInApplicantPushService:
                 json={"params": {"job_id": job_id, "profile_urls": profile_urls}},
                 headers={"Content-Type": "application/json", "X-API-Key": api_key},
             )
+            resp.raise_for_status()
             body = resp.json() if resp.content else {}
         inner = body.get("result") if isinstance(body, dict) else body
         applicants_raw = (inner or {}).get("applicants") or []
@@ -261,6 +262,7 @@ class LinkedInApplicantPushService:
                             "X-API-Key": api_key,
                         },
                     )
+                    resp.raise_for_status()
                     body = resp.json() if resp.content else {}
                     # JSON-RPC wraps the controller return in {"result": ...}
                     inner = body.get("result") if isinstance(body, dict) else body

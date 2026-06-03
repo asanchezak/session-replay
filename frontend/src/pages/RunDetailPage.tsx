@@ -367,12 +367,13 @@ export default function RunDetailPage() {
     try {
       const data = await request<RunDetail>("GET", `/runs/${runId}`);
       setRun(data);
+      setError(null);
       return data;
     } catch (err) {
-      if (!loading) setError(err instanceof Error ? err.message : "Failed to load run");
+      setError(err instanceof Error ? err.message : "Failed to load run");
       return null;
     }
-  }, [runId, request, loading]);
+  }, [runId, request]);
 
   const fetchEvents = useCallback(async () => {
     if (!runId) return;
@@ -516,7 +517,7 @@ export default function RunDetailPage() {
       const r = liveRunRef.current;
       if (!r || r.target !== "daemon") return;
       if (!["queued", "running", "recovering"].includes(r.status || "")) return;
-      postKeepalive(`/v1/runs/${runId}/tab-closed`);
+      postKeepalive(`/runs/${runId}/tab-closed`);
     };
     window.addEventListener("pagehide", onHide);
     return () => window.removeEventListener("pagehide", onHide);

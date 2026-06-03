@@ -192,4 +192,26 @@ describe("RunDetailPage Vision chip", () => {
     // Now confirm the chip is absent.
     expect(screen.queryByTestId("vision-chip-step-0")).not.toBeInTheDocument();
   });
+
+  it("renders an error banner when the first run fetch fails", async () => {
+    (global as any).fetch = vi.fn(async (url: string) => {
+      if (url.includes("/runs/run-missing/events")) {
+        return { ok: true, status: 200, json: async () => [], text: async () => "[]" } as Response;
+      }
+      if (url.includes("/agent/run-missing/outcomes")) {
+        return { ok: true, status: 200, json: async () => [], text: async () => "[]" } as Response;
+      }
+      return {
+        ok: false,
+        status: 404,
+        json: async () => ({ error: { code: "NOT_FOUND", message: "Run not found" } }),
+        text: async () => JSON.stringify({ error: { code: "NOT_FOUND", message: "Run not found" } }),
+      } as Response;
+    });
+
+    renderPage("run-missing");
+
+    expect(await screen.findByText("Error loading run")).toBeInTheDocument();
+    expect(screen.getByText("Run not found")).toBeInTheDocument();
+  });
 });

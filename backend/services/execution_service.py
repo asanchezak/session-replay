@@ -500,8 +500,8 @@ class ExecutionService:
             raise NotFoundError(f"Run {run_id} not found")
         return run
 
-    async def transition(self, run_id: str, target_status: RunStatus) -> ExecutionRun:
-        """Transition a run to a new status."""
+    async def get_run_for_update(self, run_id: str) -> ExecutionRun:
+        """Get a run by ID under row lock for stateful mutations."""
         uid = to_uuid(run_id)
         result = await self.session.execute(
             select(ExecutionRun).where(ExecutionRun.id == uid).with_for_update()
@@ -509,6 +509,11 @@ class ExecutionService:
         run = result.scalar_one_or_none()
         if not run:
             raise NotFoundError(f"Run {run_id} not found")
+        return run
+
+    async def transition(self, run_id: str, target_status: RunStatus) -> ExecutionRun:
+        """Transition a run to a new status."""
+        run = await self.get_run_for_update(run_id)
 
         old_status = run.status
         try:
@@ -664,12 +669,21 @@ class ExecutionService:
             await push_session.commit()
             return result
 
-    async def advance_step(self, run_id: str) -> ExecutionRun:
+    async def advance_step(
+        self, run_id: str, *, expected_step_index: int | None = None
+    ) -> ExecutionRun:
         """Advance the current step index by one."""
-        run = await self.get_run(run_id)
+        run = await self.get_run_for_update(run_id)
         if run.status != RunStatus.RUNNING.value:
             raise StateTransitionError(
                 f"Cannot advance step: run is '{run.status}', must be 'running'"
+            )
+        if (
+            expected_step_index is not None
+            and run.current_step_index != expected_step_index
+        ):
+            raise StateTransitionError(
+                f"Expected step {expected_step_index}, got {run.current_step_index}"
             )
         run.current_step_index += 1
         # Phase 6: keep goal_progress in sync with the cursor

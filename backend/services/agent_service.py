@@ -26,7 +26,7 @@ from core.models.event import EventLog
 from core.models.run import ExecutionRun
 from core.models.settings import AppSetting
 from core.models.workflow import WorkflowStep
-from core.state_machine import RunStatus, WorkflowStateMachine
+from core.state_machine import RunStatus
 from core.utils import to_uuid
 from services.agent_conversation import (
     append_assistant_turn,
@@ -2686,7 +2686,7 @@ function doType(el) {
             return None
 
     async def report_result(self, run_id: str, req: ResultRequest) -> ResultResponse:
-        run = await self._get_run(run_id)
+        run = await self.execution.get_run_for_update(run_id)
         if run.status in TERMINAL_RUN_STATUSES:
             self._clear_recovery_state(run_id)
             return ResultResponse(
@@ -2768,7 +2768,10 @@ function doType(el) {
                 f"Step {req.step_index} succeeded",
             )
 
-            await self.execution.advance_step(run_id)
+            await self.execution.advance_step(
+                run_id,
+                expected_step_index=req.step_index,
+            )
             await self.session.refresh(run)
 
             if await self._goal_predicate_satisfied(run, req.page_context_after):
@@ -3043,40 +3046,17 @@ function doType(el) {
     async def _transition_to_running(self, run: ExecutionRun) -> None:
         current = RunStatus(run.status)
         if current == RunStatus.QUEUED:
-            WorkflowStateMachine.transition(current, RunStatus.RUNNING)
-            run.status = RunStatus.RUNNING.value
-            if not run.started_at:
-                run.started_at = datetime.now(UTC)
-            await self.session.flush()
-            await self.audit.append(
-                AppendEvent(
-                    event_type="run_running",
-                    payload={"workflow_id": run.workflow_id},
-                    run_id=str(run.id),
+            origin = run.origin or {}
+            if (
+                origin.get("execution_target") == "daemon"
+                or origin.get("event_kind") in {"new_job_position", "linkedin_lead_search"}
+            ):
+                raise RuntimeError(
+                    "Queued daemon-owned runs must be claimed via /runs/{id}/start"
                 )
-            )
-        elif current == RunStatus.RECOVERING:
-            WorkflowStateMachine.transition(current, RunStatus.RUNNING)
-            run.status = RunStatus.RUNNING.value
-            await self.session.flush()
-            await self.audit.append(
-                AppendEvent(
-                    event_type="run_running",
-                    payload={"workflow_id": run.workflow_id, "recovered": True},
-                    run_id=str(run.id),
-                )
-            )
-        elif current == RunStatus.WAITING_FOR_USER:
-            WorkflowStateMachine.transition(current, RunStatus.RUNNING)
-            run.status = RunStatus.RUNNING.value
-            await self.session.flush()
-            await self.audit.append(
-                AppendEvent(
-                    event_type="run_running",
-                    payload={"workflow_id": run.workflow_id, "resumed": True},
-                    run_id=str(run.id),
-                )
-            )
+            await self.execution.transition(str(run.id), RunStatus.RUNNING)
+        elif current in (RunStatus.RECOVERING, RunStatus.WAITING_FOR_USER):
+            await self.execution.transition(str(run.id), RunStatus.RUNNING)
 
     async def _audit_decision(
         self,
