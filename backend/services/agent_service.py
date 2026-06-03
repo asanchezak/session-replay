@@ -254,7 +254,11 @@ class AgentService:
 
         ai_decision: dict[str, Any] | None = None
         applied_updates: list[dict[str, Any]] = []
-        if self._should_consult_ai(run_id, step, ctx):
+        # Deterministic mode: never enter the AI block at all (not even to fall
+        # back), so the audit reads a clean "Fast path: execute" instead of a
+        # misleading "AI output unusable" — sin IA es sin IA.
+        det_mode = await self._is_deterministic()
+        if not det_mode and self._should_consult_ai(run_id, step, ctx):
             ai_decision = await self._consult_ai_for_step(
                 run, step_index, step, command, analysis, ctx,
                 screenshot_b64=req.screenshot_b64,
