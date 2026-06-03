@@ -15,6 +15,15 @@ hard way and not obvious from reading code.
   improvements (Odoo sync-stats view, daemon health in dashboard, kill the
   AI-extraction duplication with Easy Recruit, generic schema-driven
   extractor). Has ordered tasks with acceptance criteria.
+- **`docs/windows-bot-host-runbook.md`** — how to access and operate the
+  PRODUCTION bot host (Fernanda's **Windows** machine): SSH over Tailscale as
+  `linkedin-bot@100.107.206.110` (elevated, key-based), where everything lives on
+  the host, the `linkedin-bot-daemon` scheduled task, common ops, and gotchas.
+  The daemon runs on Windows; the backend runs on Andrey's Mac
+  (`BACKEND=http://100.100.20.99:8081` over Tailscale). NOTE: the older
+  `docs/linkedin-bot-host-setup.md` is written for a **Mac** host — for Fernanda's
+  real host, the Windows runbook supersedes it. Setup scripts:
+  `scripts/setup-windows-host.ps1` + `scripts/elevate-bot-windows.ps1`.
 
 ## LinkedIn integration (Odoo new-job webhook → applicant push)
 
