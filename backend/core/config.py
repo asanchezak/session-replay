@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     vision_baseline_every_n: int = 5
     vision_high_detail_on_failure: bool = True
 
+    # Artifact storage (screenshots, HTML captures). Defaults to the local
+    # filesystem under backend/artifact_storage. Without these, StorageService
+    # raised AttributeError → every artifact upload 500'd.
+    storage_protocol: str = "file"
+    storage_path: str = "artifact_storage"
+    storage_options: dict = {}
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("cors_origins", mode="before")
