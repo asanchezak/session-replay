@@ -16,7 +16,8 @@ import {
   parameterConsumerSteps,
 } from "./viewmodels/workflowDetailViewModel";
 import type { ConnectorBindingDraft, WebhookTrigger } from "./viewmodels/workflowDetailViewModel";
-import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database, MessageSquare, Shield } from "lucide-react";
+import { Play, ArrowLeft, List, FileText, Brain, Settings2, BarChart3, Pencil, Zap, Trash2, Plus, ExternalLink, User, Database, MessageSquare, Shield, Camera } from "lucide-react";
+import StepScreenshots from "../components/StepScreenshots";
 
 interface Step {
   step_index: number;
@@ -1364,6 +1365,16 @@ export default function WorkflowDetailPage() {
             </Card>
           )}
         </div>
+      )}
+
+      {/* Recording-time screenshots (captured by the extension while recording) */}
+      {workflowId && (
+        <Card className="mt-6">
+          <h2 className="text-sm font-medium text-text-primary mb-3 flex items-center gap-2">
+            <Camera size={14} /> Capturas de grabación
+          </h2>
+          <StepScreenshots runId={workflowId} artifactType="recording_capture" />
+        </Card>
       )}
 
       {showParamModal && analysis && (

@@ -10,11 +10,14 @@ interface ArtifactMeta {
   metadata?: { original_filename?: string };
 }
 
-// Gallery of per-navigation screenshots the daemon uploaded for a run
-// (artifact_type "page_capture"). The host runs Chrome in a non-interactive
-// session with no viewable desktop, so this is how you see what the bot saw.
-// Images are gated by the API key, so we fetch them as blobs (object URLs).
-export default function StepScreenshots({ runId }: { runId: string }) {
+// Gallery of screenshots stored as artifacts for a run (or, with
+// artifactType="recording_capture" + the workflow id, the captures taken while
+// a workflow was recorded — run_id has no FK so recordings reuse the same
+// pipeline). Images are gated by the API key, so we fetch them as object URLs.
+export default function StepScreenshots({
+  runId,
+  artifactType = "page_capture",
+}: { runId: string; artifactType?: string }) {
   const { request, requestBlobUrl } = useApi();
   const [shots, setShots] = useState<ArtifactMeta[]>([]);
   const [urls, setUrls] = useState<Record<string, string>>({});
@@ -29,7 +32,7 @@ export default function StepScreenshots({ runId }: { runId: string }) {
       try {
         const all = await request<ArtifactMeta[]>("GET", `/runs/${runId}/artifacts`);
         const caps = all
-          .filter((a) => a.artifact_type === "page_capture" && a.mime_type.startsWith("image/"))
+          .filter((a) => a.artifact_type === artifactType && a.mime_type.startsWith("image/"))
           .sort((a, b) => (a.step_index ?? 0) - (b.step_index ?? 0));
         if (cancelled) return;
         setShots(caps);
@@ -46,7 +49,7 @@ export default function StepScreenshots({ runId }: { runId: string }) {
       }
     })();
     return () => { cancelled = true; created.forEach((u) => URL.revokeObjectURL(u)); };
-  }, [runId, request, requestBlobUrl]);
+  }, [runId, artifactType, request, requestBlobUrl]);
 
   const label = (a: ArtifactMeta) =>
     a.metadata?.original_filename?.replace(/\.png$/i, "") || `step ${a.step_index ?? "?"}`;
@@ -55,14 +58,7 @@ export default function StepScreenshots({ runId }: { runId: string }) {
     return <p className="text-text-gray text-sm p-2">Cargando capturas…</p>;
   }
   if (shots.length === 0) {
-    return (
-      <div className="p-2">
-        <p className="text-text-secondary text-sm">Sin capturas para este run.</p>
-        <p className="text-text-gray text-xs mt-1">
-          El daemon sube un screenshot por cada página visitada. Aparecen acá cuando corre un run (requiere STEP_SHOTS activo).
-        </p>
-      </div>
-    );
+    return <p className="text-text-gray text-sm p-2">Sin capturas todavía.</p>;
   }
 
   return (

@@ -84,8 +84,15 @@ function drainQueue(orchestrator: Orchestrator): void {
   }
 }
 
+// Recording-time screenshots: capture the page on state-changing events so the
+// recording can be reviewed visually. JPEG + capped to keep payload sane;
+// failures (captureVisibleTab rate-limit, chrome:// pages) are swallowed.
+const SHOT_TYPES = new Set(["click", "navigate", "select"]);
+const SHOT_CAP = 60;
+
 export class Orchestrator {
   eventBuffer: ActionEvent[] = [];
+  private _recordingShots: { stepIndex: number; dataUrl: string }[] = [];
   private _isRecording = false;
   private _recordingName = "";
   private _recordingGoal = "";
@@ -196,9 +203,20 @@ export class Orchestrator {
     }
   }
 
+  private async captureRecordingShot(): Promise<string | null> {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!tab?.windowId) return null;
+      return await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 55 });
+    } catch {
+      return null;
+    }
+  }
+
   async startRecording(): Promise<void> {
     this._isRecording = true;
     this.eventBuffer = [];
+    this._recordingShots = [];
     this._recordingName = "";
     this._pendingSave = null;
     await this.persist();
@@ -231,6 +249,23 @@ export class Orchestrator {
     try {
       const result = await apiClient.recordWorkflow(name, targetUrl, events, goal);
       log.log(`Workflow recorded: ${result.id} (${result.step_count} steps)`);
+      // Upload recording screenshots as artifacts keyed by workflow id (run_id
+      // has no FK). Fire-and-forget so the stop button returns immediately.
+      const shots = this._recordingShots;
+      this._recordingShots = [];
+      if (shots.length > 0) {
+        void (async () => {
+          let ok = 0;
+          for (const s of shots) {
+            try {
+              const blob = await (await fetch(s.dataUrl)).blob();
+              await apiClient.uploadArtifact(result.id, s.stepIndex, "recording_capture", blob, `step${String(s.stepIndex).padStart(2, "0")}.jpg`);
+              ok++;
+            } catch (e) { log.error("recording shot upload failed", e); }
+          }
+          log.log(`Uploaded ${ok}/${shots.length} recording screenshots`);
+        })();
+      }
       this._pendingSave = null;
       await this._clearStorage();
       this.broadcastState();
@@ -260,6 +295,16 @@ export class Orchestrator {
     this.eventBuffer.push(event);
     if (this.eventBuffer.length > 1000) {
       this.eventBuffer.splice(0, this.eventBuffer.length - 1000);
+    }
+    // Fire-and-forget a screenshot for state-changing events (don't block or
+    // reorder recording). Uploaded in stopRecording once we have a workflow id.
+    if (this._isRecording && SHOT_TYPES.has(event.event_type) && this._recordingShots.length < SHOT_CAP) {
+      const stepIndex = this.eventBuffer.length - 1;
+      void this.captureRecordingShot().then((dataUrl) => {
+        if (dataUrl && this._recordingShots.length < SHOT_CAP) {
+          this._recordingShots.push({ stepIndex, dataUrl });
+        }
+      });
     }
     this.broadcastState();
     await this.persist();

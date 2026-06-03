@@ -82,6 +82,20 @@ export class ApiClient {
     );
   }
 
+  // Upload a binary artifact (e.g. a recording-time screenshot). Reuses the
+  // run-scoped artifact endpoint with run_id = workflow_id (run_id has no FK),
+  // so recording captures live alongside the workflow with zero schema changes.
+  async uploadArtifact(runId: string, stepIndex: number, artifactType: string, blob: Blob, filename: string): Promise<void> {
+    const { apiBase, apiKey } = await getConfig();
+    const fd = new FormData();
+    fd.append("file", blob, filename);
+    const url = `${apiBase}/runs/${encodeURIComponent(runId)}/artifacts?step_index=${stepIndex}&artifact_type=${encodeURIComponent(artifactType)}`;
+    const response = await fetch(url, { method: "POST", headers: { "X-API-Key": apiKey }, body: fd });
+    if (!response.ok) {
+      throw new Error(`API POST artifacts: ${response.status} ${await response.text()}`);
+    }
+  }
+
   async listWorkflows() {
     return this.request<Array<{ id: string; name: string; status: string; execution_mode?: string }>>("GET", "/workflows");
   }
