@@ -320,16 +320,26 @@ export default function WorkflowDetailPage() {
     });
   };
 
+  // LinkedIn workflows use daemon-native verbs and only run via the webhook;
+  // the generic "Run" path (daemon + optional browser session) is for everything else.
+  const isLinkedInWorkflow =
+    (data?.target_url || "").includes("linkedin.com") ||
+    (data?.steps || []).some((s) => (s.action_type || "").startsWith("linkedin_"));
+
   const startWorkflowRun = async (
     params: Record<string, string> = {},
     goal?: string,
     failureMessage = "Failed to start run",
+    loadSession?: boolean,
   ) => {
     if (!workflowId) return;
     setRunError(null);
     setRunning(true);
     setShowGoalModal(false);
     setShowParamModal(false);
+    // Generic (non-LinkedIn) workflows run on the DAEMON (one engine); LinkedIn
+    // ones keep the legacy in-browser path (and normally fire via the webhook).
+    const executionTarget: "browser" | "daemon" = isLinkedInWorkflow ? "browser" : "daemon";
     // Open a placeholder run window immediately. Once the extension reports
     // the run id, we point the same window at /runs/<id>. This is what keeps
     // the run page open for the whole duration of the workflow.
@@ -342,12 +352,20 @@ export default function WorkflowDetailPage() {
         workflowId: string;
         params?: Record<string, string>;
         goal?: string;
+        executionTarget?: "browser" | "daemon";
+        loadSession?: boolean;
+        targetUrl?: string;
       } = { type: "DASHBOARD_RUN_WORKFLOW", workflowId };
       if (Object.keys(params).length > 0) {
         message.params = params;
       }
       if (goal) {
         message.goal = goal;
+      }
+      if (executionTarget === "daemon") {
+        message.executionTarget = "daemon";
+        message.loadSession = !!loadSession;
+        if (data?.target_url) message.targetUrl = data.target_url;
       }
       window.postMessage(
         message,
@@ -468,8 +486,8 @@ export default function WorkflowDetailPage() {
     setAnalyzing(false);
   };
 
-  const handleRunWithParams = async (params: Record<string, string>, goal?: string) => {
-    await startWorkflowRun(params, goal, "Failed to start parameterized run");
+  const handleRunWithParams = async (params: Record<string, string>, goal?: string, loadSession?: boolean) => {
+    await startWorkflowRun(params, goal, "Failed to start parameterized run", loadSession);
   };
 
   const previewConnectorBinding = async (draft: ConnectorBindingDraft) => {
@@ -1387,6 +1405,7 @@ export default function WorkflowDetailPage() {
           parameterUsageLabels={parameterUsageMap}
           bindingPreviews={activeBindingPreviews}
           includeGoal
+          showSessionToggle={!isLinkedInWorkflow}
           title="Run with Parameters"
           description="Configure runtime parameters before executing this workflow. Connector-backed values will be injected into the recorded steps shown for each parameter."
           goalLabel="Execution goal (optional)"
@@ -1396,11 +1415,12 @@ export default function WorkflowDetailPage() {
       {showGoalModal && (
         <RunParameterModal
           parameters={[]}
-          onRun={(_, goal) => startWorkflowRun({}, goal)}
+          onRun={(_, goal, loadSession) => startWorkflowRun({}, goal, "Failed to start run", loadSession)}
           onSkip={() => startWorkflowRun()}
           onCancel={() => setShowGoalModal(false)}
           isRunning={running}
           includeGoal
+          showSessionToggle={!isLinkedInWorkflow}
           title="Run With Goal"
           description="Optionally set a goal for this run, or run the workflow exactly as recorded."
           goalLabel="What should this run accomplish?"

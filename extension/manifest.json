@@ -10,7 +10,8 @@
     "scripting",
     "sidePanel",
     "alarms",
-    "debugger"
+    "debugger",
+    "cookies"
   ],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {

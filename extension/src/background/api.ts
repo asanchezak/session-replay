@@ -394,6 +394,7 @@ export class ApiClient {
     params: Record<string, unknown>,
     executionGoal?: string,
     executionTarget: "browser" | "daemon" = "browser",
+    executionOptions?: Record<string, unknown>,
   ) {
     return this.request<{
       id: string;
@@ -406,6 +407,7 @@ export class ApiClient {
       runtime_params: params,
       execution_goal: executionGoal || null,
       execution_target: executionTarget,
+      execution_options: executionOptions || {},
     });
   }
 

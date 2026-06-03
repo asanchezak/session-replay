@@ -2677,14 +2677,64 @@ async function executeAgentRun(
 // Create a run tagged for the unattended daemon and hand off — do NOT run the
 // agent loop here (the daemon polls it up and drives it via the run protocol).
 // The caller shows status by polling GET /v1/runs/{id} + links to the dashboard.
+// Map a chrome.cookies sameSite value to the Playwright cookie shape the daemon
+// injects via context.addCookies. "None" requires secure:true or Playwright rejects it.
+function mapSameSite(s?: string): "Strict" | "Lax" | "None" {
+  if (s === "strict") return "Strict";
+  if (s === "no_restriction") return "None";
+  return "Lax"; // "lax" | "unspecified" | undefined
+}
+
+// Read the user's CURRENT browser cookies for the workflow's target site so a
+// daemon run can be authenticated as the user ("Load browser session" toggle).
+// Requires the "cookies" manifest permission + host permission for the domain.
+async function readSessionCookies(targetUrl?: string): Promise<Array<Record<string, unknown>>> {
+  if (!targetUrl) return [];
+  try {
+    const raw = await chrome.cookies.getAll({ url: targetUrl });
+    return raw.map((c) => {
+      const sameSite = mapSameSite(c.sameSite);
+      return {
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path || "/",
+        httpOnly: !!c.httpOnly,
+        secure: sameSite === "None" ? true : !!c.secure,
+        sameSite,
+        expires: typeof c.expirationDate === "number" ? Math.floor(c.expirationDate) : -1,
+      };
+    });
+  } catch (e) {
+    log.error("[Daemon] readSessionCookies failed", e);
+    return [];
+  }
+}
+
 async function enqueueDaemonRun(
   workflowId: string,
   goal?: string,
   runtimeParams?: Record<string, unknown>,
+  loadSession?: boolean,
+  targetUrl?: string,
 ): Promise<{ id: string; status: string; total_steps: number }> {
-  const run = await apiClient.runWithParams(workflowId, runtimeParams || {}, goal, "daemon");
+  // Read cookies BEFORE creating the run; the run is created QUEUED, then we
+  // upload the cookies as a session_cookies artifact the daemon consumes once.
+  const cookies = loadSession ? await readSessionCookies(targetUrl) : [];
+  const run = await apiClient.runWithParams(
+    workflowId, runtimeParams || {}, goal, "daemon", { load_session: !!loadSession },
+  );
   log.log(`[Daemon] Enqueued run ${run.id} for workflow ${workflowId} — daemon will drive it`);
-  return { id: run.id, status: run.status || "running", total_steps: run.total_steps || 0 };
+  if (loadSession && cookies.length && run.id) {
+    try {
+      const blob = new Blob([JSON.stringify(cookies)], { type: "application/json" });
+      await apiClient.uploadArtifact(run.id, 0, "session_cookies", blob, "cookies.json");
+      log.log(`[Daemon] uploaded ${cookies.length} session cookies for run ${run.id}`);
+    } catch (e) {
+      log.error("[Daemon] session cookie upload failed", e);
+    }
+  }
+  return { id: run.id, status: run.status || "queued", total_steps: run.total_steps || 0 };
 }
 
 registerServiceWorkerListeners({

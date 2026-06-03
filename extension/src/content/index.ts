@@ -112,11 +112,20 @@ window.addEventListener("message", (event: MessageEvent) => {
       ? data.params as Record<string, unknown>
       : undefined;
     if (!workflowId) return;
-    sendDebugLog("log", `Dashboard triggered run for workflow ${workflowId}`);
-    chrome.runtime.sendMessage({ type: "RUN_WORKFLOW", workflowId, goal, params })
+    // "daemon" target → the unattended daemon drives it (one engine), optionally
+    // loading the user's browser session. Otherwise the in-browser agent loop runs.
+    const onDaemon = data.executionTarget === "daemon";
+    const loadSession = data.loadSession === true;
+    const targetUrl = typeof data.targetUrl === "string" ? data.targetUrl : undefined;
+    sendDebugLog("log", `Dashboard triggered ${onDaemon ? "daemon" : "browser"} run for workflow ${workflowId}`);
+    const outgoing = onDaemon
+      ? { type: "RUN_ON_DAEMON", workflowId, goal, params, loadSession, targetUrl }
+      : { type: "RUN_WORKFLOW", workflowId, goal, params };
+    chrome.runtime.sendMessage(outgoing)
       .then((response) => {
         const resp = response as { type: string; run?: { id: string }; error?: string };
-        if (resp.type === "RUN_STARTED" && resp.run?.id) {
+        // browser path → RUN_STARTED; daemon path → DAEMON_RUN_QUEUED. Both carry run.id.
+        if ((resp.type === "RUN_STARTED" || resp.type === "DAEMON_RUN_QUEUED") && resp.run?.id) {
           window.postMessage(
             { type: "DASHBOARD_RUN_STARTED", runId: resp.run.id },
             "*",

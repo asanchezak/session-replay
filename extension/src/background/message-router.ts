@@ -28,6 +28,8 @@ type RouterDeps = {
     workflowId: string,
     goal?: string,
     runtimeParams?: Record<string, unknown>,
+    loadSession?: boolean,
+    targetUrl?: string,
   ) => Promise<RunHandle>;
   executeStepOnTab: (
     step: BackgroundToContentMessage["step"],
@@ -148,8 +150,10 @@ export function registerServiceWorkerListeners(deps: RouterDeps): void {
             workflowId: string;
             goal?: string;
             params?: Record<string, unknown>;
+            loadSession?: boolean;
+            targetUrl?: string;
           };
-          deps.enqueueDaemonRun(msg.workflowId, msg.goal, msg.params)
+          deps.enqueueDaemonRun(msg.workflowId, msg.goal, msg.params, msg.loadSession, msg.targetUrl)
             .then((runHandle) => sendResponse({ type: "DAEMON_RUN_QUEUED", run: runHandle }))
             .catch((err: unknown) => {
               log.error("Failed to enqueue daemon run:", err);

@@ -297,6 +297,29 @@ async function uploadFlowManifest(runId, manifest) {
   } catch (e) { dbg(`flow manifest upload failed: ${e.message || e}`); }
 }
 
+// Fetch the user's browser cookies (uploaded by the extension as a session_cookies
+// artifact when "Load browser session" is ON) and DELETE the artifact immediately
+// so the session tokens live only seconds in the backend. Retries briefly because
+// the daemon may claim the queued run a beat before the extension's upload lands.
+async function loadAndConsumeSessionCookies(runId) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const list = await fetchJson(`${BACKEND}/v1/runs/${runId}/artifacts`);
+      const arr = Array.isArray(list) ? list : (list.items || []);
+      const meta = arr.find((a) => a.artifact_type === "session_cookies");
+      if (meta) {
+        const res = await fetch(`${BACKEND}/v1/artifacts/${meta.id}`, { headers: { "X-API-Key": API_KEY } });
+        const cookies = await res.json();
+        await fetch(`${BACKEND}/v1/artifacts/${meta.id}`, { method: "DELETE", headers: { "X-API-Key": API_KEY } }).catch(() => {});
+        return Array.isArray(cookies) ? cookies : [];
+      }
+    } catch (e) { dbg(`session cookies fetch failed: ${e.message || e}`); }
+    await sleep(1000);
+  }
+  dbg("[SESSION] no session_cookies artifact found — running unauthenticated");
+  return [];
+}
+
 async function safeGoto(page, url, label) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   recordPageLoad();
@@ -1140,6 +1163,14 @@ async function driveRun(run) {
   // steps-0-5 preamble. The DAEMON_GENERIC_PREAMBLE env flag stays a global
   // force-on override. Missing mode → falsy → hardcoded (safe, matches today).
   const useGeneric = run.origin?.execution_mode === "generic" || GENERIC_PREAMBLE;
+  // A user-initiated generic (non-LinkedIn) run from the dashboard "Run": it runs
+  // in a CLEAN browser context (not the LinkedIn profile) and may load the user's
+  // browser session via injected cookies (execution_options.load_session).
+  const _ek = run.origin?.event_kind;
+  const userGenericRun = run.origin?.execution_target === "daemon"
+    && run.origin?.execution_mode === "generic"
+    && _ek !== "new_job_position" && _ek !== "linkedin_lead_search";
+  const loadSession = !!run.origin?.execution_options?.load_session;
   let profileExtractCount = 0;
   if (maxCandidates !== null || isTestRun) {
     console.log(`[daemon] run ${runId} options: mode=${execOpts.mode || "live"} max_candidates=${maxCandidates ?? "∞"}`);
@@ -1153,7 +1184,11 @@ async function driveRun(run) {
   // daemon does at each step (the generic path drives a real plan, so skip it).
   if (!useGeneric) await uploadFlowManifest(runId, buildFlowManifest(isLeadRun, jobTitle)).catch(() => {});
 
-  const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+  // LinkedIn runs reuse the staged, logged-in profile (PROFILE_DIR). A user
+  // generic run gets a CLEAN, ephemeral context ("") so it doesn't touch the
+  // LinkedIn session; its auth (if any) comes from injected browser cookies.
+  const contextDir = userGenericRun ? "" : PROFILE_DIR;
+  const ctx = await chromium.launchPersistentContext(contextDir, {
     channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
     args: ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", "--disable-features=ChromeWhatsNewUI", "--profile-directory=Default"],
     ignoreDefaultArgs: ["--enable-automation"],
@@ -1164,6 +1199,18 @@ async function driveRun(run) {
   // fingerprint stealth + circuit breaker + budget must never be disableable.
   // Do not "wire up the flag here for consistency".
   await ctx.addInitScript(STEALTH_INIT);
+
+  // "Load browser session" (dashboard toggle): inject the user's cookies (read by
+  // the extension, shipped as a session_cookies artifact) so the generic run is
+  // authenticated as the user. Consume-once: the daemon deletes the artifact right
+  // after reading so the session tokens are short-lived in the backend.
+  if (loadSession) {
+    const cookies = await loadAndConsumeSessionCookies(runId);
+    if (cookies.length) {
+      try { await ctx.addCookies(cookies); dbg(`[SESSION] injected ${cookies.length} cookies`); }
+      catch (e) { dbg(`addCookies failed: ${e.message || e}`); }
+    }
+  }
 
   // Run-scoped RNG for the opening sequence + a pool of seen profile URLs for
   // noise decoys + the last search URL for search_bounce noise.
@@ -1562,31 +1609,44 @@ while (true) {
       ...circuitInfo(),
     });
 
-    // Account-wide gates — skip driving (keep heart-beating) when any holds.
-    if (circuitOpen()) {
+    // Pick the pending run first so a user-initiated GENERIC daemon run (dashboard
+    // "Run") can bypass the account-wide anti-bot gates — circuit / working-hours /
+    // cooldown / budget exist to protect the shared LinkedIn account, NOT generic
+    // non-LinkedIn runs the user explicitly launched.
+    const run = await findPendingRun();
+    const o = (run && run.origin) || {};
+    const isUserGeneric = !!run
+      && o.execution_target === "daemon"
+      && o.execution_mode === "generic"
+      && o.event_kind !== "new_job_position"
+      && o.event_kind !== "linkedin_lead_search";
+
+    if (!run) {
+      // nothing pending — keep heart-beating
+    } else if (!isUserGeneric && circuitOpen()) {
       const until = new Date(account.circuit().open_until).toISOString();
       skipLog(`circuit OPEN until ${until} — not driving`);
-    } else if (!isWithinWorkingHours()) {
+    } else if (!isUserGeneric && !isWithinWorkingHours()) {
       skipLog(`outside working hours (${WORK_START_HOUR}:00-${WORK_END_HOUR}:00, days ${WORK_DAYS.join(",")}) — not driving`);
-    } else if (Date.now() < nextRunNotBefore) {
+    } else if (!isUserGeneric && Date.now() < nextRunNotBefore) {
       skipLog(`inter-run cooldown until ${new Date(nextRunNotBefore).toISOString()} — not driving`);
     } else {
-      const run = await findPendingRun();
-      if (run) {
-        const reason = budgetExhaustedReason();
-        if (reason) {
-          skipLog(`budget exhausted (${reason}) — deferring run ${run.id} to next window`);
-        } else if (!(await claimRun(run.id))) {
-          // Couldn't claim (lost race / not in QUEUED). No drive, no cooldown —
-          // just poll again and let the next pass pick a fresh run.
-        } else {
-          lastSkipLog = "";
-          try {
-            await driveRun(run);
-          } catch (err) {
-            console.error(`[daemon] driveRun ${run.id} failed:`, err.message);
-          }
-          // Inter-run cooldown with jitter so runs don't fire back-to-back.
+      const reason = isUserGeneric ? null : budgetExhaustedReason();
+      if (reason) {
+        skipLog(`budget exhausted (${reason}) — deferring run ${run.id} to next window`);
+      } else if (!(await claimRun(run.id))) {
+        // Couldn't claim (lost race / not in QUEUED). No drive, no cooldown —
+        // just poll again and let the next pass pick a fresh run.
+      } else {
+        lastSkipLog = "";
+        try {
+          await driveRun(run);
+        } catch (err) {
+          console.error(`[daemon] driveRun ${run.id} failed:`, err.message);
+        }
+        // Inter-run cooldown with jitter so LinkedIn runs don't fire back-to-back.
+        // User-initiated generic runs are exempt (no robotic-cadence concern).
+        if (!isUserGeneric) {
           nextRunNotBefore = Date.now() + jitter(BASE_COOLDOWN_MS, COOLDOWN_JITTER_MS);
           console.log(`[daemon] next run not before ${new Date(nextRunNotBefore).toISOString()}`);
         }

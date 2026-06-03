@@ -1010,6 +1010,10 @@ class RunWithParamsRequest(BaseModel):
     # it via the agent protocol. "daemon": tag the run so the unattended daemon
     # picks it up and drives it; the caller must NOT also run the agent loop.
     execution_target: Literal["browser", "daemon"] = Field(default="browser")
+    # Per-run options for daemon runs (e.g. {"load_session": bool, "cookies": [...]}).
+    # Stamped into origin.execution_options; cookies are redacted from API
+    # responses and cleared by the daemon after injection (see runs.py).
+    execution_options: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/{workflow_id}/run-with-params")
@@ -1071,11 +1075,15 @@ async def run_workflow_with_parameters(
             run.origin = {
                 "execution_target": "daemon",
                 "execution_mode": workflow.execution_mode,
-                "execution_options": {},
+                "execution_options": req.execution_options or {},
             }
             flag_modified(run, "origin")
             await db.flush()
-        run = await svc.transition(str(run.id), RunStatus.RUNNING)
+            # Leave the run QUEUED — the daemon claims queued runs and transitions
+            # them itself. (Transitioning to RUNNING here is the BROWSER path,
+            # where the caller drives immediately.)
+        else:
+            run = await svc.transition(str(run.id), RunStatus.RUNNING)
     except NotFoundError:
         return _error("NOT_FOUND", "Workflow not found", status=404)
 

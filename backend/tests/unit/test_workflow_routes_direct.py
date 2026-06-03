@@ -513,18 +513,24 @@ async def test_execution_mode_exposed_and_defaults_generic(db_session):
 @pytest.mark.asyncio
 async def test_run_with_params_daemon_target_tags_origin(db_session):
     # execution_target="daemon" tags the run so the daemon picks it up: origin
-    # carries execution_target + execution_mode, and the run is RUNNING.
+    # carries execution_target + execution_mode, and the run stays QUEUED (the
+    # daemon only polls queued runs and claims/transitions them itself —
+    # transitioning to RUNNING here would hide it from the daemon).
     wf_id = await _active_wf_with_step(db_session)
     resp = await run_workflow_with_parameters(
         wf_id,
-        req=RunWithParamsRequest(runtime_params={}, execution_target="daemon"),
+        req=RunWithParamsRequest(
+            runtime_params={}, execution_target="daemon",
+            execution_options={"load_session": True},
+        ),
         db=db_session,
     )
-    assert resp["status"] == "running"
+    assert resp["status"] == "queued"
     assert resp["execution_target"] == "daemon"
     run = await db_session.get(ExecutionRun, uuid.UUID(resp["id"]))
     assert run.origin["execution_target"] == "daemon"
     assert run.origin["execution_mode"] == "generic"  # seeded workflow default
+    assert run.origin["execution_options"] == {"load_session": True}
 
 
 @pytest.mark.asyncio

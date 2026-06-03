@@ -12,8 +12,11 @@ interface Parameter {
 
 interface RunParameterModalProps {
   parameters: Parameter[];
-  onRun: (values: Record<string, string>, goal?: string) => void;
+  onRun: (values: Record<string, string>, goal?: string, loadSession?: boolean) => void;
   onCancel: () => void;
+  // When true, shows a "Cargar sesión del navegador" toggle (daemon Run path).
+  showSessionToggle?: boolean;
+  sessionToggleDefault?: boolean;
   isRunning?: boolean;
   prefilledValues?: Record<string, string>;
   parameterUsageLabels?: Record<string, string[]>;
@@ -44,6 +47,8 @@ export function RunParameterModal({
   parameterUsageLabels,
   bindingPreviews,
   includeGoal,
+  showSessionToggle,
+  sessionToggleDefault = false,
   goalLabel = "Execution goal",
   goalPlaceholder = 'e.g. "Extract the first 10 job descriptions from this search"',
   title = "Run with Parameters",
@@ -60,6 +65,7 @@ export function RunParameterModal({
     return initial;
   });
   const [goal, setGoal] = useState("");
+  const [loadSession, setLoadSession] = useState(sessionToggleDefault);
 
   useEffect(() => {
     if (!prefilledValues) return;
@@ -82,7 +88,7 @@ export function RunParameterModal({
 
   const handleSubmit = () => {
     const trimmedGoal = goal.trim();
-    onRun(values, trimmedGoal || undefined);
+    onRun(values, trimmedGoal || undefined, loadSession);
   };
   const headingId = "run-parameter-modal-title";
   const descriptionId = "run-parameter-modal-description";
@@ -171,6 +177,32 @@ export function RunParameterModal({
                     isRunning ? "opacity-60 cursor-not-allowed" : ""
                   }`}
                 />
+              </div>
+            )}
+            {showSessionToggle && (
+              <div className="flex items-start justify-between gap-3 rounded-lg border border-[#2D3148] bg-[#1F2330] p-3">
+                <div className="min-w-0">
+                  <div className="text-sm text-[#E8EAED] font-medium">Cargar sesión del navegador</div>
+                  <p className="text-xs text-[#9AA0B0] mt-0.5">
+                    Usa las cookies de tu navegador para autenticarte en el sitio. Si está apagado, corre limpio/anónimo.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={loadSession}
+                  onClick={() => setLoadSession((v) => !v)}
+                  disabled={isRunning}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                    loadSession ? "bg-[#6C5CE7]" : "bg-[#2D3148]"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      loadSession ? "translate-x-6" : "translate-x-1"
+                    }`}
+                  />
+                </button>
               </div>
             )}
           </div>
