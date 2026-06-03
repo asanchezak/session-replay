@@ -80,10 +80,13 @@ class OdooAdapter(BaseAdapter):
         limit: int = 100,
         offset: int = 0,
         fields: list[str] | None = None,
+        order: str | None = None,
     ) -> list[dict]:
         model = self._model_for(resource)
         domain = self._build_domain(filters)
-        return await self._client.search_read(model, domain, fields, limit=limit, offset=offset)
+        return await self._client.search_read(
+            model, domain, fields, limit=limit, offset=offset, order=order
+        )
 
     async def get(self, resource: str, id: str) -> dict | None:
         model = self._model_for(resource)

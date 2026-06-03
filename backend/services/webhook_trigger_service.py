@@ -349,7 +349,11 @@ class WebhookTriggerService:
         }
         flag_modified(run, "origin")
         await self.session.flush()
-        run = await exec_svc.transition(str(run.id), RunStatus.RUNNING)
+        # Leave the run in QUEUED (its birth state from create_run). The single
+        # daemon claims it (QUEUED→RUNNING via POST /runs/{id}/start) when it is
+        # ready to drive. Resting in QUEUED is what lets a backlog built up while
+        # the daemon host was offline survive: the daemon's pickup is no longer
+        # gated on a 30-min "freshness" window, and FIFO ordering is well-defined.
         return str(run.id)
 
     async def _find_active_run(self, workflow_id: str) -> ExecutionRun | None:
@@ -379,6 +383,27 @@ class WebhookTriggerService:
         )
         for run in result.scalars().all():
             if (run.origin or {}).get("idempotency_key") == idempotency_key:
+                return run
+        return None
+
+    async def _find_run_by_job_id(self, job_id: str) -> ExecutionRun | None:
+        """Most recent run whose origin job_payload carries this job_id, if any.
+
+        The reconciler uses this to avoid enqueuing a second run for a position
+        that the webhook (or a prior reconcile pass) already handled — one
+        position → one flow. Scans recent runs in Python because origin is a JSON
+        column and reconcile volume is low (a handful of positions per day)."""
+        job_id = str(job_id or "")
+        if not job_id:
+            return None
+        result = await self.session.execute(
+            select(ExecutionRun)
+            .order_by(ExecutionRun.created_at.desc())
+            .limit(200)
+        )
+        for run in result.scalars().all():
+            payload = (run.origin or {}).get("job_payload") or {}
+            if str(payload.get("job_id") or "") == job_id:
                 return run
         return None
 

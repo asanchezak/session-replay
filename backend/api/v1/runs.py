@@ -340,6 +340,29 @@ async def get_run_events(
     ]
 
 
+@router.post("/{run_id}/start")
+async def start_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Atomic claim: transition a QUEUED run to RUNNING.
+
+    The single LinkedIn daemon calls this to claim the oldest queued run before
+    driving it. `transition` takes `SELECT … FOR UPDATE` on the row, so if two
+    competitors race only one wins; the loser gets 409 (the run is no longer
+    QUEUED) and moves on. Webhook/reconciler-created runs rest in QUEUED until
+    claimed here.
+    """
+    svc = ExecutionService(db)
+    try:
+        run = await svc.transition(run_id, RunStatus.RUNNING)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+    return {"id": str(run.id), "status": run.status}
+
+
 @router.post("/{run_id}/pause")
 async def pause_run(
     run_id: str,

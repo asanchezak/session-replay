@@ -130,6 +130,32 @@ class ConnectorForumService:
         finally:
             await adapter.dispose()
 
+    async def fetch_max_job_id(self, connector: ConnectorConfig) -> int:
+        """Highest hr.job id currently in Odoo (0 if none).
+
+        The reconciler captures this once as its activation watermark, so only
+        positions created AFTER install (id > watermark) are ever backfilled —
+        pre-existing positions never trigger a flow. hr.job ids are monotonic, so
+        the max id is a stable "everything up to here is historical" marker.
+
+        NOTE: this Odoo JSON-RPC client does not honor the `limit`/`order`
+        search_read kwargs (they never reach execute_kw), so we cannot ask Odoo
+        for "top 1 by id desc". We fetch every job id and take the max in Python.
+        This runs at most once per connector (first-sight baseline), so the full
+        id scan is acceptable."""
+        adapter = await self._build_adapter(connector)
+        try:
+            records = await adapter.list("job", filters={}, fields=["id"])
+            ids = []
+            for r in records:
+                try:
+                    ids.append(int(r.get("id") or 0))
+                except (TypeError, ValueError):
+                    continue
+            return max(ids) if ids else 0
+        finally:
+            await adapter.dispose()
+
     async def sync_profiles(
         self,
         connector: ConnectorConfig,

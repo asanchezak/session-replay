@@ -45,14 +45,20 @@ async def lifespan(_app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     # Recovery supervisor — autonomously unsticks paused runs (Phase 3)
     from services.recovery_supervisor import RecoverySupervisor
+    from services.reconcile_supervisor import ReconcileSupervisor
     from services.retention_supervisor import RetentionSupervisor
     RecoverySupervisor.start_supervisor(_app)
     RetentionSupervisor.start_supervisor(_app)
+    # Reconcile supervisor — backfills job-positions the Odoo webhook missed
+    # while the host/daemon was offline (safety net for the QUEUED backlog).
+    ReconcileSupervisor.start_supervisor(_app)
     yield
     if hasattr(_app.state, "recovery_supervisor"):
         _app.state.recovery_supervisor.cancel()
     if hasattr(_app.state, "retention_supervisor"):
         _app.state.retention_supervisor.cancel()
+    if getattr(_app.state, "reconcile_supervisor", None):
+        _app.state.reconcile_supervisor.cancel()
     await engine.dispose()
 
 

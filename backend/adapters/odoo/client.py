@@ -133,10 +133,13 @@ class OdooClient:
         fields: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
+        order: str | None = None,
     ) -> list[dict]:
         kwargs: dict[str, Any] = {"limit": limit, "offset": offset}
         if fields:
             kwargs["fields"] = fields
+        if order:
+            kwargs["order"] = order
         result = await self.call(model, "search_read", [domain], kwargs)
         if isinstance(result, list):
             return result
