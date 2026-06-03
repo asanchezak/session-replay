@@ -85,7 +85,20 @@ export function useApi() {
     return data as T;
   }, []);
 
-  return { request };
+  // Fetch a binary resource (e.g. a screenshot artifact, which is gated by the
+  // API key so a plain <img src> would 401) and return an object URL. Callers
+  // must URL.revokeObjectURL it on unmount to avoid leaking blobs.
+  const requestBlobUrl = useCallback(async (path: string, signal?: AbortSignal): Promise<string> => {
+    const response = await fetch(`${API_BASE}${path}`, {
+      headers: { "X-API-Key": API_KEY! },
+      signal,
+    });
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  }, []);
+
+  return { request, requestBlobUrl };
 }
 
 export function useApiData<T>() {

@@ -4,6 +4,7 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import InterventionModal from "../components/InterventionModal";
 import Banner from "../components/Banner";
+import StepScreenshots from "../components/StepScreenshots";
 import { useApi } from "../hooks/useApi";
 import { logger } from "../lib/logger";
 import { formatTime, formatTimeShort } from "../lib/formatTime";
@@ -352,7 +353,7 @@ export default function RunDetailPage() {
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
   const [showIntervention, setShowIntervention] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
-  const [activeTab, setActiveTab] = useState<"timeline" | "events" | "extraction">("timeline");
+  const [activeTab, setActiveTab] = useState<"timeline" | "events" | "extraction" | "screenshots">("timeline");
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasShownIntervention = useRef<string | null>(null);
@@ -864,8 +865,8 @@ export default function RunDetailPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-4 bg-bg-surface rounded-lg p-1 border border-border">
-        {(["timeline", "events", "extraction"] as const).map((tab) => {
-          const count = tab === "events" ? events.length : tab === "extraction" ? extractionEvents.length : displaySteps.length;
+        {(["timeline", "events", "extraction", "screenshots"] as const).map((tab) => {
+          const count = tab === "events" ? events.length : tab === "extraction" ? extractionEvents.length : tab === "screenshots" ? 0 : displaySteps.length;
           return (
             <button
               key={tab}
@@ -1328,6 +1329,13 @@ export default function RunDetailPage() {
               })}
             </div>
           )}
+        </Card>
+      )}
+
+      {/* Per-step screenshots (page captures uploaded by the daemon) */}
+      {activeTab === "screenshots" && (
+        <Card>
+          {runId && <StepScreenshots runId={runId} />}
         </Card>
       )}
 

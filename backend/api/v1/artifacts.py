@@ -71,6 +71,7 @@ async def list_artifacts(
             "mime_type": a.mime_type,
             "file_size": a.file_size,
             "created_at": a.created_at.isoformat(),
+            "metadata": a.meta_data or {},
         }
         for a in artifacts
     ]
