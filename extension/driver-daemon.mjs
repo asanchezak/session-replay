@@ -1217,6 +1217,9 @@ async function driveRun(run) {
     lastSearchUrl = await navigateToPeopleSearch(page, jobTitle, searchUrl, orand);
     recordSearch();
     await sleep(jitter(3000, 1500));
+    // search page 1 is reached by typing + the People filter (not safeGoto), so
+    // capture it explicitly — otherwise the gallery would skip the page-1 view.
+    await uploadStepShot(page, "search-p1").catch(() => {});
     await reportStepResult(runId, 2, "navigate");
 
     if (isLeadRun) {
