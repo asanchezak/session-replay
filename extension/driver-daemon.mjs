@@ -24,6 +24,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { defaultEmptyValue, readExtractShapes, readExtractStrategy, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
 import { STEALTH_INIT } from "./src/shared/stealth.mjs";
+import { OVERLAY_INIT } from "./src/shared/overlay-init.mjs";
 import {
   mulberry32,
   pickDwellMs,
@@ -241,10 +242,15 @@ async function uploadStepShot(page, label) {
   const seq = navSeq++;
   try {
     if (STEP_SHOT_SETTLE_MS > 0) await page.waitForTimeout(STEP_SHOT_SETTLE_MS).catch(() => {});
+    // Drop the "automation running" overlay so the capture shows the real page,
+    // not our dark backdrop; it auto-re-shows on the next document, and we also
+    // re-show it explicitly below.
+    await page.evaluate(() => window.__sr_overlay__ && window.__sr_overlay__.hide()).catch(() => {});
     const buf = await Promise.race([
       Promise.resolve().then(() => page.screenshot({ fullPage: false })).catch(() => null),
       new Promise((r) => setTimeout(() => r(null), 6000)),
     ]);
+    await page.evaluate(() => window.__sr_overlay__ && window.__sr_overlay__.show(0, 0, "", "Automatización en curso — no interactúes")).catch(() => {});
     if (!buf) return;
     const safeLabel = (label || "page").replace(/[^a-z0-9._:-]/gi, "_");
     const fd = new FormData();
@@ -1199,6 +1205,10 @@ async function driveRun(run) {
   // fingerprint stealth + circuit breaker + budget must never be disableable.
   // Do not "wire up the flag here for consistency".
   await ctx.addInitScript(STEALTH_INIT);
+  // "Automation running" overlay on every page (visual deterrent so a human
+  // watching the daemon's Chrome doesn't click). pointer-events:none → does not
+  // block the daemon's own clicks. Hidden during screenshots (uploadStepShot).
+  await ctx.addInitScript(OVERLAY_INIT);
 
   // "Load browser session" (dashboard toggle): inject the user's cookies (read by
   // the extension, shipped as a session_cookies artifact) so the generic run is

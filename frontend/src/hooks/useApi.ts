@@ -98,7 +98,24 @@ export function useApi() {
     return URL.createObjectURL(blob);
   }, []);
 
-  return { request, requestBlobUrl };
+  // Fire-and-forget POST that survives page unload (keepalive). Used to suspend a
+  // daemon run when its tracking window is closing — a normal fetch would be
+  // canceled by the browser on pagehide. sendBeacon can't set the X-API-Key
+  // header, so we use fetch keepalive instead.
+  const postKeepalive = useCallback((path: string, body?: unknown): void => {
+    try {
+      fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": API_KEY! },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      /* ignore — best effort on unload */
+    }
+  }, []);
+
+  return { request, requestBlobUrl, postKeepalive };
 }
 
 export function useApiData<T>() {

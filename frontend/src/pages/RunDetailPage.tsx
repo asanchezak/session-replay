@@ -193,6 +193,7 @@ interface RunDetail {
   origin?: {
     connector_id?: string;
     event_kind?: string;
+    execution_target?: string;
     trigger_id?: string;
     job_payload?: { job_id?: number; candidate_count?: number };
     execution_options?: {
@@ -338,7 +339,7 @@ function describeEventType(eventType: string): string {
 export default function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
-  const { request } = useApi();
+  const { request, postKeepalive } = useApi();
 
   const [run, setRun] = useState<RunDetail | null>(null);
   const [workflow, setWorkflow] = useState<WorkflowDetail | null>(null);
@@ -497,6 +498,29 @@ export default function RunDetailPage() {
       hasShownIntervention.current = null;
     }
   }, [run?.status, run?.id, run?.pause_reason]);
+
+  // Closing this run-tracking window should SUSPEND a daemon-driven run (the
+  // daemon runs in its own browser; this window is the only "is anyone watching?"
+  // signal). On pagehide we POST /tab-closed (keepalive so it survives unload) →
+  // backend moves the run to waiting_for_user(pause_reason="tab_closed") and the
+  // daemon, which re-checks run.status between steps, stops. We use a ref so the
+  // listener always sees the latest run, and ONLY pagehide (not visibilitychange,
+  // which also fires on a mere tab switch — we must not suspend on that).
+  const liveRunRef = useRef<{ target?: string; status?: string } | null>(null);
+  liveRunRef.current = run
+    ? { target: run.origin?.execution_target, status: run.status }
+    : null;
+  useEffect(() => {
+    if (!runId) return;
+    const onHide = () => {
+      const r = liveRunRef.current;
+      if (!r || r.target !== "daemon") return;
+      if (!["queued", "running", "recovering"].includes(r.status || "")) return;
+      postKeepalive(`/v1/runs/${runId}/tab-closed`);
+    };
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
+  }, [runId, postKeepalive]);
 
   // Auto-scroll the active step into view whenever it advances.
   useEffect(() => {
