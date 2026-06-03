@@ -50,6 +50,13 @@ const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || "5000");
+// Browser viewport. Default 1440x900 matches a real Mac display. On a
+// non-interactive Windows session the OS reports a small generic screen
+// (e.g. 1280x720), so a 1440x900 viewport would be LARGER than screen —
+// physically impossible on a real monitor and a fingerprint tell. Set
+// VIEWPORT_WIDTH/HEIGHT ≤ the session's screen there (with room for chrome).
+const VIEWPORT_WIDTH = Number(process.env.VIEWPORT_WIDTH || "1440");
+const VIEWPORT_HEIGHT = Number(process.env.VIEWPORT_HEIGHT || "900");
 // Run watchdog: if a single run takes longer than this, the daemon captures the
 // page state (URL/title/HTML/console/screenshot) and aborts cleanly instead of
 // hanging silently. Critical for remote hosts (Fernanda's Mac) where there is no
@@ -141,31 +148,54 @@ async function pauseRun(runId, reason, stepIndex) {
   }
 }
 
-// Only pick runs that started within the last STALE_RUN_AGE_MS — keeps the
-// daemon from chewing on a stale `running` row left over from a crashed prior
-// session. 30 min is generous; the workflow's worst-case wall-clock at
-// candidate_count=10 is ~20 min.
-const STALE_RUN_AGE_MS = 30 * 60_000;
+// Atomically claim a QUEUED run (QUEUED→RUNNING) before driving it. The backend
+// takes SELECT … FOR UPDATE on the row, so a lost race (run already claimed)
+// comes back 409 — return false and let the next poll pick a different run.
+// Returns true only when this daemon now owns the run.
+async function claimRun(runId) {
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/start`, { method: "POST" });
+    return true;
+  } catch (err) {
+    const msg = err.message || "";
+    if (msg.includes("→ 409")) {
+      console.log(`[daemon] claim lost for ${runId} (already claimed) — skipping`);
+    } else {
+      console.error(`[daemon] claim ${runId} failed:`, msg.slice(0, 200));
+    }
+    return false;
+  }
+}
 
+// Find the oldest QUEUED run to claim. Runs rest in QUEUED (set by the webhook
+// ingress + the reconcile supervisor) until this daemon claims them via
+// POST /runs/{id}/start (QUEUED→RUNNING). Resting in QUEUED is deliberate: a
+// backlog built up while this host was offline survives indefinitely (no
+// wall-clock "freshness" cutoff), and picking the oldest gives FIFO drain.
 async function findPendingRun() {
-  const list = await fetchJson(`${BACKEND}/v1/runs?limit=20&status=running`);
+  const list = await fetchJson(`${BACKEND}/v1/runs?limit=50&status=queued`);
   const items = Array.isArray(list) ? list : list.items || [];
-  const now = Date.now();
-  for (const r of items) {
-    if (!r.origin) continue;
-    // Pick up the webhook-driven LinkedIn flows (by event_kind) AND any run the
+  const watched = items.filter((r) => {
+    if (!r.origin) return false;
+    // Webhook/reconciler-driven LinkedIn flows (by event_kind) AND any run the
     // extension explicitly enqueued for the daemon (execution_target=="daemon").
-    const watched = r.origin.event_kind === "new_job_position"
+    const isWatched = r.origin.event_kind === "new_job_position"
       || r.origin.event_kind === "linkedin_lead_search"
       || r.origin.execution_target === "daemon";
-    if (!watched) continue;
-    if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) continue;
-    if (r.current_step_index > 0) continue;
-    const startedAt = r.started_at ? Date.parse(r.started_at) : (r.created_at ? Date.parse(r.created_at) : 0);
-    if (startedAt && now - startedAt > STALE_RUN_AGE_MS) continue;
-    return r;
-  }
-  return null;
+    if (!isWatched) return false;
+    if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) return false;
+    if (r.current_step_index > 0) return false;
+    return true;
+  });
+  if (watched.length === 0) return null;
+  // Oldest first (FIFO). The list endpoint orders created_at DESC, so sort
+  // ascending here and take the head.
+  watched.sort((a, b) => {
+    const ta = a.created_at ? Date.parse(a.created_at) : 0;
+    const tb = b.created_at ? Date.parse(b.created_at) : 0;
+    return ta - tb;
+  });
+  return watched[0];
 }
 
 // ── Blocker detection (detect on EVERY navigation; pause, don't plow) ────────
@@ -1048,7 +1078,7 @@ async function driveRun(run) {
   console.log(`\n[daemon] driving run ${runId} for "${jobTitle}"`);
 
   const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-    channel: "chrome", headless: false, viewport: { width: 1440, height: 900 },
+    channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
     args: ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", "--disable-features=ChromeWhatsNewUI", "--profile-directory=Default"],
     ignoreDefaultArgs: ["--enable-automation"],
   });
@@ -1467,6 +1497,9 @@ while (true) {
         const reason = budgetExhaustedReason();
         if (reason) {
           skipLog(`budget exhausted (${reason}) — deferring run ${run.id} to next window`);
+        } else if (!(await claimRun(run.id))) {
+          // Couldn't claim (lost race / not in QUEUED). No drive, no cooldown —
+          // just poll again and let the next pass pick a fresh run.
         } else {
           lastSkipLog = "";
           try {
