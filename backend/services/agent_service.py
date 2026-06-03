@@ -24,6 +24,7 @@ from core.config import settings
 from core.exceptions import NotFoundError
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from core.models.settings import AppSetting
 from core.models.workflow import WorkflowStep
 from core.state_machine import RunStatus, WorkflowStateMachine
 from core.utils import to_uuid
@@ -134,6 +135,10 @@ class AgentService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+        # Runtime "deterministic only" flag (no AI), cached per request. Combines
+        # the env setting with a DB-backed AppSetting so it can be toggled live
+        # from the dashboard without a restart. See _is_deterministic().
+        self._det_cache: bool | None = None
         self.execution = ExecutionService(session)
         self.audit = AuditService(session)
         self.healing = HealingService(session)
@@ -456,6 +461,29 @@ class AgentService:
                 stable = True
                 break
         return not stable
+
+    async def _is_deterministic(self) -> bool:
+        """Effective 'deterministic only' (no AI) flag for this request.
+
+        True when the env `deterministic_only` is set OR the runtime AppSetting
+        of the same name is truthy (toggleable live from the dashboard). Cached
+        per service instance (one request) to avoid repeated DB reads.
+        """
+        if settings.deterministic_only:
+            return True
+        if self._det_cache is not None:
+            return self._det_cache
+        val = False
+        try:
+            res = await self.session.execute(
+                select(AppSetting).where(AppSetting.key == "deterministic_only")
+            )
+            row = res.scalar_one_or_none()
+            val = bool(row.value) if row is not None else False
+        except Exception:
+            val = False
+        self._det_cache = val
+        return val
 
     def _should_consult_ai(
         self, run_id: str, step: dict[str, Any], _ctx: Any,
@@ -909,6 +937,29 @@ class AgentService:
         )
         if terminal:
             return terminal
+        # Deterministic mode: do NOT run AI recovery. Pause cleanly so a broken
+        # selector hands off to a human instead of burning the AI recovery budget
+        # (this is what produced the ai_unusable_output_budget_exhausted loop).
+        if await self._is_deterministic():
+            reason = (
+                f"Deterministic mode: step {step_index} "
+                f"({step.get('action_type', '')}) failed; AI recovery disabled"
+            )
+            self._clear_recovery_state(run_id)
+            await self._audit_decision(
+                run_id, "PAUSE", 0.99, reason,
+                pause_reason="deterministic_step_failed",
+                step_index=step_index, page_context=ctx,
+            )
+            with contextlib.suppress(Exception):
+                await self.execution.pause(run_id, reason=reason)
+            return PollResponse(
+                decision="PAUSE",
+                confidence=0.99,
+                reasoning=reason,
+                pause_reason="deterministic_step_failed",
+                requires_human=True,
+            )
         cycle_key = (run_id, step_index)
         cycle = _run_step_recovery_cycles.get(cycle_key, 0) + 1
         _run_step_recovery_cycles[cycle_key] = cycle
@@ -2241,6 +2292,11 @@ function doType(el) {
         screenshot_mime: str | None = None,
         screenshot_trigger: str | None = None,
     ) -> dict[str, Any] | None:
+        # Deterministic mode: never consult the AI. Returning None makes callers
+        # fall back to deterministic execution; recovery cycles are short-circuited
+        # to a clean pause in _autonomous_recovery_cycle (so no unusable-output loop).
+        if await self._is_deterministic():
+            return None
         if await self._is_run_terminal(str(run.id)):
             return None
         ai_api_key = settings.ai_api_key

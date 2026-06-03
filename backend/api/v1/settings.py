@@ -12,6 +12,10 @@ DEFAULT_SETTINGS = {
     "ai_confidence_threshold": 0.85,
     "auto_retry_limit": 3,
     "retention_days": 90,
+    # When true, runs execute purely deterministically (no AI per-step decisions
+    # and no AI recovery — a broken selector pauses for a human). Toggleable live
+    # from the dashboard; the env `deterministic_only` forces it on regardless.
+    "deterministic_only": False,
 }
 
 
@@ -19,6 +23,7 @@ class UpdateSettingsRequest(BaseModel):
     ai_confidence_threshold: float | None = None
     auto_retry_limit: int | None = None
     retention_days: int | None = None
+    deterministic_only: bool | None = None
 
 
 @router.get("")

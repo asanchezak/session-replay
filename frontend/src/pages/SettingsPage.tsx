@@ -26,6 +26,7 @@ export default function SettingsPage() {
   const [aiThreshold, setAiThreshold] = useState(85);
   const [autoRetry, setAutoRetry] = useState(3);
   const [retentionDays, setRetentionDays] = useState(90);
+  const [deterministic, setDeterministic] = useState(false);
   const [apiKey, setApiKey] = useState("sk-••••••••••••••••");
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -48,6 +49,9 @@ export default function SettingsPage() {
           if (typeof data.settings.retention_days === "number") {
             setRetentionDays(data.settings.retention_days);
           }
+          if (typeof data.settings.deterministic_only === "boolean") {
+            setDeterministic(data.settings.deterministic_only);
+          }
         }
       } catch {
         // use defaults
@@ -66,6 +70,7 @@ export default function SettingsPage() {
         ai_confidence_threshold: aiThreshold / 100,
         auto_retry_limit: autoRetry,
         retention_days: retentionDays,
+        deterministic_only: deterministic,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -138,6 +143,26 @@ export default function SettingsPage() {
                 <option key={n} value={n}>{n === 0 ? "No retries" : `${n} retries`}</option>
               ))}
             </select>
+          </SettingRow>
+          <SettingRow
+            label="Modo determinístico (sin IA)"
+            description="Cuando está ON, los runs se ejecutan sin IA por paso ni recuperación por IA: si un selector falla, el run pausa para un humano en vez de gastar el budget de IA. (No afecta al daemon de LinkedIn.)"
+          >
+            <button
+              type="button"
+              role="switch"
+              aria-checked={deterministic}
+              onClick={() => setDeterministic((v) => !v)}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                deterministic ? "bg-accent" : "bg-[#2D3148]"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  deterministic ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
           </SettingRow>
         </Card>
 
