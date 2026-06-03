@@ -226,10 +226,40 @@ async function assertNoBlocker(page, label) {
 
 // Single navigation helper: goto → record page-load → blocker check. Replaces
 // every raw page.goto in the daemon so a wall on ANY navigation pauses the run.
+// ── Per-step screenshots (QA visibility) ─────────────────────────────────────
+// The host runs Chrome in a non-interactive session with NO viewable desktop,
+// so screenshots posted to the backend are the only way to *see* what the bot
+// saw. Every navigation (safeGoto) uploads a PNG as an artifact, viewable in the
+// dashboard (GET /v1/runs/{id}/artifacts → /v1/artifacts/{id}). Non-fatal and
+// gated by STEP_SHOTS (default on); a screenshot must never break a live scrape.
+const STEP_SHOTS = process.env.STEP_SHOTS !== "0";
+const STEP_SHOT_SETTLE_MS = Number(process.env.STEP_SHOT_SETTLE_MS || "700");
+let navSeq = 0;
+function resetStepShots() { navSeq = 0; }
+async function uploadStepShot(page, label) {
+  if (!STEP_SHOTS || !drivingRunId) return;
+  const seq = navSeq++;
+  try {
+    if (STEP_SHOT_SETTLE_MS > 0) await page.waitForTimeout(STEP_SHOT_SETTLE_MS).catch(() => {});
+    const buf = await Promise.race([
+      Promise.resolve().then(() => page.screenshot({ fullPage: false })).catch(() => null),
+      new Promise((r) => setTimeout(() => r(null), 6000)),
+    ]);
+    if (!buf) return;
+    const safeLabel = (label || "page").replace(/[^a-z0-9._:-]/gi, "_");
+    const fd = new FormData();
+    fd.append("file", new Blob([buf], { type: "image/png" }), `${String(seq).padStart(2, "0")}-${safeLabel}.png`);
+    const url = `${BACKEND}/v1/runs/${drivingRunId}/artifacts?step_index=${seq}&artifact_type=page_capture`;
+    await fetch(url, { method: "POST", headers: { "X-API-Key": API_KEY }, body: fd });
+    dbg(`[STEP SHOT] seq=${seq} label="${label}" ${buf.length}B`);
+  } catch (e) { dbg(`step shot failed: ${e.message || e}`); }
+}
+
 async function safeGoto(page, url, label) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   recordPageLoad();
   await assertNoBlocker(page, label);
+  await uploadStepShot(page, label).catch(() => {});
 }
 
 // ── Per-account budget + circuit breaker (gitignored sidecar) ────────────────
@@ -1050,6 +1080,7 @@ async function captureDebug(page, runId, stepIndex, reason, consoleBuf = []) {
 async function driveRun(run) {
   const runId = run.id;
   drivingRunId = runId;
+  resetStepShots();
   // QA execution options (default: live, no cap). max_candidates caps how many
   // profiles a test run actually scrapes so a test doesn't burn the shared
   // budget; remaining candidate steps just advance the cursor without page loads.
