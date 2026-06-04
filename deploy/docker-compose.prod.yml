@@ -1,0 +1,62 @@
+name: sr
+
+# Single-box production stack: Postgres + backend + Caddy (auto-TLS reverse proxy).
+# Secrets come from deploy/.env.prod (gitignored) on the EC2 host.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      API_KEY: ${API_KEY}
+      SECRET_KEY: ${SECRET_KEY}
+      AI_API_KEY: ${AI_API_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      STORAGE_PROTOCOL: file
+      STORAGE_PATH: /data/artifacts
+      RECONCILER_ENABLED: "1"
+      LOG_LEVEL: INFO
+    volumes:
+      - artifacts:/data/artifacts
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  artifacts:
+  caddy_data:
+  caddy_config:

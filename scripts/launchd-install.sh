@@ -38,6 +38,13 @@ NODE_BIN="$(command -v node 2>/dev/null || true)"
 UVICORN_BIN="$REPO_ROOT/backend/.venv/bin/uvicorn"
 VITE_BIN="$REPO_ROOT/frontend/node_modules/.bin/vite"
 
+# Daemon runtime config (rendered into the daemon plist). Override via env to
+# point the local daemon at a remote backend and give it a routing identity:
+#   DAEMON_BACKEND=https://<host>/  DAEMON_API_KEY=<key>  DAEMON_OPERATOR_ID=andrey  make daemon-install
+DAEMON_BACKEND="${DAEMON_BACKEND:-http://localhost:8081}"
+DAEMON_API_KEY="${DAEMON_API_KEY:-dev-api-key-change-in-production}"
+DAEMON_OPERATOR_ID="${DAEMON_OPERATOR_ID:-}"
+
 install_one() {
     local svc="$1"
     local label="com.akurey.session-replay-$svc"
@@ -87,6 +94,9 @@ install_one() {
         -e "s#__NODE__#$NODE_BIN#g" \
         -e "s#__UVICORN__#$UVICORN_BIN#g" \
         -e "s#__VITE__#$VITE_BIN#g" \
+        -e "s#__BACKEND__#$DAEMON_BACKEND#g" \
+        -e "s#__API_KEY__#$DAEMON_API_KEY#g" \
+        -e "s#__OPERATOR_ID__#$DAEMON_OPERATOR_ID#g" \
         "$template" > "$target"
 
     if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then

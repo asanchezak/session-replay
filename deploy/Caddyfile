@@ -1,0 +1,6 @@
+# Auto-TLS (Let's Encrypt) for the stable hostname, reverse-proxy to the backend.
+# $DOMAIN is injected from deploy/.env.prod (e.g. 1-2-3-4.sslip.io).
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy backend:8081
+}

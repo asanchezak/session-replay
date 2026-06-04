@@ -72,6 +72,11 @@ const RUN_WATCHDOG_MS = Number(process.env.RUN_WATCHDOG_MS || "240000");
 const GENERIC_PREAMBLE = process.env.DAEMON_GENERIC_PREAMBLE === "1";
 const DEBUG_DIR = path.resolve(__dirname, ".debug");
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
+// Routing identity: this daemon only claims runs whose origin.target_operator
+// matches OPERATOR_ID. Each operator's machine sets its own (e.g. "andrey");
+// the LinkedIn host sets "fernanda". Empty = claims only untargeted... see
+// findPendingRun (we require an explicit match to avoid misrouting).
+const OPERATOR_ID = process.env.OPERATOR_ID || "";
 
 const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -130,7 +135,7 @@ async function fetchJson(url, init = {}) {
 async function postHeartbeat({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }) {
   await fetchJson(`${BACKEND}/v1/daemon/heartbeat`, {
     method: "POST",
-    body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }),
+    body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until, operator_id: OPERATOR_ID }),
   });
 }
 
@@ -190,6 +195,12 @@ async function findPendingRun() {
       || r.origin.event_kind === "linkedin_lead_search"
       || r.origin.execution_target === "daemon";
     if (!isWatched) return false;
+    // Operator routing: only claim runs targeted at THIS daemon's operator.
+    // LinkedIn flows are pinned to the LinkedIn operator (e.g. "fernanda");
+    // dashboard runs are pinned to the requesting operator. A mismatch (incl.
+    // an untargeted run when this daemon has an OPERATOR_ID) is left for the
+    // owning daemon to claim.
+    if ((r.origin.target_operator || "") !== OPERATOR_ID) return false;
     if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) return false;
     if (r.status === "queued" && r.current_step_index > 0) return false;
     return true;

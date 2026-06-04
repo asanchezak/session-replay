@@ -1,5 +1,5 @@
 import type { ActionEvent, RecordEventResponse, Workflow, AgentPollRequest, AgentPollResponse, AgentResultRequest, AgentResultResponse } from "../shared/types";
-import { API_BASE_URL } from "../shared/constants";
+import { API_BASE_URL, API_KEY } from "../shared/constants";
 
 const API_BASE_KEY = "apiBaseUrl";
 const API_KEY_KEY = "apiKey";
@@ -7,7 +7,7 @@ const AI_API_KEY_KEY = "aiApiKey";
 
 export const DEV_DEFAULTS = {
   apiBase: API_BASE_URL,
-  apiKey: "dev-api-key-change-in-production",
+  apiKey: API_KEY,
   aiApiKey: "",
 };
 
@@ -395,6 +395,7 @@ export class ApiClient {
     executionGoal?: string,
     executionTarget: "browser" | "daemon" = "browser",
     executionOptions?: Record<string, unknown>,
+    operatorId?: string,
   ) {
     return this.request<{
       id: string;
@@ -408,6 +409,7 @@ export class ApiClient {
       execution_goal: executionGoal || null,
       execution_target: executionTarget,
       execution_options: executionOptions || {},
+      operator_id: operatorId || null,
     });
   }
 

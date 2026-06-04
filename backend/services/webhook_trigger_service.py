@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from core.config import settings
 from core.models.connector import ConnectorConfig
 from core.models.run import ExecutionRun
 from core.models.webhook import WebhookTrigger
@@ -346,6 +347,13 @@ class WebhookTriggerService:
             "execution_options": execution_options or {},
             "idempotency_key": idempotency_key,
             "triggered_by": triggered_by,
+            # Routing: LinkedIn flows always run on the LinkedIn operator's daemon
+            # (Fernanda's host holds the session), regardless of who triggered them.
+            "target_operator": (
+                settings.linkedin_operator
+                if trigger.event_kind in SUPPORTED_EVENT_KINDS
+                else None
+            ),
         }
         flag_modified(run, "origin")
         await self.session.flush()

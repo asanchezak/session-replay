@@ -117,9 +117,12 @@ window.addEventListener("message", (event: MessageEvent) => {
     const onDaemon = data.executionTarget === "daemon";
     const loadSession = data.loadSession === true;
     const targetUrl = typeof data.targetUrl === "string" ? data.targetUrl : undefined;
+    // Routing: the operator id from the dashboard's localStorage setting. The run
+    // is targeted at this operator's daemon (LinkedIn flows override → Fernanda).
+    const operatorId = typeof data.operatorId === "string" ? data.operatorId : undefined;
     sendDebugLog("log", `Dashboard triggered ${onDaemon ? "daemon" : "browser"} run for workflow ${workflowId}`);
     const outgoing = onDaemon
-      ? { type: "RUN_ON_DAEMON", workflowId, goal, params, loadSession, targetUrl }
+      ? { type: "RUN_ON_DAEMON", workflowId, goal, params, loadSession, targetUrl, operatorId }
       : { type: "RUN_WORKFLOW", workflowId, goal, params };
     chrome.runtime.sendMessage(outgoing)
       .then((response) => {

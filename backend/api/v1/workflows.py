@@ -1014,6 +1014,11 @@ class RunWithParamsRequest(BaseModel):
     # Stamped into origin.execution_options; cookies are redacted from API
     # responses and cleared by the daemon after injection (see runs.py).
     execution_options: dict[str, Any] = Field(default_factory=dict)
+    # Routing: the requesting operator (from the dashboard's localStorage setting,
+    # relayed by the extension). The run is targeted at this operator's daemon —
+    # UNLESS the workflow is a LinkedIn flow, which is always pinned to the
+    # LinkedIn operator (settings.linkedin_operator).
+    operator_id: str | None = Field(default=None)
 
 
 @router.post("/{workflow_id}/run-with-params")
@@ -1072,10 +1077,29 @@ async def run_workflow_with_parameters(
             # Tag the run for the unattended daemon to pick up (it broadens its
             # poll filter to include origin.execution_target == "daemon"). The
             # extension does NOT run the agent loop for these — the daemon drives.
+            #
+            # Routing: pin LinkedIn workflows (those with an enabled LinkedIn
+            # webhook trigger) to the LinkedIn operator; otherwise target the
+            # requesting operator's own daemon. The daemon claims a run only if
+            # origin.target_operator == its OPERATOR_ID.
+            from core.config import settings
+            from services.webhook_trigger_service import (
+                SUPPORTED_EVENT_KINDS,
+                WebhookTriggerService,
+            )
+            wf_triggers = await WebhookTriggerService(db).list_triggers(workflow_id=workflow_id)
+            is_linkedin_workflow = any(
+                t.enabled and t.event_kind in SUPPORTED_EVENT_KINDS for t in wf_triggers
+            )
+            target_operator = (
+                settings.linkedin_operator if is_linkedin_workflow else (req.operator_id or None)
+            )
             run.origin = {
                 "execution_target": "daemon",
                 "execution_mode": workflow.execution_mode,
                 "execution_options": req.execution_options or {},
+                "operator_id": req.operator_id or None,
+                "target_operator": target_operator,
             }
             flag_modified(run, "origin")
             await db.flush()

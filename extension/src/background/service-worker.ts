@@ -2717,12 +2717,13 @@ async function enqueueDaemonRun(
   runtimeParams?: Record<string, unknown>,
   loadSession?: boolean,
   targetUrl?: string,
+  operatorId?: string,
 ): Promise<{ id: string; status: string; total_steps: number }> {
   // Read cookies BEFORE creating the run; the run is created QUEUED, then we
   // upload the cookies as a session_cookies artifact the daemon consumes once.
   const cookies = loadSession ? await readSessionCookies(targetUrl) : [];
   const run = await apiClient.runWithParams(
-    workflowId, runtimeParams || {}, goal, "daemon", { load_session: !!loadSession },
+    workflowId, runtimeParams || {}, goal, "daemon", { load_session: !!loadSession }, operatorId,
   );
   log.log(`[Daemon] Enqueued run ${run.id} for workflow ${workflowId} — daemon will drive it`);
   if (loadSession && cookies.length && run.id) {

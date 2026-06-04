@@ -22,6 +22,9 @@ class DaemonHeartbeatRequest(BaseModel):
     circuit_open: bool | None = None
     circuit_reason: str | None = None
     cooldown_until: str | None = None
+    # Which operator owns this daemon (routing key). The dashboard shows it so an
+    # operator can confirm THEIR daemon is up before "Run with daemon".
+    operator_id: str | None = None
 
 
 def reset_heartbeat_state() -> None:
@@ -41,6 +44,7 @@ async def heartbeat(payload: DaemonHeartbeatRequest):
         "circuit_open": payload.circuit_open,
         "circuit_reason": payload.circuit_reason,
         "cooldown_until": payload.cooldown_until,
+        "operator_id": payload.operator_id,
         "last_seen_ts": time.time(),
     }
     return {"ok": True}
@@ -58,6 +62,7 @@ async def status():
         age_seconds = max(0.0, now - float(state["last_seen_ts"]))
         workers.append({
             "worker_id": state["worker_id"],
+            "operator_id": state.get("operator_id"),
             "polling": bool(state["polling"]),
             "driving_run_id": state["driving_run_id"],
             "circuit_open": state.get("circuit_open"),

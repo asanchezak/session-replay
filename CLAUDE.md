@@ -25,6 +25,61 @@ hard way and not obvious from reading code.
   real host, the Windows runbook supersedes it. Setup scripts:
   `scripts/setup-windows-host.ps1` + `scripts/elevate-bot-windows.ps1`.
 
+## Deploying changes — AWS is the source of truth (keep ALL parts in sync)
+
+The backend runs on **AWS** (single EC2 + docker-compose), and everything reaches it
+at the stable URL **`https://52-5-45-84.sslip.io`**. Infra IDs / secrets / teardown
+are in memory `project_aws_backend_deploy`.
+
+**Standing rule: after ANY change, redeploy so every part stays up to date** — the
+backend on AWS AND the clients that point at it (extension, daemon on Fernanda's host,
+frontend). Don't leave the box running stale code.
+
+Per change:
+- **Backend (`backend/` or `deploy/`)** → `./deploy/redeploy.sh` (one command: packages
+  source, ships to the EC2, rebuilds the image, restarts the `backend` container, checks
+  health). Manual equivalent: `scp` source to `/opt/sr/backend`, then on the box
+  `cd /opt/sr/deploy && sudo docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build backend`.
+- **Extension (`extension/`)** → rebuild pointed at AWS, then reload on each browser host:
+  `VITE_API_BASE_URL=https://52-5-45-84.sslip.io/v1 VITE_API_KEY=<gateway-key> npm run build`
+  → copy `dist/` to the host → reload unpacked.
+- **Daemon (`extension/driver-daemon.mjs` + `src/`)** → re-sync `extension/` to Fernanda's
+  host (`C:\Users\Public\extension`, see windows runbook) + restart `linkedin-bot-daemon`.
+  It already points at AWS via `daemon-task.ps1` (`BACKEND`/`API_KEY`).
+- **Frontend (`frontend/`)** → `frontend/.env` points at AWS; rebuild/serve.
+
+**NEVER `docker compose down -v`** on the box: the Postgres volume holds the only
+consistent schema (it can't be rebuilt from `create_all`/`alembic` — see the memory;
+recreate only via a `pg_dump` restore). Redeploys reuse the volume.
+
+Secrets never in git: `deploy/.env.prod` (on the box) + `deploy/sr-ec2.pem` are
+gitignored. The gateway `API_KEY` must match across backend `.env.prod`, the
+extension/frontend builds, and the daemon's `daemon-task.ps1`. (Future: a GitHub
+Action on push could automate the backend redeploy; today it's `redeploy.sh`.)
+
+## Daemon routing by operator (who runs what, and WHERE)
+
+Multiple daemons poll the AWS backend; each claims **only runs targeted at it**.
+- Each daemon runs with env `OPERATOR_ID` (Andrey's Mac = `andrey`, Fernanda's host =
+  `fernanda`). `findPendingRun` (driver-daemon.mjs) claims a run only if
+  `origin.target_operator === OPERATOR_ID` (on top of the existing isWatched gate).
+- `origin.target_operator` is stamped at run creation:
+  - **Dashboard "Run with daemon"** → the requesting operator's id. Flow: dashboard
+    Settings "Operator ID" → `localStorage["sr.operatorId"]` → `DASHBOARD_RUN_WORKFLOW`
+    postMessage → extension → `run-with-params { operator_id }` → backend. BUT if the
+    workflow has an enabled LinkedIn webhook trigger, it's pinned to
+    `settings.linkedin_operator` (env `LINKEDIN_OPERATOR`, default `fernanda`).
+  - **Webhook/reconciler LinkedIn runs** (`new_job_position`/`linkedin_lead_search`) →
+    always `linkedin_operator` (Fernanda), in `WebhookTriggerService._fire`.
+- Net effect: dashboard runs execute on the clicking operator's OWN machine; LinkedIn
+  flows ALWAYS execute on Fernanda's host (where the LinkedIn session lives). Offline
+  target daemon ⇒ the run waits QUEUED (never falls back to the wrong machine).
+- Per operator: set "Operator ID" in dashboard Settings to match that machine's daemon
+  `OPERATOR_ID`. Install a local daemon pointed at AWS:
+  `DAEMON_BACKEND=https://52-5-45-84.sslip.io DAEMON_API_KEY=<key> DAEMON_OPERATOR_ID=<id> make daemon-install`
+  (the launchd template renders `__BACKEND__/__API_KEY__/__OPERATOR_ID__`).
+- `GET /v1/daemon/status` now includes each worker's `operator_id`.
+
 ## LinkedIn LEAD-sourcing flow (qaodoo → Fernanda's host → `linkedin.lead`) — THE flow we run
 
 This is the **currently-exercised** flow (live-verified 2026-06-04: qaodoo job

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     cors_origin_regex: str = r"chrome-extension://.*"
     api_key: SecretStr = SecretStr("dev-api-key-change-in-production")
     secret_key: SecretStr = SecretStr("change-me-to-a-random-secret")
+    # Daemon routing: LinkedIn flows are always pinned to this operator's daemon
+    # (the host that holds the LinkedIn session). Other runs go to the requesting
+    # operator's daemon (origin.target_operator). Env: LINKEDIN_OPERATOR.
+    linkedin_operator: str = "fernanda"
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True

@@ -29,6 +29,9 @@ export default function SettingsPage() {
   const [deterministic, setDeterministic] = useState(false);
   const [apiKey] = useState("sk-••••••••••••••••");
   const [showKey, setShowKey] = useState(false);
+  // Daemon-routing identity for "Run with daemon": stored in THIS browser
+  // (per-operator, no backend/auth). Must match the local daemon's OPERATOR_ID.
+  const [operatorId, setOperatorId] = useState(() => localStorage.getItem("sr.operatorId") || "");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -121,6 +124,28 @@ export default function SettingsPage() {
       )}
 
       <div className="space-y-4">
+        {/* Operator (daemon routing) */}
+        <Card>
+          <h2 className="text-sm font-medium text-[#E8EAED] mb-2 flex items-center gap-2">
+            <Users size={14} /> Operator
+          </h2>
+          <SettingRow
+            label="Operator ID"
+            description="Tu identificador para rutear 'Run con daemon' a TU máquina (debe coincidir con OPERATOR_ID del daemon local). Se guarda en este navegador. Los flujos de LinkedIn siempre van al daemon de Fernanda."
+          >
+            <input
+              type="text"
+              value={operatorId}
+              onChange={(e) => {
+                setOperatorId(e.target.value);
+                localStorage.setItem("sr.operatorId", e.target.value.trim());
+              }}
+              placeholder="p.ej. andrey"
+              className="bg-[#2A2E3D] text-[#E8EAED] border border-[#2D3148] rounded-md px-3 py-1.5 text-sm w-48"
+            />
+          </SettingRow>
+        </Card>
+
         {/* Policies */}
         <Card>
           <h2 className="text-sm font-medium text-[#E8EAED] mb-2 flex items-center gap-2">

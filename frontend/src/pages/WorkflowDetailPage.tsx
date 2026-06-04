@@ -349,6 +349,7 @@ export default function WorkflowDetailPage() {
         executionTarget?: "browser" | "daemon";
         loadSession?: boolean;
         targetUrl?: string;
+        operatorId?: string;
       } = { type: "DASHBOARD_RUN_WORKFLOW", workflowId };
       if (Object.keys(params).length > 0) {
         message.params = params;
@@ -361,6 +362,11 @@ export default function WorkflowDetailPage() {
         message.loadSession = !!loadSession;
         if (data?.target_url) message.targetUrl = data.target_url;
       }
+      // Routing: the operator id (Settings → stored in this browser's localStorage)
+      // tells the backend which daemon to target. LinkedIn workflows override this
+      // to Fernanda's daemon server-side. Absent = run waits unclaimed, so warn.
+      const operatorId = (localStorage.getItem("sr.operatorId") || "").trim();
+      if (operatorId) message.operatorId = operatorId;
       window.postMessage(
         message,
         "*",

@@ -31,12 +31,21 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- Rendered by scripts/launchd-install.sh from DAEMON_BACKEND /
+             DAEMON_API_KEY / DAEMON_OPERATOR_ID (defaults: localhost / dev key /
+             empty). Point at the AWS backend + give this machine a routing id:
+               DAEMON_BACKEND=https://52-5-45-84.sslip.io DAEMON_API_KEY=<key> \
+               DAEMON_OPERATOR_ID=andrey make daemon-install -->
         <key>BACKEND</key>
-        <string>http://localhost:8081</string>
-        <!-- Rotate this off the dev default and keep it IDENTICAL to backend
-             .env API_KEY. With one daemon this also gates who can trigger runs. -->
+        <string>__BACKEND__</string>
+        <!-- Keep API_KEY IDENTICAL to the backend gateway key. -->
         <key>API_KEY</key>
-        <string>dev-api-key-change-in-production</string>
+        <string>__API_KEY__</string>
+        <!-- Routing identity: this daemon only claims runs targeted at this
+             operator (origin.target_operator). LinkedIn flows are pinned to the
+             LinkedIn operator server-side regardless. -->
+        <key>OPERATOR_ID</key>
+        <string>__OPERATOR_ID__</string>
         <key>POLL_INTERVAL_MS</key>
         <string>5000</string>
         <!-- Conservative budget for the QA window so testing can't exhaust a
