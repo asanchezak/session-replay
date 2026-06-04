@@ -25,6 +25,74 @@ hard way and not obvious from reading code.
   real host, the Windows runbook supersedes it. Setup scripts:
   `scripts/setup-windows-host.ps1` + `scripts/elevate-bot-windows.ps1`.
 
+## LinkedIn LEAD-sourcing flow (qaodoo → Fernanda's host → `linkedin.lead`) — THE flow we run
+
+This is the **currently-exercised** flow (live-verified 2026-06-04: qaodoo job
+304 "Full Stack Developer" → run `d4887175` on Fernanda's host → 14 leads in
+qaodoo). It is **DISTINCT from the applicant push flow documented below** — when
+someone says "run the flow", default to this one unless they ask for AI scoring.
+
+- **What it does**: search-results-only — name + headline + profile_url, **NO
+  profile visits, NO Easy Recruit / AI scoring**. Creates `linkedin.lead` rows in
+  Odoo linked to the job (`job_id`) and the search run (`source_run_id`). Much
+  lighter anti-bot footprint than the applicant flow.
+- **Workflow**: "LinkedIn Lead Search" (`a2ae6cdb…`), `event_kind =
+  linkedin_lead_search`, hardcoded mode. Push target `POST /akcr/api/linkedin_lead`
+  (sibling of the applicant controller, same `akcr.linkedin_ingest_api_key`).
+  Push service: `backend/services/linkedin_lead_push_service.py`.
+
+### Run it end-to-end on qaodoo
+1. **qaodoo needs the akcr lead ingestion deployed** (model `linkedin.lead` +
+   `POST /akcr/api/linkedin_lead`). **qaodoo deploys from the akodoo `qaodoo`
+   branch** (not master); the lead code shipped via PR #1807. Verify live:
+   `curl -s -o /dev/null -w '%{http_code}' -X POST
+   https://qaodoo.akurey.com/akcr/api/linkedin_lead -H 'X-API-Key: <key>'
+   -H 'Content-Type: application/json' -d '{"job_id":"0","leads":[]}'` → **200**
+   (404 = not deployed; an older akcr only has `linkedin_sync` on `hr.job`).
+2. **Ingest key matches on both sides**: Odoo `ir.config_parameter
+   akcr.linkedin_ingest_api_key` == connector `config.linkedin_ingest_api_key`
+   (dev default `akcr-linkedin-dev-key-change-me`). If the connector lacks the
+   key, the push **silently no-ops** (the run still completes).
+3. **Connector + trigger**: connector `qaodoo-forum-live` (`2c7a49e9…`) must have
+   an ENABLED `linkedin_lead_search` trigger → workflow `a2ae6cdb`.
+   `fire_from_odoo_payload` fires **ALL** enabled triggers on a connector — keep
+   only the intended one enabled (we disabled a dangling `new_job_position`
+   trigger pointing at a deleted workflow). The trigger-create API only allows
+   `new_job_position`; create the lead trigger via `WebhookTriggerService.create_trigger`.
+4. **Fire it**: publish a job in qaodoo with **"Sync with LinkedIn" ✓ AND
+   Published**. qaodoo can't reach the Mac backend over Tailscale, so there is
+   **NO inbound webhook** — the **reconcile supervisor** is the trigger: it polls
+   qaodoo every `RECONCILE_POLL_INTERVAL_SECONDS` (300) for
+   `linkedin_sync=True AND is_published=True` jobs with id >
+   `connector.config.reconcile_min_job_id`, and enqueues a QUEUED run. Skip the
+   wait with `ReconcileSupervisor(session).reconcile_connector(<id>)` or by
+   replaying the trigger.
+5. **The daemon on Fernanda's host claims the QUEUED run** and drives it.
+
+### Host realities (learned the hard way 2026-06-04; see memory `project_fernanda_host_ops`)
+- **Only ONE daemon may poll the backend** or they race for the QUEUED run (see
+  `/v1/daemon/status`). To force the run onto Fernanda's host, stop the Mac daemon
+  (`make daemon-uninstall`; restore with `make daemon-install`).
+- **The host's `.linkedin-profile` needs a LIVE logged-in session.** You CANNOT
+  copy a Mac Chrome profile to Windows — cookies are OS-encrypted (macOS Keychain
+  vs Windows DPAPI), so copied cookies are unreadable → checkpoint. Establish the
+  session by an **interactive login AT the host**: `extension/login-linkedin.mjs`
+  (launches visible Chrome against `.linkedin-profile`, waits for `/feed`); a
+  launcher bat sits on the host's Public desktop. **The host is Windows 11 Home →
+  it canNOT be an RDP server** (no inbound RDP); log in at the physical screen or
+  via a remote-GUI tool (Chrome Remote Desktop / AnyDesk).
+- **Checkpoint handling**: on a login/captcha/checkpoint wall the daemon PAUSES
+  the run (`waiting_for_user`, pause_reason "Blocking: checkpoint") and trips a 4h
+  circuit breaker. Clear it by deleting `.linkedin-budget.json` in the host's
+  extension dir.
+- **Verify a session non-invasively**: pull
+  `.linkedin-profile/Default/Network/Cookies` and check `li_at` exists with a
+  future `expires_utc` (values are DPAPI-encrypted but name/expiry are plaintext).
+- **Tailscale must run unattended** or the host drops offline on logout/sleep:
+  policy `HKLM\SOFTWARE\Policies\Tailscale\UnattendedMode=always` + a user must
+  log in once so the GUI applies `ForceDaemon=true`. **Never restart the Tailscale
+  service over the Tailscale-SSH link** (saws off your own branch → lockout).
+
 ## LinkedIn integration (Odoo new-job webhook → applicant push)
 
 - **End-to-end flow**: Odoo publishes a new job → webhook hits
