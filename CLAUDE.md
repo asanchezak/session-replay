@@ -48,6 +48,35 @@ Highest-value first three to productize: **(2) search**, **(3) save-to-project**
 **(7) bulk-message a project** — these are the "search / add to project / message the
 project" examples the user called out.
 
+### Sub-workflow build status (updated 2026-06-05)
+- **(2) Search → candidates — DONE & LIVE-VERIFIED.** Workflow `5bdc4d51-cbe8-46fb-986e-da67f9e4a3d1`
+  "Recruiter Search → candidates" (generic, 3 steps): navigate `/talent/home` → navigate
+  `/talent/search?searchHistoryId=21166179650&start=0` → extract (strategy
+  `recruiter_search_people` → `scrapeRecruiterSearch` in `driver-daemon.mjs:645`). Live run
+  `e2cbdb34` extracted **4 candidates** (name + `/talent/profile/` URL) in 31s against the
+  warm seat. Results land in the run's **`extracted_data`** field (`GET /v1/runs/{id}` →
+  `extracted_data[0].people`; there is NO `/extraction` endpoint — that 405s). Run it:
+  `POST /v1/workflows/5bdc4d51…/run-with-params` with
+  `{"execution_target":"daemon","operator_id":"fernanda","execution_options":{"use_profile":true,"snapshot":true}}`.
+  **Known gap:** `headline` comes back `""` (the title sits deeper in the card than the
+  innerText split reaches) — fix `scrapeRecruiterSearch` offline against a results snapshot,
+  then redeploy. **Still hardcoded:** the saved-search URL (`searchHistoryId`). Arbitrary
+  keyword search = the advanced-search form (recording steps 28–75) + a real param system
+  (today the daemon reads raw `workflow_snapshot.steps`, doesn't substitute runtime_params).
+- **(3) Save-to-project — NEXT.** Recording `0a8404f9` steps 76–85. Buildable as a generic
+  CLICK workflow (daemon Phase-A verbs: navigate profile → click "Save to project" → "Choose
+  existing" → pick project → "Save"), NO daemon code change. It's a WRITE (reversible). Test
+  on the existing "Easy Recruit" project. Verify selectors offline first.
+- **(7) Bulk-message — BUILD ONLY, do NOT send without explicit OK.** Recording steps 179–201.
+  The message BODY + Send selectors were never recorded → still need `recruiter-composer-probe.mjs`.
+
+**Iteration constraint (learned 2026-06-05):** creating + running workflows uses only the
+public AWS API (no SSH needed — the daemon claims them). But any DAEMON CODE change (new
+extract strategy, the headline fix) needs a daemon restart, which on-demand only fires while
+`linkedin-bot` is interactively logged on (else it sticks "Queued") — so batch daemon-code
+changes for a moment when Fernanda is at the host, or for the next boot. Pure-workflow flows
+(navigate/click/existing-strategy) avoid this entirely.
+
 ### Recruiter session is SEPARATE from linkedin.com (blocker found 2026-06-04)
 Driving `/talent/` needs its OWN sign-in even when the daemon's regular linkedin.com
 session (`li_at`, valid to 2027-06-04) is live. Hitting `/talent/home` redirects to
@@ -116,7 +145,8 @@ els, 1.86 MB HTML), `completed`, no wall, no circuit trip.
   re-establish it with a one-time `login-talent.bat` as the `linkedin-bot` user.
 
 - **The Recruiter SEAT dies on browser CLOSE — the daemon now keeps ONE browser OPEN**
-  (fix 2026-06-05, `driver-daemon.mjs`). The `/talent` seat is held by a session-scoped
+  (fix + LIVE-VERIFIED 2026-06-05 — 5 warm pings / ~15 min sustained, browser never
+  relaunched; `driver-daemon.mjs`). The `/talent` seat is held by a session-scoped
   cookie + the open SPA's realtime polling; both are lost when Chrome closes (the
   persistent `li_at` survives, the seat doesn't — that's why it lapsed in ~5 min while
   Fernanda's always-open browser lasts weeks). The daemon used to launch+close Chrome for
