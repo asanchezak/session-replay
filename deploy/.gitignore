@@ -1,3 +1,5 @@
 # Never commit real secrets or the SSH key
 .env.prod
 *.pem
+# Built dashboard (frontend) shipped to the box, not source
+dashboard/

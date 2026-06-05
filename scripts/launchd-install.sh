@@ -44,6 +44,10 @@ VITE_BIN="$REPO_ROOT/frontend/node_modules/.bin/vite"
 DAEMON_BACKEND="${DAEMON_BACKEND:-http://localhost:8081}"
 DAEMON_API_KEY="${DAEMON_API_KEY:-dev-api-key-change-in-production}"
 DAEMON_OPERATOR_ID="${DAEMON_OPERATOR_ID:-}"
+# Testing toggle: set DAEMON_DISABLE_COOLDOWN=1 to skip the daemon's inter-run
+# cooldown (LinkedIn runs fire back-to-back). Defaults 0 — keep the cooldown in
+# production. Persisted into the rendered plist so it survives daemon-restart.
+DAEMON_DISABLE_COOLDOWN="${DAEMON_DISABLE_COOLDOWN:-0}"
 
 install_one() {
     local svc="$1"
@@ -97,6 +101,7 @@ install_one() {
         -e "s#__BACKEND__#$DAEMON_BACKEND#g" \
         -e "s#__API_KEY__#$DAEMON_API_KEY#g" \
         -e "s#__OPERATOR_ID__#$DAEMON_OPERATOR_ID#g" \
+        -e "s#__DISABLE_COOLDOWN__#$DAEMON_DISABLE_COOLDOWN#g" \
         "$template" > "$target"
 
     if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then

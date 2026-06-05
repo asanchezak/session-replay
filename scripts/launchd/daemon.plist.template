@@ -48,6 +48,12 @@
         <string>__OPERATOR_ID__</string>
         <key>POLL_INTERVAL_MS</key>
         <string>5000</string>
+        <!-- Testing escape hatch: set to 1 to skip the inter-run cooldown so
+             LinkedIn runs fire back-to-back. Leave UNSET/0 in production — the
+             cooldown protects the shared account. Does NOT disable the circuit
+             breaker, working-hours, or budget gates. -->
+        <key>DISABLE_INTER_RUN_COOLDOWN</key>
+        <string>__DISABLE_COOLDOWN__</string>
         <!-- Conservative budget for the QA window so testing can't exhaust a
              real-usage day. With a single canonical daemon this sidecar budget
              is the TRUE global rate limit. Raise toward the code defaults

@@ -13,6 +13,10 @@ export default defineConfig({
     },
   },
   define: {
-    "import.meta.env.VITE_API_URL": JSON.stringify(process.env.VITE_API_URL || "/v1"),
+    // Dashboard talks to the AWS backend by default (source of truth). This
+    // takes precedence over VITE_API_BASE_URL in useApi.ts; the API key still
+    // comes from VITE_API_KEY (frontend/.env). Override for local dev with
+    // VITE_API_URL=/v1 (uses the proxy below → localhost:8081).
+    "import.meta.env.VITE_API_URL": JSON.stringify(process.env.VITE_API_URL || "https://52-5-45-84.sslip.io/v1"),
   },
 });

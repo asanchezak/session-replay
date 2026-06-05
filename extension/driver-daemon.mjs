@@ -360,6 +360,13 @@ const WORK_END_HOUR = Number(process.env.WORK_END_HOUR || "19");
 const WORK_DAYS = (process.env.WORK_DAYS || "1,2,3,4,5").split(",").map((s) => Number(s.trim()));
 const BASE_COOLDOWN_MS = Number(process.env.BASE_COOLDOWN_MS || `${20 * 60_000}`);
 const COOLDOWN_JITTER_MS = Number(process.env.COOLDOWN_JITTER_MS || `${20 * 60_000}`);
+// Testing escape hatch: when truthy, skip the inter-run cooldown so LinkedIn runs
+// can fire back-to-back. Defaults OFF — the cooldown protects the shared account,
+// so only flip this on a non-sensitive host while actively testing. Does NOT
+// disable the circuit breaker, working-hours, or budget gates.
+const DISABLE_INTER_RUN_COOLDOWN = /^(1|true|yes|on)$/i.test(
+  process.env.DISABLE_INTER_RUN_COOLDOWN || "",
+);
 
 const account = createAccountStateStore({
   file: path.resolve(__dirname, ".linkedin-budget.json"),
@@ -1586,8 +1593,11 @@ async function driveRun(run) {
     const msg = err?.message || String(err);
     if (watchdogFired || /Target.*closed|browser.*closed|context.*closed/i.test(msg)) {
       // The watchdog already captured the page; pause cleanly so a stall is a
-      // diagnosable terminal state, never a silent hang.
-      dbg(`run ${runId} aborted by watchdog at "${mark}" (step ${lastIdx})`);
+      // diagnosable terminal state, never a silent hang. Log the underlying error
+      // too: a fast "context/target closed" (vs a true 240s watchdog timeout) means
+      // Chrome's page died mid-step — distinct failure modes that this branch merges.
+      const cause = watchdogFired ? `watchdog ${RUN_WATCHDOG_MS}ms` : `closed: ${msg}`;
+      dbg(`run ${runId} aborted at "${mark}" (step ${lastIdx}) — ${cause}`);
       await pauseRun(runId, `watchdog: stalled at ${mark} (step ${lastIdx})`, lastIdx).catch(() => {});
       blocked = true;
     } else if (err instanceof BlockerError) {
@@ -1611,6 +1621,9 @@ async function driveRun(run) {
 
 console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
 console.log(`[daemon] watching for runs with origin.event_kind in {new_job_position, linkedin_lead_search}`);
+if (DISABLE_INTER_RUN_COOLDOWN) {
+  console.log(`[daemon] ⚠ inter-run cooldown DISABLED (DISABLE_INTER_RUN_COOLDOWN) — testing mode, runs fire back-to-back`);
+}
 
 setInterval(() => {
   postHeartbeat({
@@ -1654,7 +1667,7 @@ while (true) {
       skipLog(`circuit OPEN until ${until} — not driving`);
     } else if (!isUserGeneric && !isWithinWorkingHours()) {
       skipLog(`outside working hours (${WORK_START_HOUR}:00-${WORK_END_HOUR}:00, days ${WORK_DAYS.join(",")}) — not driving`);
-    } else if (!isUserGeneric && Date.now() < nextRunNotBefore) {
+    } else if (!isUserGeneric && !DISABLE_INTER_RUN_COOLDOWN && Date.now() < nextRunNotBefore) {
       skipLog(`inter-run cooldown until ${new Date(nextRunNotBefore).toISOString()} — not driving`);
     } else {
       const reason = isUserGeneric ? null : budgetExhaustedReason();
@@ -1672,7 +1685,7 @@ while (true) {
         }
         // Inter-run cooldown with jitter so LinkedIn runs don't fire back-to-back.
         // User-initiated generic runs are exempt (no robotic-cadence concern).
-        if (!isUserGeneric) {
+        if (!isUserGeneric && !DISABLE_INTER_RUN_COOLDOWN) {
           nextRunNotBefore = Date.now() + jitter(BASE_COOLDOWN_MS, COOLDOWN_JITTER_MS);
           console.log(`[daemon] next run not before ${new Date(nextRunNotBefore).toISOString()}`);
         }

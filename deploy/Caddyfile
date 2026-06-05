@@ -1,6 +1,14 @@
-# Auto-TLS (Let's Encrypt) for the stable hostname, reverse-proxy to the backend.
-# $DOMAIN is injected from deploy/.env.prod (e.g. 1-2-3-4.sslip.io).
+# Auto-TLS (Let's Encrypt) for the stable hostname. Serves the built dashboard
+# (SPA) at / and proxies the API under /v1 to the backend (same origin → no CORS).
+# $DOMAIN is injected from deploy/.env.prod (e.g. 52-5-45-84.sslip.io).
 {$DOMAIN} {
 	encode gzip
-	reverse_proxy backend:8081
+	handle /v1/* {
+		reverse_proxy backend:8081
+	}
+	handle {
+		root * /srv/dashboard
+		try_files {path} /index.html
+		file_server
+	}
 }

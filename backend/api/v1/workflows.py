@@ -1078,22 +1078,15 @@ async def run_workflow_with_parameters(
             # poll filter to include origin.execution_target == "daemon"). The
             # extension does NOT run the agent loop for these — the daemon drives.
             #
-            # Routing: pin LinkedIn workflows (those with an enabled LinkedIn
-            # webhook trigger) to the LinkedIn operator; otherwise target the
-            # requesting operator's own daemon. The daemon claims a run only if
-            # origin.target_operator == its OPERATOR_ID.
-            from core.config import settings
-            from services.webhook_trigger_service import (
-                SUPPORTED_EVENT_KINDS,
-                WebhookTriggerService,
-            )
-            wf_triggers = await WebhookTriggerService(db).list_triggers(workflow_id=workflow_id)
-            is_linkedin_workflow = any(
-                t.enabled and t.event_kind in SUPPORTED_EVENT_KINDS for t in wf_triggers
-            )
-            target_operator = (
-                settings.linkedin_operator if is_linkedin_workflow else (req.operator_id or None)
-            )
+            # Routing: a manual dashboard run targets the REQUESTING operator's own
+            # daemon (origin.target_operator == operator_id). The daemon claims a
+            # run only if origin.target_operator == its OPERATOR_ID. We no longer
+            # force-pin LinkedIn workflows to settings.linkedin_operator here — any
+            # operator (e.g. Andrey) may run a LinkedIn workflow from their own
+            # host. (Automated webhook/reconciler LinkedIn runs are still pinned to
+            # linkedin_operator in WebhookTriggerService._fire — that path has no
+            # human requester and needs the host that holds the LinkedIn session.)
+            target_operator = req.operator_id or None
             run.origin = {
                 "execution_target": "daemon",
                 "execution_mode": workflow.execution_mode,

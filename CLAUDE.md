@@ -3,6 +3,91 @@
 Things future Claude sessions on this repo should know up front — discovered the
 hard way and not obvious from reading code.
 
+## CURRENT GOAL — decompose the Recruiter recording into reusable sub-workflows
+
+We now have access to **LinkedIn Recruiter** (the paid "Talent"/`/talent/hire/...`
+surface) on Fernanda's host. The recruiter recorded ONE long exploratory session:
+workflow **`0a8404f9-f745-4778-9429-3e06e125c146`** ("LinkedIn and Akurey Careers
+Search", 317 steps, `target_url https://www.linkedin.com/talent/home`). It is just a
+walkthrough — NOT a clean automation.
+
+**Goal:** analyze that recording, identify the distinct high-level actions, and carve
+them into **separate, SIMPLE, reproducible, parameterized workflows** (one action each),
+so we can replay/compose them. Keep them minimal but actually working.
+
+**Hard rule — this LinkedIn account is VERY sensitive.** Do NOT run live tests casually.
+Every test must be deliberate and careful (mirrors the anti-bot discipline below). Build
+and reason about the sub-workflows first; only run live when explicitly cleared, on
+Fernanda's host where the Recruiter session lives.
+
+**NOTE:** this is the **Recruiter/Talent** product (`/talent/`), a DIFFERENT surface from
+the `linkedin.com` people-search + applicant/lead flows already documented further down.
+
+### High-level actions identified in the recording (candidate sub-workflows)
+1. **Pull job requirements from Akurey careers** (steps 4–12): Google "akurey careers" →
+   `akurey.com/careers` → SEE REQUIREMENTS → `careers/requirements/?pId=<id>`. Non-LinkedIn
+   input source for the job description/requirements.
+2. **Recruiter advanced search** (steps 18–75): `/talent/search` → Advanced search → set
+   filters (spoken language = English / Must have / Full Professional; total years of
+   experience range; skill keywords) → Search → results list. *Parameterize the filters.*
+3. **Save a candidate to an existing project** (76–85, 256–265, 298–310): open profile →
+   "Save to project" → "Choose existing project" → pick project → "Save X to project".
+4. **Create a new project** (278–294): "Create new project" → name + description → "Create
+   project" (created "Easy Recruit", landed on `/talent/hire/<id>/overview`).
+5. **Connect with a candidate** (102–112): open public profile → "Connect" (connection req).
+6. **Message a single candidate** (125, 171–176): open profile → "Message X" → pick template.
+7. **Bulk-message everyone in a project/pipeline** (179–201): Pipeline → "Select all N
+   profiles" → "Message (N)" → edit subject → "Search template" → pick template → send.
+8. **Open a project pipeline & sourcing views** (117–159): project → "Pipeline"
+   (`/manage/all`), "Recommended matches" (automatedSourcing), "Apply starters".
+9. **Find a specific person** (221–255): search the pipeline by name, or global LinkedIn
+   search by name / paste a profile URL → "View in Recruiter" (bridge public profile →
+   `/talent/profile/...`).
+
+Highest-value first three to productize: **(2) search**, **(3) save-to-project**,
+**(7) bulk-message a project** — these are the "search / add to project / message the
+project" examples the user called out.
+
+### Recruiter session is SEPARATE from linkedin.com (blocker found 2026-06-04)
+Driving `/talent/` needs its OWN sign-in even when the daemon's regular linkedin.com
+session (`li_at`, valid to 2027-06-04) is live. Hitting `/talent/home` redirects to
+`/uas/login-cap` → **"Inicia sesión en LinkedIn Talent Solutions"** with the email
+PRE-FILLED (`fbenavides@akurey.com`) — i.e. the account is recognized but Recruiter
+wants a password to establish its seat session. The daemon never used Recruiter, so
+`.linkedin-profile` has NO Recruiter session. **Fix = a ONE-TIME interactive Talent
+Solutions sign-in at the host, into the SAME `.linkedin-profile`** (physical screen or
+Chrome Remote Desktop / AnyDesk — Win11 Home has no RDP). Do NOT automate the password
+on this sensitive account. After that, the probe below can capture the composer.
+
+**RE-VERIFIED 2026-06-05 — STILL WALLED.** Ran the minimal read-only session check
+(`extension/recruiter-session-check.mjs`, single nav to `/talent/home`, no clicks/typing,
+via S4U task `recruiter-sesscheck`): result `LOGIN_WALL` →
+`/uas/login-cap … source_app=tsweb`, title "Acceso a LinkedIn Recruiter". The bot
+profile's `.linkedin-profile` cookies are unchanged since the 2026-06-04 failed probe.
+NOTE: Fernanda DOES have Recruiter access, but in **her personal Chrome** (profile
+`C:\Users\María…`, ~20 chrome procs seen running) — the daemon can't use that profile.
+The one-time interactive Talent sign-in into `.linkedin-profile` is **still pending**;
+until it's done, NONE of the `/talent/` sub-workflows below can run live. To re-check
+later: register+start `recruiter-sesscheck` (helpers on host:
+`register-sesscheck.ps1` / `sesscheck-task.ps1` / `wait-sesscheck.ps1`).
+
+### How to run the read-only composer probe (the right way)
+`extension/recruiter-composer-probe.mjs` — read-only, human-slow (bezier mouse, multi-s
+dwells, reuses `page-nav`/`blocker-detect`); NEVER types a body or clicks Send; aborts on
+any wall without tripping the circuit breaker. Writes screenshots + DOM inventory +
+`STATUS` to `.debug/composer-probe/`. Its job: capture the two selectors the recording
+never recorded — the message BODY field and the SEND button.
+
+**Must run in the daemon's logon context, NOT raw SSH.** Launched directly over SSH
+(linkedin-bot network logon) Chrome can't DPAPI-decrypt the staged cookies (Local State
+uses classic `encrypted_key`, no App-Bound) → login wall. Run it via a one-shot scheduled
+task with the SAME principal as `linkedin-bot-daemon` (UserId `linkedin-bot`, LogonType
+**S4U**, RunLevel Highest). Helper scripts (host `C:\Users\Public\extension\`):
+`probe-task.ps1` (action wrapper) + `register-probe-task.ps1` (registers+starts task
+`recruiter-probe`) + `wait-probe.ps1` (polls STATUS). Keep the daemon **Disabled** during
+the probe so it doesn't race for the profile. Pre-flight with `recon.ps1` (profile lock /
+chrome-on-profile / budget breaker).
+
 ## Read first
 
 - **`docs/recruitment-automation-flow.md`** — full runbook for the Odoo job
@@ -64,16 +149,22 @@ Multiple daemons poll the AWS backend; each claims **only runs targeted at it**.
   `fernanda`). `findPendingRun` (driver-daemon.mjs) claims a run only if
   `origin.target_operator === OPERATOR_ID` (on top of the existing isWatched gate).
 - `origin.target_operator` is stamped at run creation:
-  - **Dashboard "Run with daemon"** → the requesting operator's id. Flow: dashboard
-    Settings "Operator ID" → `localStorage["sr.operatorId"]` → `DASHBOARD_RUN_WORKFLOW`
-    postMessage → extension → `run-with-params { operator_id }` → backend. BUT if the
-    workflow has an enabled LinkedIn webhook trigger, it's pinned to
-    `settings.linkedin_operator` (env `LINKEDIN_OPERATOR`, default `fernanda`).
+  - **Dashboard "Run with daemon"** → the requesting operator's id, ALWAYS (incl.
+    LinkedIn workflows). Flow: dashboard Settings "Operator ID" →
+    `localStorage["sr.operatorId"]` → `DASHBOARD_RUN_WORKFLOW` postMessage → extension →
+    `run-with-params { operator_id }` → backend → `target_operator = operator_id`.
+    (Changed 2026-06-05: LinkedIn workflows are NO LONGER force-pinned to
+    `linkedin_operator` on the dashboard path — any operator, e.g. Andrey, can run a
+    LinkedIn workflow from their own host. Per-workflow operator pinning is a future
+    feature.)
   - **Webhook/reconciler LinkedIn runs** (`new_job_position`/`linkedin_lead_search`) →
-    always `linkedin_operator` (Fernanda), in `WebhookTriggerService._fire`.
-- Net effect: dashboard runs execute on the clicking operator's OWN machine; LinkedIn
-  flows ALWAYS execute on Fernanda's host (where the LinkedIn session lives). Offline
-  target daemon ⇒ the run waits QUEUED (never falls back to the wrong machine).
+    STILL always `linkedin_operator` (Fernanda), in `WebhookTriggerService._fire` —
+    that path has no human requester and needs the host holding the LinkedIn session.
+- Net effect: dashboard runs (incl. LinkedIn) execute on the CLICKING operator's OWN
+  machine; only automated webhook/reconciler LinkedIn flows are pinned to Fernanda's
+  host. Offline target daemon ⇒ the run waits QUEUED (never falls back to the wrong
+  machine). Each operator's host must hold its OWN logged-in LinkedIn session to run
+  LinkedIn workflows there.
 - Per operator: set "Operator ID" in dashboard Settings to match that machine's daemon
   `OPERATOR_ID`. Install a local daemon pointed at AWS:
   `DAEMON_BACKEND=https://52-5-45-84.sslip.io DAEMON_API_KEY=<key> DAEMON_OPERATOR_ID=<id> make daemon-install`

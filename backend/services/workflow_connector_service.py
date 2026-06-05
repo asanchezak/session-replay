@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from string import Formatter
+
+logger = logging.getLogger(__name__)
 
 
 def _short_description(text: str, max_chars: int = 300) -> str:
@@ -154,10 +157,25 @@ class WorkflowConnectorService:
         for binding in bindings:
             if not binding.enabled or binding.parameter_key in merged:
                 continue
-            preview = await self.preview_binding(
-                workflow_id,
-                binding.parameter_key,
-            )
+            # Fail-soft: a binding auto-fills a param from an external connector
+            # (e.g. the latest Odoo job). If that connector is unreachable (Odoo
+            # down, a localhost URL not routable from this host, no jobs, auth
+            # failure), skip this binding instead of failing the whole run. The
+            # run still proceeds with the params the caller supplied; the missing
+            # auto-fill is logged, not fatal.
+            try:
+                preview = await self.preview_binding(
+                    workflow_id,
+                    binding.parameter_key,
+                )
+            except Exception as exc:  # noqa: BLE001 — any resolution failure is non-fatal
+                logger.warning(
+                    "Skipping connector binding for param '%s' on workflow %s: %s",
+                    binding.parameter_key,
+                    workflow_id,
+                    exc,
+                )
+                continue
             merged[binding.parameter_key] = preview["resolved_value"]
             resolutions.append(
                 {
