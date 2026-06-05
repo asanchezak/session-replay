@@ -1,0 +1,32 @@
+{
+  "stages": [
+    {
+      "stage": "step-0-navigate",
+      "ts": "2026-06-05T20:14:01.714Z",
+      "files": {
+        "html": "step-0-navigate.html",
+        "dom": "step-0-navigate.dom.json",
+        "png": "step-0-navigate.png"
+      },
+      "url": "https://www.linkedin.com/talent/home",
+      "title": "LinkedIn Talent Solutions",
+      "htmlBytes": 1795367,
+      "elementCount": 66
+    },
+    {
+      "stage": "step-1-navigate",
+      "ts": "2026-06-05T20:14:13.434Z",
+      "files": {
+        "html": "step-1-navigate.html",
+        "dom": "step-1-navigate.dom.json",
+        "png": "step-1-navigate.png"
+      },
+      "url": "https://www.linkedin.com/talent/projects",
+      "title": "LinkedIn Talent Solutions",
+      "htmlBytes": 1825783,
+      "elementCount": 86
+    }
+  ],
+  "created": "2026-06-05T20:14:02.297Z",
+  "updated": "2026-06-05T20:14:13.858Z"
+}

@@ -1,0 +1,19 @@
+{
+  "stages": [
+    {
+      "stage": "BLOCKED-home",
+      "ts": "2026-06-05T18:41:44.270Z",
+      "files": {
+        "html": "BLOCKED-home.html",
+        "dom": "BLOCKED-home.dom.json",
+        "png": "BLOCKED-home.png"
+      },
+      "url": "https://www.linkedin.com/uas/login-cap?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Ftalent%2Fhome&source_app=tsweb&trk=tsweb_signin",
+      "title": "Acceso a LinkedIn Recruiter",
+      "htmlBytes": 45479,
+      "elementCount": 65
+    }
+  ],
+  "created": "2026-06-05T18:41:44.368Z",
+  "updated": "2026-06-05T18:41:44.368Z"
+}

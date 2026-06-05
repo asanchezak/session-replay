@@ -43,6 +43,7 @@ import { experienceParasCore, sectionListItemsCore, subpageTextCore } from "./sr
 import { prepareConnectNoteDialog, NOTE_TEXTAREA_SELECTOR } from "./src/behavior/connect-compose-core.mjs";
 import { PHASE_A_VERBS, resolveLocator, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
 import { evaluateSuccessCondition, successConditionInputs } from "./src/behavior/step-interpreter.mjs";
+import { snapshotPage } from "./src/behavior/page-snapshot.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,6 +72,9 @@ const RUN_WATCHDOG_MS = Number(process.env.RUN_WATCHDOG_MS || "240000");
 // before being enabled in production — see plan Phase C + project memory.
 const GENERIC_PREAMBLE = process.env.DAEMON_GENERIC_PREAMBLE === "1";
 const DEBUG_DIR = path.resolve(__dirname, ".debug");
+// Per-step DOM snapshots (gated by run execution_options.snapshot) land here so
+// Recruiter selectors can be iterated OFFLINE without reloading the live account.
+const SNAPSHOT_DIR = path.resolve(__dirname, "recruiter-snapshots");
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 // Routing identity: this daemon only claims runs whose origin.target_operator
 // matches OPERATOR_ID. Each operator's machine sets its own (e.g. "andrey");
@@ -1217,7 +1221,10 @@ async function driveRun(run) {
   // LinkedIn runs reuse the staged, logged-in profile (PROFILE_DIR). A user
   // generic run gets a CLEAN, ephemeral context ("") so it doesn't touch the
   // LinkedIn session; its auth (if any) comes from injected browser cookies.
-  const contextDir = userGenericRun ? "" : PROFILE_DIR;
+  // Recruiter (/talent) generic runs opt INTO the staged logged-in profile via
+  // execution_options.use_profile. Default generic dashboard runs stay ephemeral.
+  const useProfile = !!run.origin?.execution_options?.use_profile;
+  const contextDir = (userGenericRun && !useProfile) ? "" : PROFILE_DIR;
   const ctx = await chromium.launchPersistentContext(contextDir, {
     channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
     args: ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", "--disable-features=ChromeWhatsNewUI", "--profile-directory=Default"],
@@ -1557,6 +1564,13 @@ async function driveRun(run) {
           await reportStepResult(runId, idx, action);
         } else {
           await reportStepResult(runId, idx, action || "noop");
+        }
+        // Optional per-step DOM snapshot (execution_options.snapshot): full HTML +
+        // inventory + screenshot to recruiter-snapshots/<runId>/ so selectors can be
+        // tuned OFFLINE, never reloading the sensitive account.
+        if (execOpts.snapshot && page) {
+          try { await snapshotPage(page, { dir: path.join(SNAPSHOT_DIR, String(runId)), stage: `step-${idx}-${action || "noop"}` }); }
+          catch (snapErr) { dbg(`snapshot step ${idx} failed: ${snapErr.message?.slice(0, 120)}`); }
         }
       } catch (stepErr) {
         // A detected LinkedIn wall must NOT be plowed through: bubble it so the

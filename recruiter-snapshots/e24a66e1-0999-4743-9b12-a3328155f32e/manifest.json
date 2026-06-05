@@ -1,0 +1,19 @@
+{
+  "stages": [
+    {
+      "stage": "step-0-navigate",
+      "ts": "2026-06-05T20:07:10.975Z",
+      "files": {
+        "html": "step-0-navigate.html",
+        "dom": "step-0-navigate.dom.json",
+        "png": "step-0-navigate.png"
+      },
+      "url": "https://www.linkedin.com/talent/home",
+      "title": "LinkedIn Talent Solutions",
+      "htmlBytes": 1860646,
+      "elementCount": 116
+    }
+  ],
+  "created": "2026-06-05T20:07:11.274Z",
+  "updated": "2026-06-05T20:07:11.274Z"
+}
