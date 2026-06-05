@@ -1,19 +1,32 @@
 {
   "stages": [
     {
-      "stage": "BLOCKED-home",
-      "ts": "2026-06-05T18:41:44.270Z",
+      "stage": "01-talent-home",
+      "ts": "2026-06-05T20:59:32.887Z",
       "files": {
-        "html": "BLOCKED-home.html",
-        "dom": "BLOCKED-home.dom.json",
-        "png": "BLOCKED-home.png"
+        "html": "01-talent-home.html",
+        "dom": "01-talent-home.dom.json",
+        "png": "01-talent-home.png"
       },
-      "url": "https://www.linkedin.com/uas/login-cap?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Ftalent%2Fhome&source_app=tsweb&trk=tsweb_signin",
-      "title": "Acceso a LinkedIn Recruiter",
-      "htmlBytes": 45479,
-      "elementCount": 65
+      "url": "https://www.linkedin.com/talent/home",
+      "title": "LinkedIn Talent Solutions",
+      "htmlBytes": 1794100,
+      "elementCount": 66
+    },
+    {
+      "stage": "03-results-populated",
+      "ts": "2026-06-05T20:59:52.620Z",
+      "files": {
+        "html": "03-results-populated.html",
+        "dom": "03-results-populated.dom.json",
+        "png": "03-results-populated.png"
+      },
+      "url": "https://www.linkedin.com/talent/search?searchContextId=6aadac04-5886-4208-936a-07ef41835abc&searchHistoryId=21166179650&searchRequestId=63425a66-015e-40ff-bfe5-e0e942b77aa1&start=0&uiOrigin=HISTORY_SEARCH",
+      "title": "LinkedIn Talent Solutions",
+      "htmlBytes": 1929158,
+      "elementCount": 204
     }
   ],
-  "created": "2026-06-05T18:41:44.368Z",
-  "updated": "2026-06-05T18:41:44.368Z"
+  "created": "2026-06-05T20:59:33.624Z",
+  "updated": "2026-06-05T20:59:53.283Z"
 }

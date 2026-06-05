@@ -75,6 +75,20 @@ const DEBUG_DIR = path.resolve(__dirname, ".debug");
 // Per-step DOM snapshots (gated by run execution_options.snapshot) land here so
 // Recruiter selectors can be iterated OFFLINE without reloading the live account.
 const SNAPSHOT_DIR = path.resolve(__dirname, "recruiter-snapshots");
+// Recruiter (/talent) session keep-alive. The Recruiter SEAT session does not
+// survive a browser close (unlike the persistent linkedin.com li_at cookie): it is
+// held by a session-scoped cookie + the open SPA's continuous realtime polling.
+// Fernanda's browsers stay logged into Recruiter for WEEKS only because she never
+// closes them. So the daemon keeps ONE browser open (see getProfileContext) and,
+// when this is enabled, re-asserts /talent/home in the parked tab on a jittered
+// interval WHILE IDLE. A wall just flags that a fresh login is needed; it never
+// trips the circuit breaker. Opt-in via RECRUITER_KEEPALIVE=1.
+const RECRUITER_KEEPALIVE = process.env.RECRUITER_KEEPALIVE === "1";
+const RECRUITER_PING_MIN_MS = Number(process.env.RECRUITER_PING_MIN_MS || 2 * 60_000);
+const RECRUITER_PING_MAX_MS = Number(process.env.RECRUITER_PING_MAX_MS || 3 * 60_000);
+const RECRUITER_PING_WALLED_BACKOFF_MS = Number(process.env.RECRUITER_PING_WALLED_BACKOFF_MS || 10 * 60_000);
+let recruiterPingDue = Date.now() + 30_000; // first ping ~30s after start
+let recruiterSessionWarm = null;            // null=unknown; true/false after a ping
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 // Routing identity: this daemon only claims runs whose origin.target_operator
 // matches OPERATOR_ID. Each operator's machine sets its own (e.g. "andrey");
@@ -86,6 +100,62 @@ const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
 let drivingRunId = null;
+
+// ── Shared, long-lived Recruiter/LinkedIn browser ────────────────────────────
+// Root cause of the /talent seat dying in minutes: the daemon used to launch+close
+// Chrome for every run and every keep-alive ping. The Recruiter seat is held by a
+// session-scoped cookie + the open SPA's realtime polling — both die on browser
+// close (only the persistent linkedin.com li_at survives). Fernanda's seat lasts
+// WEEKS because her browser never closes. Fix: open ONE persistent context and keep
+// it OPEN for the daemon's lifetime, REUSING it for the keep-alive and every profile
+// run (a Chrome profile can be held by only one process, so all profile work shares
+// this one context). Ephemeral non-profile generic runs still get a throwaway context.
+const PROFILE_LAUNCH_ARGS = [
+  "--no-sandbox", "--disable-blink-features=AutomationControlled",
+  "--no-first-run", "--no-default-browser-check",
+  // Keep the always-background (session-0) Recruiter tab fully active so its realtime
+  // polling keeps the seat warm — a throttled/discarded tab stops polling and the seat
+  // lapses. Process-behavior flags only, NOT fingerprint spoofing (the anti-bot rule
+  // against faking the native fingerprint is untouched).
+  "--disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+  "--disable-background-timer-throttling",
+  "--disable-renderer-backgrounding",
+  "--disable-backgrounding-occluded-windows",
+  "--profile-directory=Default",
+];
+let profileCtx = null;   // shared persistent context on PROFILE_DIR — kept OPEN
+let warmPage = null;     // parked /talent tab the keep-alive owns (never a run's page)
+
+// The shared profile context, launched once (lazily) and kept open thereafter. If
+// Chrome dies (crash / external kill) the `close` handler nulls it and the next call
+// relaunches transparently. STEALTH + OVERLAY init scripts are added ONCE here so
+// every reused page inherits them (addInitScript is cumulative — re-adding per run
+// would double-inject).
+async function getProfileContext() {
+  if (profileCtx) return profileCtx;
+  const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+    channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+    args: PROFILE_LAUNCH_ARGS,
+    ignoreDefaultArgs: ["--enable-automation"],
+  });
+  await ctx.addInitScript(STEALTH_INIT);
+  await ctx.addInitScript(OVERLAY_INIT);
+  ctx.on("close", () => { if (profileCtx === ctx) { profileCtx = null; warmPage = null; } });
+  profileCtx = ctx;
+  warmPage = null;
+  console.log(`[daemon] opened persistent Recruiter/LinkedIn browser — kept open to hold the /talent seat`);
+  return ctx;
+}
+
+// Graceful teardown so stopping the daemon doesn't orphan a Chrome holding the
+// profile lock (which would block the next login-talent / daemon start).
+async function closeProfileContext() {
+  const ctx = profileCtx; profileCtx = null; warmPage = null;
+  if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
+}
+for (const _sig of ["SIGINT", "SIGTERM"]) {
+  process.on(_sig, () => { closeProfileContext().finally(() => process.exit(0)); });
+}
 
 function isTransientBackendError(err) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -568,6 +638,51 @@ async function scrapeSearchProfileUrls(page) {
 // social-proof element (and have no result avatar). So we anchor on result
 // avatars and skip anything inside social-proof — layout-agnostic and free of
 // the mutual-connection noise.
+// Recruiter /talent/search results scraper — reads the candidate cards
+// (name + /talent/profile URL + best-effort headline). NOT a profile view, so it
+// does NOT consume the profile-view budget. Card + name selectors locked offline
+// from recruiter-snapshots/search-capture/03-results-populated.html.
+async function scrapeRecruiterSearch(page) {
+  const CARD = '[data-view-name="talent-profile-list-element-search-global"]';
+  await page.waitForSelector(`${CARD}, a[href*="/talent/profile/"]`, { timeout: 20000 }).catch(() => {});
+  let prev = -1, stable = 0;
+  for (let i = 0; i < 10; i++) {
+    const n = await page.evaluate((s) => document.querySelectorAll(s).length, CARD).catch(() => 0);
+    if (n > 0 && n === prev) { if (++stable >= 2) break; } else { stable = 0; }
+    prev = n;
+    await sleep(700);
+  }
+  await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
+  return await page.evaluate((CARD) => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const canon = (href) => {
+      const m = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
+      return m ? "https://www.linkedin.com" + m[0] : "";
+    };
+    const out = [];
+    const seen = new Set();
+    for (const card of Array.from(document.querySelectorAll(CARD))) {
+      const link = card.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');
+      if (!link) continue;
+      const name = clean(link.innerText || link.textContent);
+      const url = canon(link.getAttribute("href"));
+      if (!name || !url || seen.has(url)) continue;
+      seen.add(url);
+      // headline: first card line that isn't the name / a select label / a
+      // connection-degree badge.
+      let headline = "";
+      for (const ln of clean(card.innerText).split("\n").map(clean).filter(Boolean)) {
+        if (ln === name) continue;
+        if (/^(seleccionar|select)\b/i.test(ln)) continue;
+        if (/contacto de|grado|mutual|en común|^\d+\s*(º|°)/i.test(ln)) continue;
+        headline = ln; break;
+      }
+      out.push({ name, profile_url: url, headline });
+    }
+    return out;
+  }, CARD);
+}
+
 async function scrapeSearchPeople(page) {
   // Wait for results (cards OR lockups OR any /in/ link), then let the count
   // stabilize so a mid-render snapshot doesn't miss half the page.
@@ -1224,28 +1339,38 @@ async function driveRun(run) {
   // Recruiter (/talent) generic runs opt INTO the staged logged-in profile via
   // execution_options.use_profile. Default generic dashboard runs stay ephemeral.
   const useProfile = !!run.origin?.execution_options?.use_profile;
-  const contextDir = (userGenericRun && !useProfile) ? "" : PROFILE_DIR;
-  const ctx = await chromium.launchPersistentContext(contextDir, {
-    channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
-    args: ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", "--disable-features=ChromeWhatsNewUI", "--profile-directory=Default"],
-    ignoreDefaultArgs: ["--enable-automation"],
-  });
+  // Profile runs (LinkedIn lead flow + Recruiter /talent) REUSE the one shared,
+  // always-open profile context so the /talent seat is never closed out from under
+  // us. Only a clean, user-initiated generic run gets its own throwaway context.
+  const ephemeralRun = userGenericRun && !useProfile;
+  const ctx = ephemeralRun
+    ? await chromium.launchPersistentContext("", {
+        channel: "chrome", headless: false, viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+        args: PROFILE_LAUNCH_ARGS,
+        ignoreDefaultArgs: ["--enable-automation"],
+      })
+    : await getProfileContext();
   // NOTE: the daemon is UNCONDITIONALLY protected. It deliberately ignores the
   // per-workflow `config.anti_bot` toggle (which gates the extension path only):
   // this is the high-risk LinkedIn-recruitment path that got flagged, so its
   // fingerprint stealth + circuit breaker + budget must never be disableable.
   // Do not "wire up the flag here for consistency".
-  await ctx.addInitScript(STEALTH_INIT);
-  // "Automation running" overlay on every page (visual deterrent so a human
-  // watching the daemon's Chrome doesn't click). pointer-events:none → does not
-  // block the daemon's own clicks. Hidden during screenshots (uploadStepShot).
-  await ctx.addInitScript(OVERLAY_INIT);
+  // The shared profile context already has STEALTH + OVERLAY init scripts (added
+  // once in getProfileContext; addInitScript is cumulative). Add them only for a
+  // freshly-launched ephemeral context so we never double-inject.
+  if (ephemeralRun) {
+    await ctx.addInitScript(STEALTH_INIT);
+    // "Automation running" overlay on every page (visual deterrent so a human
+    // watching the daemon's Chrome doesn't click). pointer-events:none → does not
+    // block the daemon's own clicks. Hidden during screenshots (uploadStepShot).
+    await ctx.addInitScript(OVERLAY_INIT);
+  }
 
   // "Load browser session" (dashboard toggle): inject the user's cookies (read by
   // the extension, shipped as a session_cookies artifact) so the generic run is
   // authenticated as the user. Consume-once: the daemon deletes the artifact right
   // after reading so the session tokens are short-lived in the backend.
-  if (loadSession) {
+  if (loadSession && ephemeralRun) {
     const cookies = await loadAndConsumeSessionCookies(runId);
     if (cookies.length) {
       try { await ctx.addCookies(cookies); dbg(`[SESSION] injected ${cookies.length} cookies`); }
@@ -1267,7 +1392,9 @@ async function driveRun(run) {
   let mark = "start";
 
   try {
-    page = ctx.pages()[0] || (await ctx.newPage());
+    // Ephemeral context: reuse its blank initial tab. Shared profile context: open a
+    // DEDICATED run page so we never hijack the parked keep-alive tab (warmPage).
+    page = ephemeralRun ? (ctx.pages()[0] || (await ctx.newPage())) : (await ctx.newPage());
 
     // Ring-buffer page console errors/warnings so debug snapshots include them.
     page.on("console", (m) => { const t = m.type(); if (t === "error" || t === "warning") { consoleBuf.push(`[${t}] ${m.text()}`.slice(0, 300)); if (consoleBuf.length > 80) consoleBuf.shift(); } });
@@ -1278,7 +1405,9 @@ async function driveRun(run) {
       watchdogFired = true;
       dbg(`[WATCHDOG] run ${runId} exceeded ${RUN_WATCHDOG_MS}ms at "${mark}" (step ~${lastIdx}) — capturing + aborting`);
       await captureDebug(page, runId, lastIdx, `watchdog-timeout ${RUN_WATCHDOG_MS}ms at ${mark}`, consoleBuf).catch(() => {});
-      await ctx.close().catch(() => {});
+      // Close just THIS run's page (not the shared context) to reject in-flight
+      // awaits — closing ctx would tear down the warm Recruiter seat.
+      await page?.close().catch(() => {});
     }, RUN_WATCHDOG_MS);
 
     // Phase C ship-dark: when DAEMON_GENERIC_PREAMBLE is ON, skip the hardcoded
@@ -1432,6 +1561,16 @@ async function driveRun(run) {
             dbg(`step${idx} scraped ${urls.length} profile URLs (search extract)`);
             console.log(`  step ${idx}: ${urls.length} URLs (search extract)`);
             await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: urls });
+            await reportStepResult(runId, idx, "extract");
+          } else if (strategy === "recruiter_search_people") {
+            // Recruiter /talent/search results — name + headline + /talent/profile URL.
+            // Not a profile view (no budget gate / recordProfileView).
+            lastIdx = idx; mark = `recruiter-search:${idx}`;
+            const people = await scrapeRecruiterSearch(page);
+            seenPool.push(...people.map((p) => p.profile_url));
+            dbg(`step${idx} scraped ${people.length} recruiter candidates`);
+            console.log(`  step ${idx}: ${people.length} candidates (recruiter search)`);
+            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people });
             await reportStepResult(runId, idx, "extract");
           } else {
             // Budget gate: pause-and-resume rather than drop candidates.
@@ -1627,13 +1766,60 @@ async function driveRun(run) {
   } finally {
     if (watchdog) clearTimeout(watchdog);
     drivingRunId = null;
-    await ctx.close().catch(() => {});
+    if (ephemeralRun) {
+      // Throwaway context — tear it down fully (as before).
+      await ctx.close().catch(() => {});
+    } else {
+      // Shared profile context stays OPEN — closing it is exactly what was lapsing
+      // the Recruiter seat. Close only the pages THIS run opened (run page + any
+      // open_message_drafts tabs); keep the parked keep-alive tab (warmPage) so the
+      // seat keeps polling between runs.
+      for (const p of ctx.pages()) {
+        if (p !== warmPage && !p.isClosed()) await p.close().catch(() => {});
+      }
+      if (warmPage && warmPage.isClosed()) warmPage = null; // keep-alive will re-establish
+    }
   }
 }
 
 // ── Main poll loop ──────────────────────────────────────────────────────────
 
+// Read-only /talent/home ping that refreshes the Recruiter session so it doesn't
+// lapse between runs. Sequential with the run loop (one Chrome on the profile at a
+// time). Never trips the circuit breaker — a wall just flags that a login is needed.
+async function recruiterKeepAlivePing() {
+  try {
+    const ctx = await getProfileContext();
+    // Reuse (or re-establish) the parked /talent tab — NEVER open a fresh browser.
+    // Keeping this ONE tab alive between pings is what actually holds the seat: the
+    // Recruiter SPA keeps polling LinkedIn's realtime endpoints (left un-throttled by
+    // PROFILE_LAUNCH_ARGS) exactly like Fernanda's always-open browser.
+    if (!warmPage || warmPage.isClosed()) {
+      warmPage = (ctx.pages()[0] && !ctx.pages()[0].isClosed()) ? ctx.pages()[0] : await ctx.newPage();
+    }
+    // Re-assert the session in the SAME tab: a real authenticated request every couple
+    // of minutes both refreshes the seat and surfaces a wall if one appeared.
+    await warmPage.goto("https://www.linkedin.com/talent/home", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await warmPage.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await sleep(2500 + Math.random() * 2500);
+    const url = warmPage.url();
+    const walled = isBlockerUrl(url) || /\/uas\/login|login-cap/i.test(url);
+    recruiterSessionWarm = !walled;
+    if (walled) {
+      console.log(`[keepalive] /talent WALLED — Recruiter seat lapsed; needs a fresh login (login-talent.bat). Browser stays OPEN.`);
+    } else {
+      await moveMouseAlongBezier(warmPage, { x: 400 + Math.random() * 400, y: 250 + Math.random() * 200 }, Math.random).catch(() => {});
+      await humanScrollSeeded(warmPage, 1 + Math.floor(Math.random() * 2), Math.random).catch(() => {});
+      console.log(`[keepalive] /talent OK — Recruiter seat warm (browser kept open)`);
+    }
+  } catch (e) {
+    console.log(`[keepalive] ping error: ${(e && e.message) || e}`);
+  }
+  // NO finally close — keeping the browser open is the whole point of the fix.
+}
+
 console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
+if (RECRUITER_KEEPALIVE) console.log(`[daemon] Recruiter keep-alive ON (ping /talent every ${RECRUITER_PING_MIN_MS / 60000}-${RECRUITER_PING_MAX_MS / 60000}m while idle)`);
 console.log(`[daemon] watching for runs with origin.event_kind in {new_job_position, linkedin_lead_search}`);
 if (DISABLE_INTER_RUN_COOLDOWN) {
   console.log(`[daemon] ⚠ inter-run cooldown DISABLED (DISABLE_INTER_RUN_COOLDOWN) — testing mode, runs fire back-to-back`);
@@ -1675,7 +1861,19 @@ while (true) {
       && o.event_kind !== "linkedin_lead_search";
 
     if (!run) {
-      // nothing pending — keep heart-beating
+      // Nothing pending. Keep the Recruiter (/talent) session warm if enabled, so a
+      // logged-in seat stays usable for daemon runs (it lapses without periodic hits).
+      if (RECRUITER_KEEPALIVE && drivingRunId === null && Date.now() >= recruiterPingDue) {
+        await recruiterKeepAlivePing();
+        // When warm: ping again soon to stay ahead of the short idle window. When
+        // walled: back off (pinging the login page won't help until a fresh login).
+        if (recruiterSessionWarm === false) {
+          recruiterPingDue = Date.now() + jitter(RECRUITER_PING_WALLED_BACKOFF_MS, 60_000);
+        } else {
+          recruiterPingDue = Date.now() + jitter((RECRUITER_PING_MIN_MS + RECRUITER_PING_MAX_MS) / 2, (RECRUITER_PING_MAX_MS - RECRUITER_PING_MIN_MS) / 2);
+        }
+        console.log(`[keepalive] next ping ~${new Date(recruiterPingDue).toISOString()} (warm=${recruiterSessionWarm})`);
+      }
     } else if (!isUserGeneric && circuitOpen()) {
       const until = new Date(account.circuit().open_until).toISOString();
       skipLog(`circuit OPEN until ${until} — not driving`);

@@ -115,6 +115,32 @@ els, 1.86 MB HTML), `completed`, no wall, no circuit trip.
   race for the profile; re-enable to run. If `/talent` ever walls to `/uas/login-cap`,
   re-establish it with a one-time `login-talent.bat` as the `linkedin-bot` user.
 
+- **The Recruiter SEAT dies on browser CLOSE — the daemon now keeps ONE browser OPEN**
+  (fix 2026-06-05, `driver-daemon.mjs`). The `/talent` seat is held by a session-scoped
+  cookie + the open SPA's realtime polling; both are lost when Chrome closes (the
+  persistent `li_at` survives, the seat doesn't — that's why it lapsed in ~5 min while
+  Fernanda's always-open browser lasts weeks). The daemon used to launch+close Chrome for
+  every run/ping. Now `getProfileContext()` opens `.linkedin-profile` ONCE and keeps it
+  open; the keep-alive (`RECRUITER_KEEPALIVE=1`, already in `daemon-task.ps1`) re-asserts
+  `/talent/home` in the parked tab every 2-3 min and never closes it, and every profile
+  run REUSES that context (one Chrome per profile = profile-lock forces a single shared
+  context). **Activation from a walled state (needs the sensitive password → human-only):**
+  the daemon must be DOWN during login (its open browser holds the profile lock). 1) physical
+  screen → switch-user to `linkedin-bot`; 2) `login-talent.bat`; 3) start the daemon — its
+  +30s ping grabs the warm seat and holds it. Watch `daemon.task.log` for sustained
+  `[keepalive] /talent OK … warm`; if it walls every few min DESPITE the open browser, it's
+  contention (Fernanda using Recruiter in parallel), not idle. See memory
+  `project_recruiter_seat_keepalive`.
+
+- **Restarting the daemon task is finicky** (cost ~1h on 2026-06-05). `schtasks /End`
+  orphans `node`; a `taskkill /F /IM node.exe` then leaves the **session-0 `powershell.exe`
+  wrapper alive as a phantom**, and `MultipleInstancesPolicy=IgnoreNew` makes every start
+  request stick in "Queued". To restart: kill BOTH `node.exe` AND the session-0 wrapper
+  `powershell.exe`. And on-demand start of the S4U BootTrigger task only works at boot or
+  while `linkedin-bot` is interactively logged on — otherwise `schtasks /Run` /
+  `Start-ScheduledTask` just QUEUE. Reliable starts: reboot, or `run-daemon-visible.bat` in
+  the interactive linkedin-bot session (which is the activation context anyway).
+
 - **Saving / restoring the session** (host scripts in `C:\Users\Public\extension\`):
   - `backup-recruiter-session.ps1` → copies `.linkedin-profile` cookies + Local State to
     `.linkedin-profile-backup\<stamp>\` (+ `LATEST.txt`).

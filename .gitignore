@@ -13,6 +13,8 @@ docker/volumes/
 .e2e-profile/
 extension/.linkedin-profile/
 extension/.linkedin-state.json
+extension/.linkedin-budget.json
+extension/.debug/
 extension/linkedin-debug-*.png
 extension/dock-state-probe.png
 test-results/
