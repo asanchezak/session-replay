@@ -179,6 +179,55 @@ describe("RunDetailPage Vision chip", () => {
     expect(screen.getByText("Hi Senior Python Engineer")).toBeInTheDocument();
   });
 
+  it("renders LinkedIn lead rows for lightweight lead-sourcing runs", async () => {
+    const runId = "run-leads-1";
+    const workflowId = "wf-leads-1";
+    (global as any).fetch = vi.fn(async (url: string) => {
+      const json = async () => {
+        if (url.includes(`/runs/${runId}/events`)) return [];
+        if (url.includes(`/runs/${runId}`)) {
+          return buildRun(runId, workflowId, {
+            origin: {
+              event_kind: "linkedin_lead_search",
+              job_payload: { job_id: 304 },
+            },
+            linkedin_leads: [
+              {
+                id: 42,
+                name: "Maria Lead",
+                headline: "Senior Frontend Engineer",
+                profile_url: "https://www.linkedin.com/in/maria-lead",
+                status: "created",
+                odoo_url: "https://odoo.example.com/web#id=42",
+                refreshed_at: "2026-06-05T10:00:00Z",
+              },
+            ],
+          });
+        }
+        if (url.includes(`/workflows/${workflowId}`)) return buildWorkflow(workflowId);
+        if (url.includes(`/agent/${runId}/outcomes`)) return buildOutcomes(false);
+        return [];
+      };
+      return { ok: true, status: 200, json, text: async () => JSON.stringify(await json()) };
+    });
+
+    renderPage(runId);
+
+    expect(await screen.findByText("LinkedIn Leads Pushed to Odoo")).toBeInTheDocument();
+    expect(screen.getByText("Job #304 · 1 lead")).toBeInTheDocument();
+    expect(screen.getByText("Maria Lead")).toBeInTheDocument();
+    expect(screen.getByText("Senior Frontend Engineer")).toBeInTheDocument();
+    expect(screen.getByText("created")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "LinkedIn" })).toHaveAttribute(
+      "href",
+      "https://www.linkedin.com/in/maria-lead",
+    );
+    expect(screen.getByRole("link", { name: "View in Odoo" })).toHaveAttribute(
+      "href",
+      "https://odoo.example.com/web#id=42",
+    );
+  });
+
   it("does not render the Vision chip when screenshot_meta is null", async () => {
     installFetch({ runId: "run-text-only", workflowId: "wf-2", withScreenshot: false });
     renderPage("run-text-only");

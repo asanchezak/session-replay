@@ -107,6 +107,29 @@ const PREVIEW_CTX_SAMPLE: Record<string, string> = {
   employment_model: "Remote",
 };
 
+type TriggerEventKind = "linkedin_lead_search" | "new_job_position";
+
+const TRIGGER_EVENT_OPTIONS: Array<{
+  value: TriggerEventKind;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "linkedin_lead_search",
+    label: "Lead sourcing",
+    description: "Search results only: name, headline, and LinkedIn URL. No profile visits or Easy Recruit scoring.",
+  },
+  {
+    value: "new_job_position",
+    label: "Applicant scraping",
+    description: "Advanced: visits profiles, extracts full dossiers, pushes applicants, and runs Easy Recruit scoring.",
+  },
+];
+
+function triggerEventLabel(value: string): string {
+  return TRIGGER_EVENT_OPTIONS.find((option) => option.value === value)?.label || value;
+}
+
 function renderTemplatePreview(template: string, ctx: Record<string, string>): string {
   return template.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, key) => {
     const v = ctx[key as string];
@@ -171,6 +194,7 @@ export default function WorkflowDetailPage() {
   const [webhookTriggers, setWebhookTriggers] = useState<WebhookTrigger[]>([]);
   const [showAddTrigger, setShowAddTrigger] = useState(false);
   const [newTriggerConnectorId, setNewTriggerConnectorId] = useState("");
+  const [newTriggerEventKind, setNewTriggerEventKind] = useState<TriggerEventKind>("linkedin_lead_search");
   const [triggerSaving, setTriggerSaving] = useState(false);
   const [triggerError, setTriggerError] = useState<string | null>(null);
   const [triggerNowUrl, setTriggerNowUrl] = useState("");
@@ -227,10 +251,11 @@ export default function WorkflowDetailPage() {
     try {
       await request("POST", `/workflows/${workflowId}/webhook-triggers`, {
         connector_id: newTriggerConnectorId,
-        event_kind: "new_job_position",
+        event_kind: newTriggerEventKind,
       });
       setShowAddTrigger(false);
       setNewTriggerConnectorId("");
+      setNewTriggerEventKind("linkedin_lead_search");
       await fetchWebhookTriggers();
     } catch (e) {
       setTriggerError(e instanceof Error ? e.message : "Failed to create trigger");
@@ -1129,7 +1154,7 @@ export default function WorkflowDetailPage() {
                           <span className={`w-2 h-2 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
                           <span className="text-text-primary">{connName}</span>
                           <span className="text-text-secondary">—</span>
-                          <span className="text-info text-xs">{t.event_kind}</span>
+                          <span className="text-info text-xs">{triggerEventLabel(t.event_kind)}</span>
                           {t.last_fired_at && (
                             <span className="text-text-gray text-xs">
                               last fired {new Date(t.last_fired_at).toLocaleDateString()}
@@ -1196,7 +1221,21 @@ export default function WorkflowDetailPage() {
                 </div>
                 <div>
                   <label className="text-xs text-text-secondary block mb-1">Event</label>
-                  <div className="px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-secondary text-sm">new_job_position</div>
+                  <select
+                    aria-label="Trigger event kind"
+                    value={newTriggerEventKind}
+                    onChange={(e) => setNewTriggerEventKind(e.target.value as TriggerEventKind)}
+                    className="w-full px-2 py-1.5 rounded-md bg-bg-input border border-border text-text-primary text-sm focus:outline-none focus:border-accent"
+                  >
+                    {TRIGGER_EVENT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-text-secondary">
+                    {TRIGGER_EVENT_OPTIONS.find((option) => option.value === newTriggerEventKind)?.description}
+                  </p>
                 </div>
                 {triggerError && <p className="text-xs text-error">{triggerError}</p>}
                 <div className="flex gap-2">
@@ -1204,7 +1243,7 @@ export default function WorkflowDetailPage() {
                     className="px-3 py-1.5 rounded-md bg-accent text-white text-xs hover:bg-accent-hover disabled:opacity-50">
                     {triggerSaving ? "Saving…" : "Save"}
                   </button>
-                  <button type="button" onClick={() => { setShowAddTrigger(false); setTriggerError(null); }}
+                  <button type="button" onClick={() => { setShowAddTrigger(false); setTriggerError(null); setNewTriggerEventKind("linkedin_lead_search"); }}
                     className="px-3 py-1.5 rounded-md border border-border text-text-secondary text-xs hover:text-text-primary">
                     Cancel
                   </button>

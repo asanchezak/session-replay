@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
@@ -107,7 +107,18 @@ async def trigger_workflow_now(
 
 class CreateTriggerRequest(BaseModel):
     connector_id: str
-    event_kind: str = Field(default="new_job_position", pattern=r"^new_job_position$")
+    event_kind: str = Field(
+        default="linkedin_lead_search",
+        description="LinkedIn trigger kind. lead_search is the default lightweight flow.",
+    )
+
+    @field_validator("event_kind")
+    @classmethod
+    def validate_event_kind(cls, value: str) -> str:
+        if value not in SUPPORTED_EVENT_KINDS:
+            allowed = ", ".join(sorted(SUPPORTED_EVENT_KINDS))
+            raise ValueError(f"Unsupported event_kind '{value}'. Supported: {allowed}.")
+        return value
 
 
 @router.get("/workflows/{workflow_id}/webhook-triggers")

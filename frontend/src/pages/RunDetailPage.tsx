@@ -205,6 +205,7 @@ interface RunDetail {
     triggered_by?: string | null;
   } | null;
   linkedin_applicants?: LinkedInApplicant[];
+  linkedin_leads?: LinkedInLead[];
 }
 
 interface OutreachTarget {
@@ -237,6 +238,17 @@ interface LinkedInApplicant {
   reasoning?: string | null;
   easy_recruit_status?: string | null;
   odoo_url?: string | null;
+  refreshed_at?: string;
+}
+
+interface LinkedInLead {
+  id: number | null;
+  name: string;
+  headline?: string;
+  profile_url?: string;
+  status?: string;
+  outreach_status?: string;
+  odoo_url?: string;
   refreshed_at?: string;
 }
 
@@ -380,7 +392,9 @@ export default function RunDetailPage() {
     try {
       const data = await request<RunEvent[]>("GET", `/runs/${runId}/events?limit=500`);
       setEvents(data);
-    } catch {}
+    } catch {
+      /* Best-effort: the run summary remains useful without the event log. */
+    }
   }, [runId, request]);
 
   const fetchOutcomes = useCallback(async () => {
@@ -403,7 +417,9 @@ export default function RunDetailPage() {
     try {
       const data = await request<WorkflowDetail>("GET", `/workflows/${workflowId}`);
       setWorkflow(data);
-    } catch {}
+    } catch {
+      /* Best-effort: run details can render without the workflow metadata. */
+    }
   }, [request]);
 
   const [outreach, setOutreach] = useState<MessageTargetsResponse | null>(null);
@@ -693,6 +709,8 @@ export default function RunDetailPage() {
   const progressPct = run.total_steps > 0 ? Math.round((run.current_step_index / run.total_steps) * 100) : 0;
   const pushedApplicants = run.linkedin_applicants || [];
   const displayedApplicants = pushedApplicants;
+  const pushedLeads = run.linkedin_leads || [];
+  const displayedLeads = pushedLeads;
 
   const interventionStep = run.status === "waiting_for_user" ? currentStep : null;
   const interventionReason = run.pause_reason || run.error_summary || "The workflow was paused";
@@ -966,6 +984,83 @@ export default function RunDetailPage() {
               </div>
             ))}
           </div>
+        </Card>
+      )}
+
+      {run.origin?.event_kind === "linkedin_lead_search" && (
+        <Card className="mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-medium text-text-primary">LinkedIn Leads Pushed to Odoo</h2>
+              <p className="text-xs text-text-secondary mt-0.5">
+                Job #{run.origin?.job_payload?.job_id ?? "—"} · {displayedLeads.length} lead{displayedLeads.length === 1 ? "" : "s"}
+              </p>
+            </div>
+          </div>
+          {displayedLeads.length === 0 ? (
+            <div className="text-xs text-text-secondary py-4 text-center">
+              No leads pushed yet. Lead rows appear here after the daemon completes the search-results flow and Odoo accepts the batch.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase text-text-gray border-b border-border">
+                    <th className="py-2 pr-3 font-medium">Name</th>
+                    <th className="py-2 pr-3 font-medium">Headline</th>
+                    <th className="py-2 pr-3 font-medium">Status</th>
+                    <th className="py-2 pr-3 font-medium">Links</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayedLeads.map((lead, idx) => (
+                    <tr key={`${lead.id ?? "lead"}-${lead.profile_url ?? idx}`} className="border-b border-border/40 last:border-b-0">
+                      <td className="py-2 pr-3">
+                        <div className="text-text-primary">{lead.name || <span className="text-text-gray">(unnamed)</span>}</div>
+                        {lead.refreshed_at && (
+                          <div className="text-[11px] text-text-gray">
+                            updated {formatTimeShort(lead.refreshed_at)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-text-secondary max-w-[28rem]">
+                        <span className="line-clamp-2" title={lead.headline || ""}>
+                          {lead.headline || "—"}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-text-secondary">
+                        {lead.outreach_status || lead.status || "—"}
+                      </td>
+                      <td className="py-2 pr-3 text-xs">
+                        <div className="flex gap-2">
+                          {lead.profile_url && (
+                            <a
+                              href={lead.profile_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-info hover:underline"
+                            >
+                              LinkedIn
+                            </a>
+                          )}
+                          {lead.odoo_url && (
+                            <a
+                              href={lead.odoo_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-accent hover:underline"
+                            >
+                              View in Odoo
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
 

@@ -155,6 +155,31 @@ async def test_get_run_exposes_workflow_snapshot_steps(db_session):
 
 
 @pytest.mark.asyncio
+async def test_get_run_exposes_linkedin_leads_snapshot(db_session):
+    _, run_id = await _seed_run(db_session, status="running")
+    run_obj = await db_session.get(ExecutionRun, uuid.UUID(run_id))
+    assert run_obj is not None
+    run_obj.origin = {"event_kind": "linkedin_lead_search", "job_payload": {"job_id": "304"}}
+    run_obj.linkedin_leads = [
+        {
+            "id": 10,
+            "name": "Maria Lead",
+            "headline": "Senior Engineer",
+            "profile_url": "https://www.linkedin.com/in/maria-lead",
+            "status": "created",
+            "odoo_url": "https://odoo.example.com/web#id=10",
+        }
+    ]
+    await db_session.flush()
+
+    result = await get_run(run_id, db=db_session)
+
+    assert result["origin"]["event_kind"] == "linkedin_lead_search"
+    assert result["linkedin_leads"] == run_obj.linkedin_leads
+    assert result["linkedin_leads"][0]["name"] == "Maria Lead"
+
+
+@pytest.mark.asyncio
 async def test_runs_error_paths_direct(db_session, monkeypatch):
     fake = str(uuid.uuid4())
     nf = await get_run(fake, db=db_session)

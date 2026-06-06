@@ -200,6 +200,7 @@ async def get_run(
         "workflow_snapshot": {"steps": (run.workflow_snapshot or {}).get("steps", [])},
         "origin": run.origin or None,
         "linkedin_applicants": run.linkedin_applicants or [],
+        "linkedin_leads": run.linkedin_leads or [],
     }
 
 

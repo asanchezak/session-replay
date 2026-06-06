@@ -30,6 +30,12 @@ interface OdooConfigDraft {
   password: string;
 }
 
+function triggerEventLabel(value: string): string {
+  if (value === "linkedin_lead_search") return "Lead sourcing";
+  if (value === "new_job_position") return "Applicant scraping";
+  return value;
+}
+
 export default function ConnectorsPage() {
   const { data: connectors, loading, error, fetchData } = useApiData<Connector[]>();
   const { request } = useApi();
@@ -179,9 +185,6 @@ export default function ConnectorsPage() {
               className="bg-[#2A2E3D] text-[#E8EAED] border border-[#2D3148] rounded-md px-3 py-2 text-sm"
             >
               <option value="odoo">Odoo</option>
-              <option value="salesforce">Salesforce</option>
-              <option value="hubspot">HubSpot</option>
-              <option value="custom">Custom API</option>
             </select>
             {newType === "odoo" && (
               <>
@@ -310,7 +313,7 @@ export default function ConnectorsPage() {
                             <div key={t.id} className="flex items-center gap-2 text-xs">
                               <span className={`w-1.5 h-1.5 rounded-full ${t.enabled ? "bg-success" : "bg-text-gray"}`} />
                               <span className="text-text-secondary font-mono">{t.workflow_id.slice(0, 8)}…</span>
-                              <span className="text-info">{t.event_kind}</span>
+                              <span className="text-info">{triggerEventLabel(t.event_kind)}</span>
                             </div>
                           ))}
                         </div>

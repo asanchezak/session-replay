@@ -40,9 +40,30 @@ function renderPage() {
   );
 }
 
+function mockLocalStorage() {
+  const store = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn((key: string) => store.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      store.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      store.delete(key);
+    }),
+    clear: vi.fn(() => {
+      store.clear();
+    }),
+    key: vi.fn((index: number) => Array.from(store.keys())[index] ?? null),
+    get length() {
+      return store.size;
+    },
+  });
+}
+
 describe("WorkflowDetailPage", () => {
   beforeEach(() => {
     vi.useRealTimers();
+    mockLocalStorage();
   });
 
   afterEach(() => {
@@ -76,7 +97,13 @@ describe("WorkflowDetailPage", () => {
 
     expect(openSpy).toHaveBeenCalledWith("/runs/pending", "session-replay-run");
     expect(postMessageSpy).toHaveBeenCalledWith(
-      { type: "DASHBOARD_RUN_WORKFLOW", workflowId: "wf-1" },
+      {
+        type: "DASHBOARD_RUN_WORKFLOW",
+        workflowId: "wf-1",
+        executionTarget: "daemon",
+        loadSession: false,
+        targetUrl: "https://x.example",
+      },
       "*",
     );
 
@@ -113,6 +140,9 @@ describe("WorkflowDetailPage", () => {
         type: "DASHBOARD_RUN_WORKFLOW",
         workflowId: "wf-1",
         goal: "Extract the main heading",
+        executionTarget: "daemon",
+        loadSession: false,
+        targetUrl: "https://x.example",
       },
       "*",
     );
@@ -203,6 +233,9 @@ describe("WorkflowDetailPage", () => {
         workflowId: "wf-1",
         params: { target_url: "https://example.com/search" },
         goal: "Collect the first result",
+        executionTarget: "daemon",
+        loadSession: false,
+        targetUrl: "https://x.example",
       },
       "*",
     );
@@ -288,6 +321,9 @@ describe("WorkflowDetailPage", () => {
         type: "DASHBOARD_RUN_WORKFLOW",
         workflowId: "wf-1",
         params: { recipient: "Hi Senior Python Engineer" },
+        executionTarget: "daemon",
+        loadSession: false,
+        targetUrl: "https://x.example",
       },
       "*",
     );
@@ -440,5 +476,72 @@ describe("WorkflowDetailPage", () => {
         methods: [expect.objectContaining({ kind: "extract_shapes", shapes: [expect.objectContaining({ key: "about", extract_hints: "Keep only the summary paragraph." })] })],
       }),
     );
+  });
+
+  it("creates a lightweight LinkedIn lead-sourcing trigger from workflow detail", async () => {
+    const semanticWorkflow = {
+      ...baseWorkflow,
+      analysis: {
+        workflow_goal: "Collect LinkedIn leads",
+        workflow_summary: "Lead sourcing workflow",
+        confidence_overall: 0.95,
+        replay_strategy: "parameterized",
+        is_user_edited: true,
+        phases: [],
+        parameters: [],
+        output_spec: { type: "structured_data", schema: null, confidence: 0.95 },
+      },
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method || "GET";
+      if (url.endsWith("/workflows/wf-1") && method === "GET") {
+        return { ok: true, status: 200, json: async () => semanticWorkflow } as Response;
+      }
+      if (url.endsWith("/connectors") && method === "GET") {
+        return { ok: true, status: 200, json: async () => [{ id: "conn-1", name: "Odoo HR", type: "odoo", status: "connected" }] } as Response;
+      }
+      if (url.endsWith("/workflows/wf-1/webhook-triggers") && method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ triggers: [] }) } as Response;
+      }
+      if (url.endsWith("/workflows/wf-1/webhook-triggers") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "trigger-1",
+            connector_id: "conn-1",
+            workflow_id: "wf-1",
+            event_kind: "linkedin_lead_search",
+            enabled: true,
+          }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => [] } as Response;
+    });
+    (global as any).fetch = fetchMock;
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Demo WF/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Connect webhook/i }));
+    const comboBoxes = screen.getAllByRole("combobox");
+    fireEvent.change(comboBoxes[0], { target: { value: "conn-1" } });
+    expect(screen.getByLabelText("Trigger event kind")).toHaveValue("linkedin_lead_search");
+    expect(screen.getByText(/Search results only/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const postCall = fetchMock.mock.calls.find(([input, init]) =>
+        String(input).endsWith("/workflows/wf-1/webhook-triggers") && init?.method === "POST"
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(String(postCall?.[1]?.body || "{}"));
+      expect(body).toEqual({
+        connector_id: "conn-1",
+        event_kind: "linkedin_lead_search",
+      });
+    });
   });
 });

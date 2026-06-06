@@ -38,7 +38,9 @@ export default function AppShell() {
         try {
           const wf = await request<any>("GET", `/workflows/${r.workflow_id}`);
           workflowName = wf.name;
-        } catch {}
+        } catch {
+          /* Best-effort: the waiting-run banner can show without workflow name. */
+        }
         setWaitingRun({
           id: r.id,
           workflow_id: r.workflow_id,
@@ -130,6 +132,7 @@ function Sidebar() {
       );
       setRunsCount(active.length);
     } catch {
+      /* Best-effort: the badge can stay stale if the count refresh fails. */
     }
   };
 
