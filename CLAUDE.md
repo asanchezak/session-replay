@@ -154,6 +154,19 @@ extract strategy, the headline fix) needs a daemon restart, which on-demand only
 changes for a moment when Fernanda is at the host, or for the next boot. Pure-workflow flows
 (navigate/click/existing-strategy) avoid this entirely.
 
+### Recruiter ↔ Odoo integration — DESIGNED 2026-06-08 (NOT wired; Odoo disconnected)
+Full design: **`docs/recruiter-odoo-integration-design.md`**. Loop: Odoo new job position →
+create `-EZ <position>` project (→ push its URL to a new `hr.job.recruiter_project_url`) → search
+→ save → bulk-message (→ set `linkedin.lead.outreach_status=sent`). Requirement status:
+**A** (candidate name → `linkedin.lead`) ✅ exists; **B** (already-messaged tracking) field
+`outreach_status` exists, GAP = the after-send push-back to flip it; **C** (project link →
+`hr.job`) new (capture project URL + push). The **unlock** = param substitution at run creation
+(substitute `runtime_params` into step values in the run snapshot — **backend-only → warm seat
+safe**). akodoo pieces (`hr.job.recruiter_project_url` + `/akcr/api/job_project_link` +
+`/akcr/api/lead_outreach_update` + lead `sent_at`) are **deferred** (Odoo not connected). Keying:
+join leads ↔ messaged candidates on the `/talent/profile/` URL. Build order + open decisions
+(naming, trigger scope, keep message-send manual/gated) are in the doc.
+
 ### Recruiter /talent selector + build tips (learned 2026-06-08)
 - **The /talent UI is in SPANISH** ("Guardar en proyecto", "Seleccionar proyecto existente").
   Recorded ENGLISH `text` selectors won't match. Prefer **css / `data-test-*` / stable ids**
