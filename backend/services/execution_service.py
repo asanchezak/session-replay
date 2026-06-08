@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -21,6 +22,51 @@ from services.workflow_service import WorkflowService
 logger = logging.getLogger(__name__)
 log = get_logger()
 
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+def _substitute_runtime_params(steps: list[dict], runtime_params: dict) -> int:
+    """In-place {{key}} substitution into each step's value / success_condition /
+    methods using runtime_params.
+
+    The lightweight "literal" counterpart of
+    TemplateService.substitute_parameters: it lets a plain (non-analyzed,
+    replay_strategy="literal") workflow be parameterized just by embedding
+    {{placeholders}} in its step values — exactly what the machine-built
+    Recruiter sub-workflows need (e.g. project name "-EZ {{position}}"). A step
+    with no placeholder is left untouched, so this is a safe no-op for every
+    existing literal workflow. Returns the number of placeholder hits.
+    """
+    if not runtime_params:
+        return 0
+    hits = 0
+
+    def _repl(match: re.Match) -> str:
+        nonlocal hits
+        key = match.group(1)
+        if key in runtime_params:
+            hits += 1
+            return str(runtime_params[key])
+        return match.group(0)
+
+    def _walk(node):
+        if isinstance(node, str):
+            return _PLACEHOLDER_RE.sub(_repl, node)
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        return node
+
+    for step in steps:
+        if isinstance(step.get("value"), str):
+            step["value"] = _walk(step["value"])
+        if isinstance(step.get("success_condition"), dict):
+            step["success_condition"] = _walk(step["success_condition"])
+        if isinstance(step.get("methods"), list):
+            step["methods"] = _walk(step["methods"])
+    return hits
+
 
 class ExecutionService:
     """Service for managing execution runs and their state transitions."""
@@ -36,6 +82,7 @@ class ExecutionService:
         user_id: str | None = None,
         execution_plan: dict | None = None,
         execution_goal: str | None = None,
+        runtime_params: dict | None = None,
     ) -> ExecutionRun:
         """Create a new execution run for a workflow."""
         logger.info("Creating run for workflow_id=%s", workflow_id)
@@ -69,6 +116,19 @@ class ExecutionService:
                 for s in steps
             ],
         }
+        # Literal-workflow parameterization: substitute {{key}} placeholders in
+        # the snapshot's step values with runtime_params. For "parameterized"
+        # workflows the substituted steps arrive via execution_plan and overwrite
+        # these in apply_execution_plan below; this pass is what lets the plain
+        # machine-built Recruiter sub-workflows be driven with runtime params
+        # too. No-op when there are no placeholders.
+        if runtime_params:
+            hits = _substitute_runtime_params(snapshot["steps"], runtime_params)
+            if hits:
+                logger.info(
+                    "create_run: substituted %d runtime placeholder(s) for workflow %s",
+                    hits, workflow_id,
+                )
         snapshot["original_steps"] = deepcopy(snapshot["steps"])
 
         analysis_data = await self._load_analysis(workflow_id)
@@ -610,7 +670,51 @@ class ExecutionService:
                         run_id, event_kind,
                     )
 
+            # Recruiter (/talent) automation pipeline: chain to the next step
+            # (create-project → search → save). advance() pushes the relevant
+            # write-back to Odoo and enqueues the next daemon run. Same
+            # commit-before-await discipline as the push hooks above.
+            if new_status == RunStatus.COMPLETED and (event_kind or "").startswith(
+                "recruiter_"
+            ):
+                try:
+                    await self.session.commit()
+                except Exception:
+                    logger.exception(
+                        "Pre-advance session commit failed for run %s", run_id
+                    )
+                try:
+                    adv = await self._advance_recruiter_pipeline_after_completion(run)
+                    logger.info(
+                        "Recruiter pipeline advance for run %s (%s): %s",
+                        run_id, event_kind, adv,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Recruiter pipeline advance failed for run %s (%s)",
+                        run_id, event_kind,
+                    )
+
         return run
+
+    async def _advance_recruiter_pipeline_after_completion(self, run: ExecutionRun) -> dict:
+        """Advance the Recruiter automation pipeline in a fresh session.
+
+        Sibling of the push hooks: when a recruiter_* run COMPLETES, dispatch to
+        RecruiterPipelineService.advance, which performs the Odoo write-back for the
+        finished stage and enqueues the next daemon run. The lazy import avoids a
+        circular import (recruiter_pipeline_service imports ExecutionService).
+        """
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        async with async_session_factory() as adv_session:
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            adv_run = (await adv_session.execute(stmt)).scalar_one_or_none()
+            svc = RecruiterPipelineService(adv_session)
+            result = await svc.advance(adv_run if adv_run is not None else run)
+            await adv_session.commit()
+            return result
 
     async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:
         """Run post-completion Odoo applicant push in a fresh session.

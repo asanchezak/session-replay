@@ -1072,6 +1072,7 @@ async def run_workflow_with_parameters(
             workflow_id=workflow_id,
             execution_plan=execution_plan,
             execution_goal=req.execution_goal,
+            runtime_params=req.runtime_params,
         )
         if req.execution_target == "daemon":
             # Tag the run for the unattended daemon to pick up (it broadens its

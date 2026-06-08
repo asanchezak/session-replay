@@ -24,7 +24,12 @@ EVENT_KIND_NEW_JOB_POSITION = "new_job_position"
 # these two event kinds actually fires is decided by which WebhookTrigger row is
 # enabled for the connector (see seed_linkedin_lead_search_bindings.py).
 EVENT_KIND_LINKEDIN_LEAD = "linkedin_lead_search"
+# Recruiter (/talent) automation pipeline: a multi-run orchestration (create
+# project → search → save), so it's fired via RecruiterPipelineService.start(),
+# NOT the single-run _fire path below.
+EVENT_KIND_RECRUITER_PIPELINE = "recruiter_pipeline"
 SUPPORTED_EVENT_KINDS = {EVENT_KIND_NEW_JOB_POSITION, EVENT_KIND_LINKEDIN_LEAD}
+ALLOWED_TRIGGER_EVENT_KINDS = SUPPORTED_EVENT_KINDS | {EVENT_KIND_RECRUITER_PIPELINE}
 
 # A run in any of these statuses is still "live" — the single daemon is or will
 # be driving it. trigger-now refuses to pile a second run on top so testers
@@ -56,7 +61,7 @@ class WebhookTriggerService:
     async def create_trigger(
         self, connector_id: str, workflow_id: str, event_kind: str
     ) -> WebhookTrigger:
-        if event_kind not in SUPPORTED_EVENT_KINDS:
+        if event_kind not in ALLOWED_TRIGGER_EVENT_KINDS:
             raise ValueError(f"Unsupported event_kind '{event_kind}'.")
         existing = await self._find_trigger(connector_id, workflow_id, event_kind)
         if existing:
@@ -168,6 +173,26 @@ class WebhookTriggerService:
                 trigger.last_fired_at = datetime.now(UTC)
                 flag_modified(trigger, "last_job_payload")
                 await self.session.flush()
+
+        # Recruiter (/talent) automation pipeline: a separate, multi-run
+        # orchestration (create project → search → save). Fire start() per enabled
+        # recruiter_pipeline trigger instead of the single-run _fire path above.
+        pipeline_triggers = [
+            t
+            for t in await self.list_triggers(connector_id=connector_id)
+            if t.enabled and t.event_kind == EVENT_KIND_RECRUITER_PIPELINE
+        ]
+        if pipeline_triggers:
+            from services.recruiter_pipeline_service import RecruiterPipelineService
+            pipeline_svc = RecruiterPipelineService(self.session)
+            for trigger in pipeline_triggers:
+                run_id = await pipeline_svc.start(connector_id, job_data)
+                if run_id:
+                    run_ids.append(run_id)
+                    trigger.last_job_payload = job_data
+                    trigger.last_fired_at = datetime.now(UTC)
+                    flag_modified(trigger, "last_job_payload")
+                    await self.session.flush()
         return run_ids
 
     async def _fetch_job_description(self, connector: ConnectorConfig, job_id: str) -> str:
