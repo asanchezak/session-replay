@@ -88,7 +88,18 @@ project" examples the user called out.
 - **(6) Message a single candidate — composer CAPTURED 2026-06-08 (build-only).** Entry:
   `button[aria-label='Enviar mensaje a <Name>']` on the pipeline (or the profile message icon)
   → opens the InMail composer (same one bulk uses).
-- **(7) Bulk-message — IN PROGRESS, BUILD-ONLY. NEVER send without explicit OK** (each send
+- **(7) Bulk-message — SEND LIVE-VERIFIED 2026-06-08** (`recruiter-workflows/bulk-message-send.json`).
+  Sent 2 InMails (subject "Oportunidad en Akurey" + a short Spanish body) to the active Easy
+  Recruit candidates (Andrey + Franz; Oscar excluded — archived) on explicit user go-ahead.
+  Composer closed + "messages sent successfully" toast = success (a blocked send keeps it open).
+  **KEY QUIRK — the bulk composer's subject input is HIDDEN until a Send attempt validates it.**
+  So the working pattern is: type body → click **Send #1** (harmlessly blocked → "Subject can't
+  be empty" REVEALS the now-visible subject field) → click+type the subject → **Send #2** (sends).
+  Typing the subject before that reveal silently no-ops (field not visible → not resolvable) and
+  the send is then blocked as "incomplete" (safe — nothing goes out, no credit). Recipients =
+  whoever is ACTIVE (archived excluded); messaging a 1st-degree connection is free, 2nd-degree
+  uses an InMail credit. The single-message composer (flow 6) shows the subject directly (no reveal needed).
+- **(7-orig) Bulk-message DRAFT (no send)** = `recruiter-workflows/bulk-message-draft.json`. NEVER send without explicit OK (each send
   burns an InMail credit — composer shows "N/590 créditos de InMail"). Flow:
   `/talent/hire/<projectId>/manage/all` (pipeline) → select-all → "Mensaje (N)" → InMail
   composer → Enviar. **Composer selectors captured live 2026-06-08** (the gap the recording
