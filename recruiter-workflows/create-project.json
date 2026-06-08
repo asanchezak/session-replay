@@ -1,0 +1,16 @@
+{
+  "name": "Recruiter: Create a project (-EZ prefix)",
+  "description": "Creates an EMPTY Recruiter project named '-EZ <position>'. Intended trigger (future, NOT wired yet): Odoo new job position → this workflow with the position name. The '-EZ' prefix marks our auto-created projects (identify/clean). PARAM = the project name (step 4 value) = '-EZ ' + position; that's the single value an Odoo trigger would override (daemon doesn't substitute runtime_params into step values yet → backend param-substitution is the prerequisite for the live trigger). Dedup (don't recreate '-EZ X') is trigger/reconciler logic, not the workflow. Selectors live-captured 2026-06-08: name input[data-test-project-name-input], Create button[data-test-create-button] (both stable). Flow: navigate /talent/create/get-started → type name → Create (which navigates to the new project page).",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Create-project wizard","value":"https://www.linkedin.com/talent/create/get-started"},
+    {"action_type":"scroll","intent":"form load 1"},
+    {"action_type":"scroll","intent":"form load 2"},
+    {"action_type":"type","intent":"Project name (= -EZ + position)","value":"-EZ Full Stack Developer","selector_chain":[{"type":"css","value":"input[data-test-project-name-input]"},{"type":"accessibility","value":"Project name"}]},
+    {"action_type":"scroll","intent":"settle after name"},
+    {"action_type":"click","intent":"Create project","selector_chain":[{"type":"css","value":"button[data-test-create-button]"}]},
+    {"action_type":"scroll","intent":"creating / navigating 1"},
+    {"action_type":"scroll","intent":"creating / navigating 2"}
+  ]
+}

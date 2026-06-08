@@ -120,6 +120,25 @@ project" examples the user called out.
   button present but NOT clicked. Send label is locale-dependent ("Send this message" /
   "Enviar este mensaje"). Easy Recruit sandbox = project `2051206850` (now 3 candidates:
   Oscar, Andrey, Franz — Franz added 2026-06-08 via the bridge below).
+- **(4) Create a new project — DONE & LIVE-VERIFIED 2026-06-08** (`recruiter-workflows/create-project.json`,
+  workflow `dd8fe22d`, promoted to system). Created **"-EZ Full Stack Developer"** live (confirmed
+  in /talent/projects). Flow: navigate **`/talent/create/get-started`** → type name into
+  **`input[data-test-project-name-input]`** → click **`button[data-test-create-button]`**
+  ("Create project"; the form then auto-navigates to the new project + "imports optimized search
+  results"). Goal: an Odoo **new job position** → create a Recruiter project named **`-EZ <position>`**
+  (the `-EZ` prefix marks our auto-created projects so we can find/clean them). The workflow
+  creates an **EMPTY standalone project** (candidates added later by search/save → composes:
+  create → search → save → message). Design notes for the eventual Odoo trigger (NOT connected
+  now, per user):
+  - **Param**: the project NAME (= `-EZ ` + position) is the single runtime input Odoo would
+    pass — keep it as one `type` step. The daemon doesn't substitute `runtime_params` into step
+    values yet → hardcode the example now; backend param-substitution (bake into the run snapshot
+    at creation) is the prerequisite for a live trigger.
+  - **Dedup** (don't create `-EZ X` twice for the same position) is **trigger/reconciler logic
+    (backend)**, not the workflow — the workflow just creates.
+  - Verified: created "-EZ Full Stack Developer" live → projects count 4→5, listed in
+    /talent/projects. (The "Create a project" link on /talent/projects targets
+    `/talent/create/get-started`; the form's only required field is the name.)
 - **Adding a public `/in/` profile to a project (the "Find a person" bridge, flow 9):** the
   public profile has no Save-to-project; it has a **"Ver en Recruiter"** link →
   `/talent/profile/<id>` (extract that href, navigate to it, then run save-to-project).
