@@ -74,6 +74,17 @@ project" examples the user called out.
   name) → `button[data-test-action='save']`. Params to vary: candidate URL (step 1) + project
   name (step 4 type + step 7 option text). DON'T target a real recruiting project (use the
   "Easy Recruit" sandbox) — they're María Fernanda's live projects.
+- **Archive a candidate — flow PROMOTED 2026-06-08** (`recruiter-workflows/archive-candidate.json`,
+  `77f6095c…`, system). Recruiter has **NO hard "remove from project"** — the way to take a
+  candidate out of the active pipeline is **Archive** (moves them to "Archived candidates").
+  Each pipeline row has `[data-test-component='archive-profiles-btn']` (also
+  `data-test-profile-item-actions="archive"`); there's one per row, so target the specific
+  person by name via accessibility/text **"Archive <Name>" / "Archivar a <Name>"** (a bare css
+  would archive whoever's on top). Archives with the AI "doesn't seem fit" reason. Params:
+  pipeline URL (step 1) + candidate name (step 4). Built from live-captured selectors but NOT
+  run-verified (to avoid archiving an active candidate); verify via the Archived-candidates
+  count, and a confirm click may be needed. The per-row "…" more-actions and "In N projects"
+  controls did NOT expose a remove (and the row "…" only reveals on hover → soft-misses).
 - **(6) Message a single candidate — composer CAPTURED 2026-06-08 (build-only).** Entry:
   `button[aria-label='Enviar mensaje a <Name>']` on the pipeline (or the profile message icon)
   → opens the InMail composer (same one bulk uses).

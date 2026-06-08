@@ -1,0 +1,13 @@
+{
+  "name": "Recruiter: Archive a candidate from a project",
+  "description": "Archive (Recruiter's way to remove from the active pipeline — there is no hard delete) a specific candidate from a project. Params: the project pipeline URL (step 1) and the candidate NAME in the archive selector (step 4). The Archive button is [data-test-component='archive-profiles-btn'] (stable/locale-independent) but there's one per row, so we target the specific person by name via the accessibility/text label ('Archive <Name> …' / 'Archivar a <Name> …'); a generic css would hit whoever is on top. Archiving applies the AI 'doesn't seem fit' reason and moves the candidate to 'Archived candidates'. Selectors captured live 2026-06-08. NOTE: built from captured selectors but NOT live-run-verified (to avoid archiving an active candidate); verify on a deliberate target via the 'Archived candidates' count. If a confirm dialog appears, a follow-up confirm click may be needed.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Project pipeline","value":"https://www.linkedin.com/talent/hire/2051206850/manage/all"},
+    {"action_type":"scroll","intent":"settle"},
+    {"action_type":"scroll","intent":"settle (human pause)"},
+    {"action_type":"click","intent":"Archive the target candidate (by name)","selector_chain":[{"type":"accessibility","value":"Archive Oscar"},{"type":"accessibility","value":"Archivar a Oscar"},{"type":"text","value":"Archive Oscar"},{"type":"text","value":"Archivar a Oscar"}]},
+    {"action_type":"scroll","intent":"let archive apply / any confirm settle"}
+  ]
+}
