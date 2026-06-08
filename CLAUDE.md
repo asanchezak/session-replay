@@ -74,8 +74,24 @@ project" examples the user called out.
   name) → `button[data-test-action='save']`. Params to vary: candidate URL (step 1) + project
   name (step 4 type + step 7 option text). DON'T target a real recruiting project (use the
   "Easy Recruit" sandbox) — they're María Fernanda's live projects.
-- **(7) Bulk-message — BUILD ONLY, do NOT send without explicit OK.** Recording steps 179–201.
-  The message BODY + Send selectors were never recorded → still need `recruiter-composer-probe.mjs`.
+- **(6) Message a single candidate — composer CAPTURED 2026-06-08 (build-only).** Entry:
+  `button[aria-label='Enviar mensaje a <Name>']` on the pipeline (or the profile message icon)
+  → opens the InMail composer (same one bulk uses).
+- **(7) Bulk-message — IN PROGRESS, BUILD-ONLY. NEVER send without explicit OK** (each send
+  burns an InMail credit — composer shows "N/590 créditos de InMail"). Flow:
+  `/talent/hire/<projectId>/manage/all` (pipeline) → select-all → "Mensaje (N)" → InMail
+  composer → Enviar. **Composer selectors captured live 2026-06-08** (the gap the recording
+  never recorded; it's the InMail composer, opens with an AI-drafted body, uses declarative
+  shadow DOM, ghost-loads ~5-10s so insert delay steps before reading/clicking it):
+  - subject: `input[placeholder='Añade un asunto']`
+  - body (rich-text, AI-prefilled): `div[role='textbox']`
+  - template search: `input[placeholder='Busca una plantilla…']`
+  - **Send: `button[aria-label='Enviar este mensaje']`**  ← the long-missing SEND selector
+  - save-as-template: text "Guardar como plantilla nueva"; preview: "Vista previa"
+  **Remaining for a runnable bulk draft:** the pipeline **select-all + "Mensaje (N)"** bulk-bar
+  selectors — elusive in the static HTML (likely shadow-DOM / count-dependent aria-label
+  "Seleccionar los N perfiles"). Needs one more capture: click select-all → snapshot the
+  bulk-action bar. Easy Recruit sandbox = project `2051206850` (2 candidates: Oscar + Andrey).
 
 **Iteration constraint (learned 2026-06-05):** creating + running workflows uses only the
 public AWS API (no SSH needed — the daemon claims them). But any DAEMON CODE change (new

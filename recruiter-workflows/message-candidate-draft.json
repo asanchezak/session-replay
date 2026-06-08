@@ -1,0 +1,14 @@
+{
+  "name": "Recruiter: draft an InMail to a candidate (NO SEND)",
+  "description": "Opens the InMail composer for one candidate and STOPS — it does NOT click Send. The composer auto-fills an AI-drafted body for a human to review. To actually send, a human reviews and clicks Enviar (button[aria-label='Enviar este mensaje']) — intentionally NOT in this flow (each send burns an InMail credit; sending requires explicit approval). To customize before sending: type into the body div[role='textbox'], the subject input[placeholder='Añade un asunto'], or pick a template via input[placeholder='Busca una plantilla…']. Params: the entry button name (step 3) + pipeline/candidate. Selectors captured live 2026-06-08; same composer is used by the bulk-message flow (which additionally needs the pipeline select-all + 'Mensaje (N)' bulk-bar selectors — still TODO).",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Project pipeline (Easy Recruit sandbox)","value":"https://www.linkedin.com/talent/hire/2051206850/manage/all"},
+    {"action_type":"scroll","intent":"settle"},
+    {"action_type":"click","intent":"Open InMail composer for the candidate","selector_chain":[{"type":"accessibility","value":"Enviar mensaje a Oscar"},{"type":"text","value":"Enviar mensaje a Oscar"}]},
+    {"action_type":"scroll","intent":"delay: composer loads (1)"},
+    {"action_type":"scroll","intent":"delay: composer loads (2)"},
+    {"action_type":"scroll","intent":"delay: composer loads (3)"}
+  ]
+}
