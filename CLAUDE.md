@@ -88,10 +88,23 @@ project" examples the user called out.
   - template search: `input[placeholder='Busca una plantilla…']`
   - **Send: `button[aria-label='Enviar este mensaje']`**  ← the long-missing SEND selector
   - save-as-template: text "Guardar como plantilla nueva"; preview: "Vista previa"
-  **Remaining for a runnable bulk draft:** the pipeline **select-all + "Mensaje (N)"** bulk-bar
-  selectors — elusive in the static HTML (likely shadow-DOM / count-dependent aria-label
-  "Seleccionar los N perfiles"). Needs one more capture: click select-all → snapshot the
-  bulk-action bar. Easy Recruit sandbox = project `2051206850` (2 candidates: Oscar + Andrey).
+  **Pipeline select-all + bulk Message — captured 2026-06-08:** select-all = first
+  `input.small-input` (header checkbox; a11y-text "Select all N profiles", count-dependent so
+  use the css); after selecting, the bulk-action bar (`data-test-profile-list-bulk-actions`)
+  shows **`button[data-test-action='send-message']`** ("Message (N)") → opens the bulk InMail
+  composer addressed to all selected. **DRAFT COMPLETE & VERIFIED** (no send): see
+  `recruiter-workflows/bulk-message-draft.json` — navigate pipeline → select-all → Message →
+  composer opens with N recipients ("To: … View all N"), template picker, empty body, "Send"
+  button present but NOT clicked. Send label is locale-dependent ("Send this message" /
+  "Enviar este mensaje"). Easy Recruit sandbox = project `2051206850` (now 3 candidates:
+  Oscar, Andrey, Franz — Franz added 2026-06-08 via the bridge below).
+- **Adding a public `/in/` profile to a project (the "Find a person" bridge, flow 9):** the
+  public profile has no Save-to-project; it has a **"Ver en Recruiter"** link →
+  `/talent/profile/<id>` (extract that href, navigate to it, then run save-to-project).
+  **Bridged profiles load slowly** — the first save attempt clicked through before the
+  candidate context was ready and showed "Saving…" but didn't persist; adding generous delay
+  steps after navigating the bridged profile (and before Save) fixed it. Verify saves via the
+  **project pipeline count**, not the bridged `/talent/profile` URL (which can show "Projects 0").
 
 **Iteration constraint (learned 2026-06-05):** creating + running workflows uses only the
 public AWS API (no SSH needed — the daemon claims them). But any DAEMON CODE change (new

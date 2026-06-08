@@ -1,0 +1,18 @@
+{
+  "name": "Recruiter: bulk-message a project — DRAFT (NO SEND)",
+  "description": "Selects all candidates in a project pipeline, opens the bulk InMail composer, and STOPS. It does NOT type a message and does NOT click Send. To actually send (gated, burns InMail credits): a human reviews, optionally picks a template (input[placeholder='Busca una plantilla…']) / edits subject (input[placeholder='Añade un asunto']) + body (div[role='textbox']), then clicks Enviar (button[aria-label='Enviar este mensaje']) — intentionally NOT in this flow. Params: project pipeline URL (step 1). Selectors locked offline 2026-06-08. NOTE select-all 'Select all N profiles' text is count-dependent; the css input.small-input (first match = header select-all) is the stable primary.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Project pipeline","value":"https://www.linkedin.com/talent/hire/2051206850/manage/all"},
+    {"action_type":"scroll","intent":"settle"},
+    {"action_type":"click","intent":"Select all candidates","selector_chain":[{"type":"css","value":"input.small-input"},{"type":"text","value":"Select all 3 profiles"}]},
+    {"action_type":"scroll","intent":"bulk-action bar appears"},
+    {"action_type":"click","intent":"Open bulk message composer","selector_chain":[{"type":"css","value":"button[data-test-action='send-message']"},{"type":"text","value":"Message (3)"}]},
+    {"action_type":"scroll","intent":"composer loads 1"},
+    {"action_type":"scroll","intent":"composer loads 2"},
+    {"action_type":"scroll","intent":"composer loads 3"},
+    {"action_type":"scroll","intent":"composer loads 4"},
+    {"action_type":"scroll","intent":"composer loads 5"}
+  ]
+}
