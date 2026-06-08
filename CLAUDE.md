@@ -60,9 +60,17 @@ project" examples the user called out.
   `{"execution_target":"daemon","operator_id":"fernanda","execution_options":{"use_profile":true,"snapshot":true}}`.
   **Known gap:** `headline` comes back `""` (the title sits deeper in the card than the
   innerText split reaches) — fix `scrapeRecruiterSearch` offline against a results snapshot,
-  then redeploy. **Still hardcoded:** the saved-search URL (`searchHistoryId`). Arbitrary
-  keyword search = the advanced-search form (recording steps 28–75) + a real param system
-  (today the daemon reads raw `workflow_snapshot.steps`, doesn't substitute runtime_params).
+  then redeploy. The saved-search URL (`searchHistoryId`) is hardcoded — this `5bdc4d51` flow is
+  the "re-run a saved search" variant.
+- **(2b) Parameterized search — DONE via the AI Copilot 2026-06-08** (`recruiter-workflows/keyword-search.json`,
+  workflow `ecd976b1`, system). The recording's REAL search entry (steps 13–15) is the **AI Copilot**,
+  NOT the advanced facets or the global box (both need a finicky commit/submit that wouldn't take —
+  facets apply on blur, the global box didn't submit). Type **"Buscar candidatos para: <position>"**
+  into **`textarea.copilot-chat-input__textbox`** + Enter (`\n`) → the AI builds & runs the search →
+  results → `recruiter_search_people`. Live-verified: "Full Stack Developer" → 5 candidates, real
+  `/talent/search?searchContextId=…` page. PARAM = the position in the request (the single value an
+  Odoo trigger overrides). **Lesson: mine the recording's recorded selectors for the real entry
+  before fighting the live UI** — the human used the Copilot, not the facets.
 - **(3) Save-to-project — DONE & LIVE-VERIFIED (2026-06-08).** Spec
   `recruiter-workflows/save-to-project.json` (workflow `4da44557…`). Live run `00eac46b`
   saved Oscar Carmona Mora → "Easy Recruit"; his profile went to **"En 2 proyectos"** and the
