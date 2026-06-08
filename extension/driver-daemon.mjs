@@ -41,7 +41,7 @@ import {
 } from "./src/behavior/profile-parsers.mjs";
 import { experienceParasCore, sectionListItemsCore, subpageTextCore } from "./src/behavior/profile-dom.mjs";
 import { prepareConnectNoteDialog, NOTE_TEXTAREA_SELECTOR } from "./src/behavior/connect-compose-core.mjs";
-import { PHASE_A_VERBS, resolveLocator, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
+import { PHASE_A_VERBS, resolveLocator, resolveLocatorWithWait, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
 import { evaluateSuccessCondition, successConditionInputs } from "./src/behavior/step-interpreter.mjs";
 import { snapshotPage } from "./src/behavior/page-snapshot.mjs";
 
@@ -326,6 +326,9 @@ async function assertNoBlocker(page, label) {
 // gated by STEP_SHOTS (default on); a screenshot must never break a live scrape.
 const STEP_SHOTS = process.env.STEP_SHOTS !== "0";
 const STEP_SHOT_SETTLE_MS = Number(process.env.STEP_SHOT_SETTLE_MS || "700");
+// Generic Phase-A click/type: wait this long for an async-rendered target (the
+// /talent SPA) to appear before resolving — replaces blind no-op delay steps.
+const STEP_RESOLVE_TIMEOUT_MS = Number(process.env.STEP_RESOLVE_TIMEOUT_MS || "12000");
 let navSeq = 0;
 function resetStepShots() { navSeq = 0; }
 async function uploadStepShot(page, label) {
@@ -1681,8 +1684,13 @@ async function driveRun(run) {
           }
           let acted = false;
           let actedTarget = null;
-          for (const a of attempts) {
-            const target = await resolveLocator(page, a.selector_chain);
+          for (let ai = 0; ai < attempts.length; ai++) {
+            const a = attempts[ai];
+            // Wait for the PRIMARY recorded selector to render (async /talent SPA)
+            // before acting; fallback methods[] selectors are tried immediately.
+            const target = ai === 0
+              ? await resolveLocatorWithWait(page, a.selector_chain, { timeoutMs: STEP_RESOLVE_TIMEOUT_MS })
+              : await resolveLocator(page, a.selector_chain);
             if (!target) continue;
             if (a.action_type === "type") {
               acted = await typeResolved(page, target, a.value, { moveMouseAlongBezier, typeHumanLike, orand });
@@ -1704,6 +1712,11 @@ async function driveRun(run) {
         } else {
           await reportStepResult(runId, idx, action || "noop");
         }
+        // Dashboard screenshot for EVERY generic step (each state update) so a human
+        // watching the run sees the action's result. uploadStepShot settles
+        // (STEP_SHOT_SETTLE_MS) before capturing, and the wait-for-selector above
+        // means the page is loaded — not mid-render. No-op when STEP_SHOTS=0.
+        if (page) await uploadStepShot(page, `${idx}: ${step.intent || action || "step"}`).catch(() => {});
         // Optional per-step DOM snapshot (execution_options.snapshot): full HTML +
         // inventory + screenshot to recruiter-snapshots/<runId>/ so selectors can be
         // tuned OFFLINE, never reloading the sensitive account.

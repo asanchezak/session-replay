@@ -205,6 +205,24 @@ export async function resolveLocator(page, selectorChain, opts = {}) {
   return { kind: "handle", handle: el };
 }
 
+/**
+ * resolveLocator + wait. resolveChainInPage does an IMMEDIATE querySelector, so an
+ * element the /talent SPA renders async (typeaheads, dialogs, search results) would
+ * soft-miss. Poll resolveLocator until it returns a visible target or the timeout
+ * elapses — replaces the blind no-op "delay" scroll steps in the recorded flows.
+ */
+export async function resolveLocatorWithWait(page, selectorChain, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 10000;
+  const pollMs = opts.pollMs ?? 300;
+  const deadline = Date.now() + timeoutMs;
+  let target = await resolveLocator(page, selectorChain, opts);
+  while (!target && Date.now() < deadline) {
+    await page.waitForTimeout(pollMs).catch(() => {});
+    target = await resolveLocator(page, selectorChain, opts);
+  }
+  return target;
+}
+
 /** On-screen center of a resolved target, or null if it has no layout box. */
 export async function targetCenter(target) {
   if (!target || !target.handle) return null;
