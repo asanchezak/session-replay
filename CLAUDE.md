@@ -63,10 +63,17 @@ project" examples the user called out.
   then redeploy. **Still hardcoded:** the saved-search URL (`searchHistoryId`). Arbitrary
   keyword search = the advanced-search form (recording steps 28–75) + a real param system
   (today the daemon reads raw `workflow_snapshot.steps`, doesn't substitute runtime_params).
-- **(3) Save-to-project — NEXT.** Recording `0a8404f9` steps 76–85. Buildable as a generic
-  CLICK workflow (daemon Phase-A verbs: navigate profile → click "Save to project" → "Choose
-  existing" → pick project → "Save"), NO daemon code change. It's a WRITE (reversible). Test
-  on the existing "Easy Recruit" project. Verify selectors offline first.
+- **(3) Save-to-project — DONE & LIVE-VERIFIED (2026-06-08).** Spec
+  `recruiter-workflows/save-to-project.json` (workflow `4da44557…`). Live run `00eac46b`
+  saved Oscar Carmona Mora → "Easy Recruit"; his profile went to **"En 2 proyectos"** and the
+  activity feed logged "ha añadido el perfil a Easy Recruit". Built as a pure generic
+  click/type workflow (no daemon restart). Flow + locked selectors: navigate profile →
+  `[data-test-action='save-to-project']` → `label[for='choose-existing-projects']` (switch to
+  existing mode) → type project name into `#save-to-projects-typeahead` → **2 no-op `scroll`
+  steps (delay for the async typeahead to load)** → click the option by exact `text` (project
+  name) → `button[data-test-action='save']`. Params to vary: candidate URL (step 1) + project
+  name (step 4 type + step 7 option text). DON'T target a real recruiting project (use the
+  "Easy Recruit" sandbox) — they're María Fernanda's live projects.
 - **(7) Bulk-message — BUILD ONLY, do NOT send without explicit OK.** Recording steps 179–201.
   The message BODY + Send selectors were never recorded → still need `recruiter-composer-probe.mjs`.
 
@@ -76,6 +83,28 @@ extract strategy, the headline fix) needs a daemon restart, which on-demand only
 `linkedin-bot` is interactively logged on (else it sticks "Queued") — so batch daemon-code
 changes for a moment when Fernanda is at the host, or for the next boot. Pure-workflow flows
 (navigate/click/existing-strategy) avoid this entirely.
+
+### Recruiter /talent selector + build tips (learned 2026-06-08)
+- **The /talent UI is in SPANISH** ("Guardar en proyecto", "Seleccionar proyecto existente").
+  Recorded ENGLISH `text` selectors won't match. Prefer **css / `data-test-*` / stable ids**
+  (locale-independent). Recruiter is rich in stable hooks: `[data-test-action='save-to-project'|'save'|'cancel']`,
+  `#choose-existing-projects` / `#create-new-project` (radios), `#save-to-projects-typeahead`
+  (project combobox), `li[role=option]` + `[data-test-project-typeahead-result-title]` (project
+  options — click by exact project `text`). The recording's `nth-of-type`/absolute-xpath chains
+  are fragile; its `anchor` selectors carry dict values that 422 the create-step API (lift
+  text/css/xpath only).
+- **Build flows capture-first**, never blind-replay the recording: run a snapshot-only workflow
+  that opens the UI (clicks to reveal a panel/dialog), `scp` the per-step snapshots, read the
+  PNG + `dom.json` + grep the HTML, lock selectors offline. Reusable builder:
+  **`scripts/create_recruiter_workflow.py spec.json`** (POSTs /v1/workflows + /steps + activates;
+  pure AWS API, no daemon restart → warm seat preserved). Specs live in `recruiter-workflows/`.
+- **Async-rendered elements (typeaheads/dropdowns):** the daemon's Phase-A verbs are only
+  `{click,type}` and resolve selectors ONCE (no wait/retry); `delay_before_ms` isn't settable
+  via the step API. To wait for an async list before clicking it, insert **no-op `scroll`/`hover`
+  steps** (not in PHASE_A_VERBS → they fall through to a noop that still costs ~2s each with
+  snapshot on). A real fix (wait-for-selector in clickResolved) is a good future daemon change
+  — batch it for a restart window. Verify writes by re-reading the page (a read-only nav+snapshot),
+  since the daemon reports step success even on a soft-miss.
 
 ### Recruiter session is SEPARATE from linkedin.com (blocker found 2026-06-04)
 Driving `/talent/` needs its OWN sign-in even when the daemon's regular linkedin.com

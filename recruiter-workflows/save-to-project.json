@@ -1,0 +1,17 @@
+{
+  "name": "Recruiter: Save candidate to existing project",
+  "description": "Open a candidate's /talent profile, open Save-to-project, switch to existing-project mode, pick the project by exact name in the typeahead, Save. Candidate URL (step 1) + project name (step 4 type + step 7 option text) are the parameters to vary. Selectors locked offline 2026-06-08 from capture runs.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Open candidate profile","value":"https://www.linkedin.com/talent/profile/AEMAADH8IekBdkGS3IjefgwvR_zQkRRzIbgM9oI"},
+    {"action_type":"click","intent":"Open Save-to-project panel","selector_chain":[{"type":"css","value":"[data-test-action='save-to-project']"}]},
+    {"action_type":"click","intent":"Switch to existing-project mode","selector_chain":[{"type":"css","value":"label[for='choose-existing-projects']"},{"type":"css","value":"#choose-existing-projects"}]},
+    {"action_type":"type","intent":"Type project name to filter","value":"Easy Recruit","selector_chain":[{"type":"css","value":"#save-to-projects-typeahead"}]},
+    {"action_type":"scroll","intent":"delay: let typeahead load (1)"},
+    {"action_type":"scroll","intent":"delay: let typeahead load (2)"},
+    {"action_type":"click","intent":"Pick the project by exact name","selector_chain":[{"type":"text","value":"Easy Recruit"}]},
+    {"action_type":"scroll","intent":"delay: let Save enable"},
+    {"action_type":"click","intent":"Save to project","selector_chain":[{"type":"css","value":"button[data-test-action='save']"}]}
+  ]
+}
