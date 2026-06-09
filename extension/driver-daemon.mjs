@@ -693,14 +693,27 @@ async function scrapeRecruiterSearch(page) {
   let totalCount = null;
   const MAX_PAGES = 4; // ~25/page → up to ~100 candidates (target is ~15 → usually 1 page)
   for (let pg = 0; pg < MAX_PAGES; pg++) {
-    await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
+    // Results stream in lazily — scroll until the on-page card count stabilizes so
+    // we collect the WHOLE page (was grabbing only the first ~6 of 25 on /talent/search).
+    let loadedPrev = -1;
+    for (let s = 0; s < 12; s++) {
+      await humanScrollSeeded(page, 2, Math.random);
+      const n = await page.evaluate((sel) => document.querySelectorAll(sel).length, CARD).catch(() => 0);
+      if (n > 0 && n === loadedPrev) break;
+      loadedPrev = n;
+      await sleep(500);
+    }
     const { cards, total } = await page.evaluate(extractPage, CARD);
     if (total != null && totalCount == null) totalCount = total;
     for (const c of cards) if (c.profile_url && !byUrl.has(c.profile_url)) byUrl.set(c.profile_url, c);
     // Paginated results: click an enabled Next, else stop. Best-effort selector.
     const wentNext = await page.evaluate(() => {
+      // The /talent results pager "Next" is an <a> (data-test-pagination-next /
+      // aria-label "Ir a la página N siguiente"), NOT a <button> — match both.
       const btn = document.querySelector(
-        'button[aria-label*="Next" i]:not([disabled]):not([aria-disabled="true"]),'
+        '[data-test-pagination-next]:not([disabled]):not([aria-disabled="true"]),'
+        + ' a[aria-label*="siguiente" i]:not([aria-disabled="true"]),'
+        + ' button[aria-label*="Next" i]:not([disabled]):not([aria-disabled="true"]),'
         + ' button[aria-label*="Siguiente" i]:not([disabled]):not([aria-disabled="true"])',
       );
       if (btn) { btn.scrollIntoView(); btn.click(); return true; }

@@ -71,6 +71,22 @@ project" examples the user called out.
   `/talent/search?searchContextId=…` page. PARAM = the position in the request (the single value an
   Odoo trigger overrides). **Lesson: mine the recording's recorded selectors for the real entry
   before fighting the live UI** — the human used the Copilot, not the facets.
+- **(2c) Advanced BOOLEAN search — DONE & LIVE-VERIFIED 2026-06-09** (`recruiter-workflows/advanced-boolean-search.json`,
+  v4, run `602c34fb`). The facets CAN be driven (extends 2b): the keyword/boolean facet on
+  `/talent/search/advanced` is a **`<textarea data-test-free-text-single-value-facet-textarea>`**
+  (placeholder "Introducir palabras clave…"), revealed by **`button[aria-label="Añadir Palabras clave del
+  perfil u operadores booleanos"]`**, and it **COMMITS ON ENTER (`\n`)** — **blur DISCARDS** the value, the
+  Search button alone races/discards, and there is **NO apply button**. Flow: reveal facet → type
+  `{{boolean_query}}\n` → click Search `button[data-test-save-advanced-button]` → extract. Live: a boolean
+  returned real candidate cards (Hugo Villalta, Jonnathan Charpentier…). **CRITICAL: keywords-only is GLOBAL
+  (1.4M+ results) — the location + skills/years facets are REQUIRED to focus to ~15, NOT optional "v2".**
+  Years facet (from the recording): `input[name="range-from"]`/`[name="range-to"]` + **"Update"**
+  `button.button-small-primary[type="submit"]` (a per-facet commit button). **Daemon extraction fixes applied
+  2026-06-09 (PENDING restart-verify):** `scrapeRecruiterSearch` now scrolls-to-stable per page (was 6 of 25 —
+  lazy/virtualized list) and the pager "Next" is an **`<a data-test-pagination-next>`** (was `button`-only).
+  The `total_count` regex still misreads the "1 – 25" page indicator on huge sets — fine once focused (small
+  "N resultados"). **Lesson: free-text Recruiter facets commit on ENTER, not blur; the daemon's generic `type`
+  can send `\n` (Enter) but cannot blur/press-key otherwise.**
 - **(3) Save-to-project — DONE & LIVE-VERIFIED (2026-06-08).** Spec
   `recruiter-workflows/save-to-project.json` (workflow `4da44557…`). Live run `00eac46b`
   saved Oscar Carmona Mora → "Easy Recruit"; his profile went to **"En 2 proyectos"** and the
