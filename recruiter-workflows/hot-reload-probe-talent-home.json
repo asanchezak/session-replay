@@ -1,0 +1,9 @@
+{
+  "name": "Recruiter: HOT-RELOAD probe on Talent home",
+  "description": "Read-only daemon smoke test for runtime strategy hot-reload. Navigates to /talent/home and runs recruiter_hot_reload_probe, which returns the loaded runtime-strategy version. It should work after copying runtime-strategies/recruiter.mjs without restarting the daemon.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"extract","intent":"Hot-reload runtime strategy probe","methods":[{"kind":"extract_strategy","strategy":"recruiter_hot_reload_probe"}]}
+  ]
+}

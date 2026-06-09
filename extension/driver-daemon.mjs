@@ -21,7 +21,7 @@ import { chromium } from "@playwright/test";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { defaultEmptyValue, readExtractShapes, readExtractStrategy, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
 import { STEALTH_INIT } from "./src/shared/stealth.mjs";
 import { OVERLAY_INIT } from "./src/shared/overlay-init.mjs";
@@ -48,6 +48,7 @@ import { snapshotPage } from "./src/behavior/page-snapshot.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
+const RUNTIME_STRATEGIES_DIR = path.resolve(__dirname, "runtime-strategies");
 
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
@@ -641,89 +642,51 @@ async function scrapeSearchProfileUrls(page) {
 // social-proof element (and have no result avatar). So we anchor on result
 // avatars and skip anything inside social-proof — layout-agnostic and free of
 // the mutual-connection noise.
-// Recruiter /talent/search results scraper — reads the candidate cards
-// (name + /talent/profile URL + best-effort headline). NOT a profile view, so it
-// does NOT consume the profile-view budget. Card + name selectors locked offline
-// from recruiter-snapshots/search-capture/03-results-populated.html.
-async function scrapeRecruiterSearch(page) {
-  // Broadened to ALL profile-list-element variants (search-global from the Copilot
-  // search, project-pipeline, and the advanced-search results) so one extractor
-  // covers every surface. Returns { people, total_count } and paginates to collect
-  // all results (deduped) up to a page cap.
-  const CARD = '[data-view-name^="talent-profile-list-element"]';
-  await page.waitForSelector(`${CARD}, a[href*="/talent/profile/"]`, { timeout: 20000 }).catch(() => {});
-  let prev = -1, stable = 0;
-  for (let i = 0; i < 10; i++) {
-    const n = await page.evaluate((s) => document.querySelectorAll(s).length, CARD).catch(() => 0);
-    if (n > 0 && n === prev) { if (++stable >= 2) break; } else { stable = 0; }
-    prev = n;
-    await sleep(700);
+const runtimeStrategyCache = new Map();
+
+function strategyModuleName(strategy) {
+  if (String(strategy || "").startsWith("recruiter_")) return "recruiter";
+  return null;
+}
+
+async function loadRuntimeStrategyModule(name) {
+  const filePath = path.join(RUNTIME_STRATEGIES_DIR, `${name}.mjs`);
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
   }
-  const extractPage = (CARD) => {
-    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const canon = (href) => {
-      const m = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
-      return m ? "https://www.linkedin.com" + m[0] : "";
-    };
-    // Total result count: "1,234 results" / "1.234 resultados" / "1,234 candidates".
-    let total = null;
-    const cm = (document.body.innerText || "").match(
-      /([\d][\d.,]*)\s*\+?\s*(?:results|resultados|candidates|candidatos|perfiles|matches)/i,
-    );
-    if (cm) { const n = parseInt(cm[1].replace(/[.,]/g, ""), 10); if (!isNaN(n)) total = n; }
-    const cards = [];
-    for (const card of Array.from(document.querySelectorAll(CARD))) {
-      const link = card.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');
-      if (!link) continue;
-      const name = clean(link.innerText || link.textContent);
-      const url = canon(link.getAttribute("href"));
-      if (!name || !url) continue;
-      let headline = "";
-      for (const ln of clean(card.innerText).split("\n").map(clean).filter(Boolean)) {
-        if (ln === name) continue;
-        if (/^(seleccionar|select)\b/i.test(ln)) continue;
-        if (/contacto de|grado|mutual|en común|^\d+\s*(º|°)/i.test(ln)) continue;
-        headline = ln; break;
-      }
-      cards.push({ name, profile_url: url, headline });
-    }
-    return { cards, total };
-  };
-  const byUrl = new Map();
-  let totalCount = null;
-  const MAX_PAGES = 4; // ~25/page → up to ~100 candidates (target is ~15 → usually 1 page)
-  for (let pg = 0; pg < MAX_PAGES; pg++) {
-    // Results stream in lazily — scroll until the on-page card count stabilizes so
-    // we collect the WHOLE page (was grabbing only the first ~6 of 25 on /talent/search).
-    let loadedPrev = -1;
-    for (let s = 0; s < 12; s++) {
-      await humanScrollSeeded(page, 2, Math.random);
-      const n = await page.evaluate((sel) => document.querySelectorAll(sel).length, CARD).catch(() => 0);
-      if (n > 0 && n === loadedPrev) break;
-      loadedPrev = n;
-      await sleep(500);
-    }
-    const { cards, total } = await page.evaluate(extractPage, CARD);
-    if (total != null && totalCount == null) totalCount = total;
-    for (const c of cards) if (c.profile_url && !byUrl.has(c.profile_url)) byUrl.set(c.profile_url, c);
-    // Paginated results: click an enabled Next, else stop. Best-effort selector.
-    const wentNext = await page.evaluate(() => {
-      // The /talent results pager "Next" is an <a> (data-test-pagination-next /
-      // aria-label "Ir a la página N siguiente"), NOT a <button> — match both.
-      const btn = document.querySelector(
-        '[data-test-pagination-next]:not([disabled]):not([aria-disabled="true"]),'
-        + ' a[aria-label*="siguiente" i]:not([aria-disabled="true"]),'
-        + ' button[aria-label*="Next" i]:not([disabled]):not([aria-disabled="true"]),'
-        + ' button[aria-label*="Siguiente" i]:not([disabled]):not([aria-disabled="true"])',
-      );
-      if (btn) { btn.scrollIntoView(); btn.click(); return true; }
-      return false;
-    }).catch(() => false);
-    if (!wentNext) break;
-    await sleep(2500);
-    await page.waitForSelector(CARD, { timeout: 10000 }).catch(() => {});
-  }
-  return { people: Array.from(byUrl.values()), total_count: totalCount };
+  const href = `${pathToFileURL(filePath).href}?mtime=${encodeURIComponent(String(stat.mtimeMs))}`;
+  const cached = runtimeStrategyCache.get(name);
+  if (cached?.href === href) return cached.module;
+  const module = await import(href);
+  runtimeStrategyCache.set(name, { href, module });
+  console.log(`[daemon] hot-loaded runtime strategy "${name}" (${new Date(stat.mtimeMs).toISOString()})`);
+  return module;
+}
+
+async function runRuntimeStrategy(strategy, { page, step, orand }) {
+  const moduleName = strategyModuleName(strategy);
+  if (!moduleName) return null;
+  const module = await loadRuntimeStrategyModule(moduleName);
+  if (!module || typeof module.runStrategy !== "function") return null;
+  if (typeof module.handlesStrategy === "function" && !module.handlesStrategy(strategy)) return null;
+  return module.runStrategy({
+    strategy,
+    page,
+    step,
+    orand,
+    runtime: {
+      sleep,
+      moveMouseAlongBezier,
+      resolveLocatorWithWait,
+      clickResolved,
+      typeHumanLike,
+      viewportWidth: VIEWPORT_WIDTH,
+      viewportHeight: VIEWPORT_HEIGHT,
+    },
+  });
 }
 
 async function scrapeSearchPeople(page) {
@@ -1605,43 +1568,46 @@ async function driveRun(run) {
             console.log(`  step ${idx}: ${urls.length} URLs (search extract)`);
             await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: urls });
             await reportStepResult(runId, idx, "extract");
-          } else if (strategy === "recruiter_search_people") {
-            // Recruiter /talent/search results — name + headline + /talent/profile URL.
-            // Not a profile view (no budget gate / recordProfileView).
-            lastIdx = idx; mark = `recruiter-search:${idx}`;
-            const _rsRes = await scrapeRecruiterSearch(page);
-            const people = Array.isArray(_rsRes) ? _rsRes : (_rsRes.people || []);
-            const totalCount = Array.isArray(_rsRes) ? null : (_rsRes.total_count ?? null);
-            seenPool.push(...people.map((p) => p.profile_url));
-            dbg(`step${idx} scraped ${people.length} recruiter candidates (total=${totalCount})`);
-            console.log(`  step ${idx}: ${people.length} candidates (recruiter search, total=${totalCount})`);
-            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people, total_count: totalCount });
-            await reportStepResult(runId, idx, "extract");
           } else {
-            // Budget gate: pause-and-resume rather than drop candidates.
-            const reason = budgetExhaustedReason();
-            if (reason) {
-              console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
-              await pauseRun(runId, reason, idx);
-              blocked = true;
-              break;
-            }
-            // Capture profile URL BEFORE scrapeProfileFull navigates through
-            // /details/<section>/ subpages, otherwise page.url() returns the
-            // last subpage instead of the canonical /in/<slug>/.
-            const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
-            const data = strategy === "generic_schema"
-              ? await scrapeGenericByShapes(page, profileUrl, shapes)
-              : await scrapeProfileFull(page, profileUrl, shapes);
-            recordProfileView();
-            if (strategy === "generic_schema") {
-              console.log(`  step ${idx}: generic_schema extract "${data.page_title || ""}" keys=[${Object.keys(data).filter((k) => k !== "page_title" && k !== "url").join(",")}]`);
+            const runtimeResult = await runRuntimeStrategy(strategy, { page, step, orand });
+            if (runtimeResult?.handled) {
+              lastIdx = idx; mark = `runtime-strategy:${strategy}:${idx}`;
+              if (Array.isArray(runtimeResult.seenProfileUrls)) seenPool.push(...runtimeResult.seenProfileUrls);
+              const log = runtimeResult.log || `${strategy} handled`;
+              dbg(`step${idx} ${log}`);
+              console.log(`  step ${idx}: ${log}`);
+              await postExtraction(runId, idx, page.url(), {
+                page_title: await page.title(),
+                url: page.url(),
+                ...(runtimeResult.extraction || {}),
+              });
+              await reportStepResult(runId, idx, "extract");
             } else {
-              console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${(data.education || []).length} skills=${(data.skills || []).length} certs=${(data.certifications || []).length}`);
+              // Budget gate: pause-and-resume rather than drop candidates.
+              const reason = budgetExhaustedReason();
+              if (reason) {
+                console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
+                await pauseRun(runId, reason, idx);
+                blocked = true;
+                break;
+              }
+              // Capture profile URL BEFORE scrapeProfileFull navigates through
+              // /details/<section>/ subpages, otherwise page.url() returns the
+              // last subpage instead of the canonical /in/<slug>/.
+              const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
+              const data = strategy === "generic_schema"
+                ? await scrapeGenericByShapes(page, profileUrl, shapes)
+                : await scrapeProfileFull(page, profileUrl, shapes);
+              recordProfileView();
+              if (strategy === "generic_schema") {
+                console.log(`  step ${idx}: generic_schema extract "${data.page_title || ""}" keys=[${Object.keys(data).filter((k) => k !== "page_title" && k !== "url").join(",")}]`);
+              } else {
+                console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${(data.education || []).length} skills=${(data.skills || []).length} certs=${(data.certifications || []).length}`);
+              }
+              await postExtraction(runId, idx, profileUrl, data);
+              await reportStepResult(runId, idx, "extract");
+              profileExtractCount += 1;
             }
-            await postExtraction(runId, idx, profileUrl, data);
-            await reportStepResult(runId, idx, "extract");
-            profileExtractCount += 1;
           }
         } else if (action === "linkedin_people_search") {
           // Humanized people-search navigation (typeahead + "People" pill click,
