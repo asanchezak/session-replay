@@ -50,6 +50,22 @@ per-profile loop stays in effect. The search extractor (`recruiter_search_people
 (Trigger note: extract-30 `1bc44128` needs `runtime_params.boolean_query` + `location`;
 empty params → empty search → "No hay resultados".)
 
+**FULL pipeline E2E live-verified on qaodoo 2026-06-09 (job 310):** reconcile →
+`recruiter_pipeline` trigger → create-project → `recruiter_project_url` pushed to qaodoo
+→ focused boolean+location search → **30 `linkedin.lead` rows in qaodoo** → bulk-save
+`add4407e` saved 2 to the `-EZ` project. Message stays gated (not sent). Current box config:
+`RECRUITER_ADVANCED_SEARCH_WORKFLOW_ID=1bc44128` (focused — the advanced-only `034f4d58`
+typed the boolean but did NOT commit the search → "Búsqueda vacía"/0 cards),
+`RECRUITER_DEFAULT_LOCATION="Costa Rica"`, `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6` (bulk).
+
+**CAVEAT — chained pipeline runs `tab_closed`:** the daemon's shared warm browser
+disrupts the SECOND run in a back-to-back session (search after create-project, or a
+calibration re-run) → `pause_reason=tab_closed` mid-run. Standalone single runs complete
+fine. Workaround until the daemon fix ships (needs restart + re-login): continue the
+paused step STANDALONE — copy its `origin.pipeline`, cancel it, `_create_pipeline_run(...)`
+a fresh single run; the terminal hook resumes the chain. See
+[[project_recruiter_pipeline_chained_run_bug]].
+
 ### Key operational rules
 
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
