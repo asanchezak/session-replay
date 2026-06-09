@@ -43,9 +43,12 @@ can fire ONE `recruiter_save_results_to_project` run (select N on the results pa
 bulk-save, zero profile visits) instead of N per-candidate profile saves. **To
 activate:** set `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6-0d44-4298-b047-4fadb71ba559`
 ("save current search URL results to project"; params `search_url`/`project_name`/`target_count`)
-in the box's `deploy/.env.prod` + restart the backend container, then do ONE deliberate
-live run to re-verify (the search extractor `CARD` selector was fixed 2026-06-09 and has
-NOT been re-run live since). Empty = legacy per-profile loop stays in effect.
+in the box's `deploy/.env.prod` + restart the backend container. Empty = legacy
+per-profile loop stays in effect. The search extractor (`recruiter_search_people`,
+`CARD` + headline-from-`.artdeco-entity-lockup__subtitle` fixes) was **re-verified live
+2026-06-09** on fernanda: run `3aa176b6`, 30/30 candidates WITH headlines, total_count=460.
+(Trigger note: extract-30 `1bc44128` needs `runtime_params.boolean_query` + `location`;
+empty params → empty search → "No hay resultados".)
 
 ### Key operational rules
 
