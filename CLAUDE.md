@@ -87,6 +87,21 @@ project" examples the user called out.
   The `total_count` regex still misreads the "1 – 25" page indicator on huge sets — fine once focused (small
   "N resultados"). **Lesson: free-text Recruiter facets commit on ENTER, not blur; the daemon's generic `type`
   can send `\n` (Enter) but cannot blur/press-key otherwise.**
+- **(2d) FOCUSED, position-driven search (location facet + Odoo-built booleans) — LIVE-VERIFIED 2026-06-09.**
+  Keywords-only is global (1.4M); the **LOCATION facet** is the big lever (1.4M → 3K for Costa Rica), and a
+  **real-JD boolean** lands it focused: job 231 "Sr. Full-Stack Engineer" → `Next.js AND React AND Azure` +
+  Costa Rica → **146 results**, top hit a perfect Senior Full-Stack/.NET/React in San José. The LOCATION facet is
+  a **typeahead** (NOT free-text like keywords): reveal `button[aria-label="Añadir ubicación del candidato"]` →
+  type into `[data-test-facet-locations] input.ts-common-typeahead__input` → click the top suggestion
+  `li[data-live-test-result="0"]` (selecting it commits — no Enter). Workflow:
+  `recruiter-workflows/focused-boolean-location-search.json` (params: boolean_query, location; ends on results,
+  no extract). **Booleans are generated FROM Odoo positions by the AI builder** — `scripts/boolean_from_odoo.py
+  <id…>` fetches the position's JD corpus from the Odoo DB (morsoft psql; the live pipeline uses the OdooAdapter
+  on qaodoo) → `BooleanQueryBuilder` → a per-position boolean, kept "in place" in
+  `recruiter-workflows/odoo-position-booleans.json` (15 dev positions). NEVER hand-craft the boolean — derive it
+  from the real JD (the user's directive). The builder now strips version numbers ("Next.js 15"→"Next.js") so
+  AND terms don't over-narrow. To go 146 → ~15: raise tightness / add the years facet (`input[name="range-from"]`/
+  `[name="range-to"]` + "Update" `button.button-small-primary[type="submit"]`, per the recording) — the calibration knob.
 - **(3) Save-to-project — DONE & LIVE-VERIFIED (2026-06-08).** Spec
   `recruiter-workflows/save-to-project.json` (workflow `4da44557…`). Live run `00eac46b`
   saved Oscar Carmona Mora → "Easy Recruit"; his profile went to **"En 2 proyectos"** and the

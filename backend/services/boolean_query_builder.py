@@ -43,8 +43,10 @@ Return ONLY this JSON object (no markdown, no comments):
 }}
 
 Rules: skills must be concrete searchable tech/tools, NOT soft skills or sentences.
-Prefer specific terms over generic ones. If the JD is sparse, infer reasonable
-terms from the title.
+Prefer specific terms over generic ones. Use the BASE technology name WITHOUT version
+numbers ("Next.js" not "Next.js 15", "Angular" not "Angular 2+", "Python" not "Python 3")
+— LinkedIn profiles list the base tech, so a versioned AND term over-narrows to ~0.
+If the JD is sparse, infer reasonable terms from the title.
 """
 
 _MAX_TITLES = 4
@@ -60,6 +62,10 @@ def _clean_terms(items, cap):
         # boolean operators / quotes inside a term would break the query
         s = s.replace('"', "").replace("(", " ").replace(")", " ")
         s = re.sub(r"\s+", " ", s).strip()
+        # Drop a trailing version number ("Next.js 15"->"Next.js", "Angular 2+"->"Angular",
+        # "Python 3"->"Python"). LinkedIn profiles list the base tech, so a versioned AND
+        # term over-narrows to ~0. Keep glued names like "HTML5"/"CSS3"/"S3" (no space).
+        s = re.sub(r"\s+v?\d+(?:\.\d+)*\+?$", "", s).strip()
         if not s or s.lower() in ("and", "or", "not", "null", "none"):
             continue
         k = s.lower()
