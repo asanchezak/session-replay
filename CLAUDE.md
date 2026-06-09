@@ -162,18 +162,52 @@ extract strategy, the headline fix) needs a daemon restart, which on-demand only
 changes for a moment when Fernanda is at the host, or for the next boot. Pure-workflow flows
 (navigate/click/existing-strategy) avoid this entirely.
 
-### Recruiter ↔ Odoo integration — DESIGNED 2026-06-08 (NOT wired; Odoo disconnected)
-Full design: **`docs/recruiter-odoo-integration-design.md`**. Loop: Odoo new job position →
-create `-EZ <position>` project (→ push its URL to a new `hr.job.recruiter_project_url`) → search
-→ save → bulk-message (→ set `linkedin.lead.outreach_status=sent`). Requirement status:
-**A** (candidate name → `linkedin.lead`) ✅ exists; **B** (already-messaged tracking) field
-`outreach_status` exists, GAP = the after-send push-back to flip it; **C** (project link →
-`hr.job`) new (capture project URL + push). The **unlock** = param substitution at run creation
-(substitute `runtime_params` into step values in the run snapshot — **backend-only → warm seat
-safe**). akodoo pieces (`hr.job.recruiter_project_url` + `/akcr/api/job_project_link` +
-`/akcr/api/lead_outreach_update` + lead `sent_at`) are **deferred** (Odoo not connected). Keying:
-join leads ↔ messaged candidates on the `/talent/profile/` URL. Build order + open decisions
-(naming, trigger scope, keep message-send manual/gated) are in the doc.
+### Recruiter ↔ Odoo integration — BUILT & LIVE E2E-VERIFIED 2026-06-08 ✅
+Full design: **`docs/recruiter-odoo-integration-design.md`**. The whole loop now runs end-to-end:
+Odoo new position → create `-EZ <position>` project → push its URL to `hr.job.recruiter_project_url`
+→ AI-Copilot search → push candidates as `linkedin.lead` → save N to the project. **Message-send
+stays MANUAL/gated** (req B, the `lead_outreach_update` push, fires only on a real bulk-message run).
+**Live E2E (qaodoo job 307 "DevOps Engineer"):** created project `2053887530`, wrote its URL back to
+job 307, created **7 leads** (all `/talent/profile/` URLs), saved 2 candidates to the project.
+- **Trigger** = `recruiter_pipeline` event_kind on connector `2c7a49e9` (qaodoo). The
+  **reconcile-supervisor** (polls qaodoo every 5 min for `linkedin_sync+published` jobs >
+  `reconcile_min_job_id`) fires it server-side from AWS — NOT a direct webhook. Keep only ONE flow
+  trigger enabled (we disabled `linkedin_lead_search` so a position doesn't double-fire). Bumped the
+  watermark to the current max so only NEW positions fire (don't backfill existing jobs).
+- **Pieces (this repo, all deployed to AWS):** `ExecutionService.create_run` substitutes `{{key}}`
+  runtime_params into literal-workflow snapshot steps (the unlock); `RecruiterPipelineService` chains
+  the sub-workflows as sequential daemon runs via the `transition` terminal hook; `RecruiterPushService`
+  does the 3 write-backs; `recruiter_pipeline` event_kind in `WebhookTriggerService` + the reconciler
+  gate (`ALLOWED_TRIGGER_EVENT_KINDS`). 3 parameterized workflows: create-project `29ec1891`, search
+  `f6f99011`, save `a352e1e4` — IDs live in **both** `.env.prod` AND the backend `environment:` block
+  in `docker-compose.prod.yml` (the compose maps env explicitly → `.env.prod` alone is NOT injected).
+- **akodoo (qaodoo):** `hr.job.recruiter_project_url`/`_id` + `/akcr/api/job_project_link` +
+  `/akcr/api/lead_outreach_update` — PR **#1813**, merged to the `qaodoo` branch.
+
+### Running a test on the sensitive account — READ before EVERY test (2026-06-08)
+- **The daemon is UNCONDITIONALLY anti-bot protected; the `config.anti_bot` "Human-like execution"
+  toggle is EXTENSION-ONLY and is moot for our runs.** Every recruiter/test run goes through the
+  daemon (`execution_target=daemon`, `use_profile`), which ALWAYS applies fingerprint stealth +
+  circuit breaker + budget + human-like input (bezier mouse, human typing) and **deliberately ignores**
+  the per-workflow toggle (`driver-daemon.mjs` ~1353) so this flagged high-risk path can never be
+  un-protected. So protection is always on — there is **no toggle to flip** for daemon runs. Only
+  **extension/dashboard-driven** runs honor `config.anti_bot` (turn it ON there). **NEVER run recruiter
+  tests via the raw extension / bypassing the daemon** — that's the only way to lose the protection.
+- **Per-step dashboard screenshots + wait-for-selector — FIXED 2026-06-08 (synced, pending restart).**
+  The daemon now (a) polls the PRIMARY recorded selector up to `STEP_RESOLVE_TIMEOUT_MS` (12s) before
+  a generic click/type via `resolveLocatorWithWait` — handles the async `/talent` SPA, so the blind
+  no-op `scroll` "delay" steps in the recorded flows are no longer needed; and (b) uploads a dashboard
+  screenshot **per generic step** (after `STEP_SHOT_SETTLE_MS` settle + the wait → a loaded page, not
+  mid-render) so a human watching the run sees each action's result (the generic loop never called
+  `uploadStepShot` before — only the hardcoded applicant path did). Code is in
+  `extension/{driver-daemon.mjs,src/behavior/selector-resolve.mjs}` (commit `3eee01a`) and **synced to
+  the host `C:\Users\Public\extension`**, but the RUNNING daemon still has the old code in memory — it
+  goes live on the **next daemon restart**, which lapses the `/talent` seat → **Fernanda re-login**.
+  Until that restart, runs still show mid-load screenshots / rely on the delay steps. (Daemon code path
+  on the host is `C:\Users\Public\extension`, run by `daemon-task.ps1` via the `linkedin-bot-daemon`
+  scheduled task — `findstr`/`where` over SSH need `cmd /c` or they shell-mangle the path.)
+- **Pre-flight:** confirm the warm `/talent` seat first (run workflow `7246989f` "Open Talent Home"
+  read-only on `fernanda`; completes = warm, pauses `waiting_for_user` = walled → re-login needed).
 
 ### Recruiter /talent selector + build tips (learned 2026-06-08)
 - **The /talent UI is in SPANISH** ("Guardar en proyecto", "Seleccionar proyecto existente").
