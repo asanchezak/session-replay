@@ -170,7 +170,12 @@ stays MANUAL/gated** — req B is now WIRED but deliberate: `RecruiterPipelineSe
 (via `POST /v1/recruiter/jobs/{job_id}/send-messages`) reconstructs the job's saved candidates, fires a
 `recruiter_message` run (parameterized bulk-message wf `3541e5a8`); on completion the terminal hook
 (`_after_message`) pushes `/akcr/api/lead_outreach_update` → `outreach_status=messaged`. ⚠️ Sends real
-InMail; NEVER auto-fired by the pipeline. (Wiring deployed + endpoint verified; live send still gated.)
+InMail; NEVER auto-fired by the pipeline. **LIVE-VERIFIED 2026-06-09:** a `recruiter_message` run
+to the Easy Recruit project (synthetic job 308 + 2 leads) completed → the hook flipped both leads to
+`outreach_status=messaged` + logged 2 `linkedin.lead.message` (outbound/sent, inmail) in qaodoo. So
+ALL 4 requirements are now live-verified. (For that test we used the proven hardcoded workflow
+`276a125b`, not the param `3541e5a8`, because its trimmed delays need the wait-for-selector that's
+staged-but-not-yet-restarted.)
 **Live E2E (qaodoo job 307 "DevOps Engineer"):** created project `2053887530`, wrote its URL back to
 job 307, created **7 leads** (all `/talent/profile/` URLs), saved 2 candidates to the project.
 - **Trigger** = `recruiter_pipeline` event_kind on connector `2c7a49e9` (qaodoo). The
