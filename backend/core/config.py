@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     recruiter_search_workflow_id: str = ""
     recruiter_save_workflow_id: str = ""
     recruiter_message_workflow_id: str = ""
+    recruiter_advanced_search_workflow_id: str = ""
+    # Boolean-search count calibration: target ~15; re-tune (tighten/broaden the
+    # boolean) when the result count falls outside [min,max], capped at N re-runs.
+    recruiter_target_count: int = 15
+    recruiter_count_band_min: int = 10
+    recruiter_count_band_max: int = 25
+    recruiter_max_search_reruns: int = 2
     # Cap how many of the search's candidates get auto-saved to the project per
     # position (each save is its own daemon run). 0 = use the payload's candidate_count.
     recruiter_max_saves_per_position: int = 5

@@ -1,0 +1,17 @@
+{
+  "name": "Recruiter: CAPTURE advanced facets (read-only, no submit)",
+  "description": "Read-only round 2: open the Profile-keywords (boolean) / geographic-location / total-years facets to capture the REVEALED input selectors (they render only after clicking 'Add …'). NO Search clicked, NO submit, no data changed. Per-step snapshots for offline selector analysis.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Advanced search","value":"https://www.linkedin.com/talent/search/advanced"},
+    {"action_type":"scroll","intent":"load"},
+    {"action_type":"click","intent":"Open Profile keywords (boolean) facet","selector_chain":[{"type":"css","value":"button[aria-label='Add Profile keywords or boolean']"},{"type":"accessibility","value":"Add Profile keywords or boolean"}]},
+    {"action_type":"scroll","intent":"keyword input revealed (snapshot)"},
+    {"action_type":"click","intent":"Open geographic location facet","selector_chain":[{"type":"css","value":"button[aria-label='Add a Candidate geographic location']"},{"type":"accessibility","value":"Add a Candidate geographic location"}]},
+    {"action_type":"scroll","intent":"location input revealed (snapshot)"},
+    {"action_type":"click","intent":"Open Total years of work experience facet","selector_chain":[{"type":"text","value":"Total years of work experience"}]},
+    {"action_type":"scroll","intent":"years inputs revealed (snapshot)"},
+    {"action_type":"scroll","intent":"settle (final snapshot)"}
+  ]
+}

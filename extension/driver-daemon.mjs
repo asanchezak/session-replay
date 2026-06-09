@@ -646,7 +646,11 @@ async function scrapeSearchProfileUrls(page) {
 // does NOT consume the profile-view budget. Card + name selectors locked offline
 // from recruiter-snapshots/search-capture/03-results-populated.html.
 async function scrapeRecruiterSearch(page) {
-  const CARD = '[data-view-name="talent-profile-list-element-search-global"]';
+  // Broadened to ALL profile-list-element variants (search-global from the Copilot
+  // search, project-pipeline, and the advanced-search results) so one extractor
+  // covers every surface. Returns { people, total_count } and paginates to collect
+  // all results (deduped) up to a page cap.
+  const CARD = '[data-view-name^="talent-profile-list-element"]';
   await page.waitForSelector(`${CARD}, a[href*="/talent/profile/"]`, { timeout: 20000 }).catch(() => {});
   let prev = -1, stable = 0;
   for (let i = 0; i < 10; i++) {
@@ -655,24 +659,25 @@ async function scrapeRecruiterSearch(page) {
     prev = n;
     await sleep(700);
   }
-  await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
-  return await page.evaluate((CARD) => {
+  const extractPage = (CARD) => {
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
     const canon = (href) => {
       const m = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
       return m ? "https://www.linkedin.com" + m[0] : "";
     };
-    const out = [];
-    const seen = new Set();
+    // Total result count: "1,234 results" / "1.234 resultados" / "1,234 candidates".
+    let total = null;
+    const cm = (document.body.innerText || "").match(
+      /([\d][\d.,]*)\s*\+?\s*(?:results|resultados|candidates|candidatos|perfiles|matches)/i,
+    );
+    if (cm) { const n = parseInt(cm[1].replace(/[.,]/g, ""), 10); if (!isNaN(n)) total = n; }
+    const cards = [];
     for (const card of Array.from(document.querySelectorAll(CARD))) {
       const link = card.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');
       if (!link) continue;
       const name = clean(link.innerText || link.textContent);
       const url = canon(link.getAttribute("href"));
-      if (!name || !url || seen.has(url)) continue;
-      seen.add(url);
-      // headline: first card line that isn't the name / a select label / a
-      // connection-degree badge.
+      if (!name || !url) continue;
       let headline = "";
       for (const ln of clean(card.innerText).split("\n").map(clean).filter(Boolean)) {
         if (ln === name) continue;
@@ -680,10 +685,32 @@ async function scrapeRecruiterSearch(page) {
         if (/contacto de|grado|mutual|en común|^\d+\s*(º|°)/i.test(ln)) continue;
         headline = ln; break;
       }
-      out.push({ name, profile_url: url, headline });
+      cards.push({ name, profile_url: url, headline });
     }
-    return out;
-  }, CARD);
+    return { cards, total };
+  };
+  const byUrl = new Map();
+  let totalCount = null;
+  const MAX_PAGES = 4; // ~25/page → up to ~100 candidates (target is ~15 → usually 1 page)
+  for (let pg = 0; pg < MAX_PAGES; pg++) {
+    await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
+    const { cards, total } = await page.evaluate(extractPage, CARD);
+    if (total != null && totalCount == null) totalCount = total;
+    for (const c of cards) if (c.profile_url && !byUrl.has(c.profile_url)) byUrl.set(c.profile_url, c);
+    // Paginated results: click an enabled Next, else stop. Best-effort selector.
+    const wentNext = await page.evaluate(() => {
+      const btn = document.querySelector(
+        'button[aria-label*="Next" i]:not([disabled]):not([aria-disabled="true"]),'
+        + ' button[aria-label*="Siguiente" i]:not([disabled]):not([aria-disabled="true"])',
+      );
+      if (btn) { btn.scrollIntoView(); btn.click(); return true; }
+      return false;
+    }).catch(() => false);
+    if (!wentNext) break;
+    await sleep(2500);
+    await page.waitForSelector(CARD, { timeout: 10000 }).catch(() => {});
+  }
+  return { people: Array.from(byUrl.values()), total_count: totalCount };
 }
 
 async function scrapeSearchPeople(page) {
@@ -1569,11 +1596,13 @@ async function driveRun(run) {
             // Recruiter /talent/search results — name + headline + /talent/profile URL.
             // Not a profile view (no budget gate / recordProfileView).
             lastIdx = idx; mark = `recruiter-search:${idx}`;
-            const people = await scrapeRecruiterSearch(page);
+            const _rsRes = await scrapeRecruiterSearch(page);
+            const people = Array.isArray(_rsRes) ? _rsRes : (_rsRes.people || []);
+            const totalCount = Array.isArray(_rsRes) ? null : (_rsRes.total_count ?? null);
             seenPool.push(...people.map((p) => p.profile_url));
-            dbg(`step${idx} scraped ${people.length} recruiter candidates`);
-            console.log(`  step ${idx}: ${people.length} candidates (recruiter search)`);
-            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people });
+            dbg(`step${idx} scraped ${people.length} recruiter candidates (total=${totalCount})`);
+            console.log(`  step ${idx}: ${people.length} candidates (recruiter search, total=${totalCount})`);
+            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people, total_count: totalCount });
             await reportStepResult(runId, idx, "extract");
           } else {
             // Budget gate: pause-and-resume rather than drop candidates.

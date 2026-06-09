@@ -214,10 +214,35 @@ class RecruiterPipelineService:
             m = _PROJECT_URL_RE.search(project_url)
             pipeline["project_id"] = m.group(1) if m else None
 
+        # Prefer the BOOLEAN advanced search built from the JD content; fall back to
+        # the legacy title-only Copilot search when not configured.
+        adv_wf = settings.recruiter_advanced_search_workflow_id
+        if adv_wf:
+            from services.boolean_query_builder import BooleanQueryBuilder
+            corpus, title = await self._fetch_job_corpus(job_id, connector_id)
+            built = await BooleanQueryBuilder().build(
+                corpus, fallback_title=title or pipeline.get("position", "")
+            )
+            pipeline["search_spec"] = built["spec"]
+            pipeline["search_tightness"] = built["tightness"]
+            pipeline["search_query"] = built["query"]
+            pipeline["search_reruns"] = 0
+            logger.info(
+                "recruiter pipeline: boolean for job %s (t=%s): %s",
+                job_id, built["tightness"], built["query"],
+            )
+            search_run = await self._create_pipeline_run(
+                workflow_id=adv_wf, event_kind=EVENT_SEARCH,
+                runtime_params={"boolean_query": built["query"]},
+                pipeline=pipeline, connector_id=connector_id,
+            )
+            return {"stage": "create_project", "project_link": link_res,
+                    "next_run": str(search_run.id), "boolean": built["query"]}
+
         search_wf = settings.recruiter_search_workflow_id
         if not search_wf:
             logger.warning(
-                "recruiter pipeline: search workflow unset — stopping after create-project"
+                "recruiter pipeline: no search workflow configured — stopping after create-project"
             )
             return {"stage": "create_project", "project_link": link_res, "next_run": None}
         search_run = await self._create_pipeline_run(
@@ -233,9 +258,99 @@ class RecruiterPipelineService:
             "next_run": str(search_run.id),
         }
 
+    async def _fetch_job_corpus(self, job_id, connector_id) -> tuple[str, str]:
+        """Assemble the JD corpus (title + description + requirements) from Odoo for
+        the AI boolean builder. Best-effort → returns (corpus, title)."""
+        from adapters.odoo.adapter import OdooAdapter
+        from services.connector_forum_service import ConnectorForumService
+
+        def strip(v):
+            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(v or ""))).strip()
+
+        title, parts = "", []
+        try:
+            connector = await ConnectorForumService(self.session).resolve_connector(
+                str(connector_id)
+            )
+            adapter = OdooAdapter()
+            await adapter.initialize(connector.config)
+            try:
+                jobs = await adapter.list("job", filters={"id": int(job_id)}, limit=1, fields=[
+                    "name", "description", "job_requirements", "non_negotiable_requirements",
+                    "nice_to_have_requirements", "role_responsibilities",
+                    "seniority_level", "experience_years",
+                ])
+                j = jobs[0] if jobs else {}
+                title = j.get("name") or ""
+                if title:
+                    parts.append(title)
+                for f in ("description", "job_requirements", "non_negotiable_requirements",
+                          "nice_to_have_requirements", "role_responsibilities"):
+                    v = strip(j.get(f))
+                    if v:
+                        parts.append(v)
+                reqs = await adapter.list(
+                    "ak.job.requirement", filters={"job_id": int(job_id)}, limit=40,
+                    fields=["name", "summary"],
+                )
+                for r in reqs:
+                    line = f"{strip(r.get('name'))}: {strip(r.get('summary'))}".strip(" :")
+                    if line:
+                        parts.append(line)
+                if j.get("seniority_level"):
+                    parts.append(f"Seniority: {j['seniority_level']}")
+                if j.get("experience_years"):
+                    parts.append(f"Experience: {j['experience_years']} years")
+            finally:
+                await adapter.dispose()
+        except Exception:
+            logger.exception("recruiter pipeline: corpus fetch failed for job %s", job_id)
+        return "\n".join(p for p in parts if p), title
+
     async def _after_search(self, run, pipeline, connector_id, job_id) -> dict:
-        # Requirement A: candidates → linkedin.lead. Returns the collected
-        # candidates under "leads" even if the Odoo POST is skipped.
+        # Read the search result (url + total_count). total_count is None until the
+        # daemon extractor enhancement ships → the calibration below is then a no-op.
+        result = await self.push.read_search_result(run.id)
+        count = result.get("total_count")
+        spec = pipeline.get("search_spec")
+        tightness = pipeline.get("search_tightness")
+        reruns = pipeline.get("search_reruns", 0)
+        adv_wf = settings.recruiter_advanced_search_workflow_id
+
+        # --- count calibration: re-tune the boolean toward the target band ---
+        if (adv_wf and spec is not None and tightness is not None and count is not None
+                and reruns < settings.recruiter_max_search_reruns):
+            from services.boolean_query_builder import BooleanQueryBuilder
+            b = BooleanQueryBuilder()
+            new_t = None
+            if count > settings.recruiter_count_band_max:
+                new_t = tightness + 1          # too many → tighten
+            elif count < settings.recruiter_count_band_min:
+                new_t = tightness - 1          # too few → broaden
+            if new_t is not None and 0 <= new_t <= b.max_tightness(spec) and new_t != tightness:
+                query = b.assemble(spec, new_t)
+                re_run = await self._create_pipeline_run(
+                    workflow_id=adv_wf, event_kind=EVENT_SEARCH,
+                    runtime_params={"boolean_query": query},
+                    pipeline={**pipeline, "search_tightness": new_t,
+                              "search_reruns": reruns + 1, "search_query": query},
+                    connector_id=connector_id,
+                )
+                logger.info(
+                    "recruiter pipeline: calibrate job %s count=%s t=%s→%s rerun=%s",
+                    job_id, count, tightness, new_t, str(re_run.id),
+                )
+                return {"stage": "search", "calibrating": True, "count": count,
+                        "tightness": new_t, "re_run": str(re_run.id)}
+
+        # --- in band (or no count / reruns exhausted): finalize ---
+        if pipeline.get("search_query"):
+            await self.push.push_search_link(
+                run_id=run.id, job_id=job_id, connector_id=connector_id,
+                search_url=result.get("url"), count=count,
+                query=pipeline.get("search_query"),
+            )
+        # Requirement A: candidates → linkedin.lead.
         lead_res = await self.push.push_recruiter_leads(
             run_id=run.id, job_id=job_id, connector_id=connector_id
         )

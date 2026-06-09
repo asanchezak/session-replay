@@ -257,3 +257,44 @@ class RecruiterPushService:
         except Exception:
             logger.exception("outreach push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
+
+    # ------------------------------------------------------- boolean search read/push
+    async def read_search_result(self, run_id) -> dict:
+        """Read a search run's extraction → {url, total_count, leads}. total_count is
+        None until the daemon extractor enhancement ships (then the calibration loop
+        activates); leads are the deduped /talent/profile/ candidates."""
+        url, total = None, None
+        for rec in await self._extraction_rows(run_id):
+            if rec.get("url"):
+                url = rec.get("url")
+            if rec.get("total_count") is not None:
+                total = rec.get("total_count")
+        leads = await self._collect_recruiter_leads(run_id)
+        return {"url": url, "total_count": total, "leads": leads}
+
+    async def push_search_link(self, *, run_id, job_id, connector_id,
+                               search_url, count, query) -> dict:
+        """Save the (final, in-band) search URL + count + boolean query on the Odoo
+        position (hr.job) via POST /akcr/api/job_search_link."""
+        if not job_id:
+            return {"pushed": 0, "skipped": "no_job_id"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "job_id": job_id,
+            "search_url": search_url or "",
+            "count": count,
+            "query": query or "",
+        }
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/job_search_link", payload)
+            logger.info(
+                "search link push: job=%s count=%s url=%s odoo=%s",
+                job_id, count, search_url, res,
+            )
+            return {"pushed": 1, **res}
+        except Exception:
+            logger.exception("search link push: POST failed for run %s", run_id)
+            return {"pushed": 0, "error": True}
