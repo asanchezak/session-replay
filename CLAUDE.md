@@ -38,6 +38,15 @@ Full design: **`docs/recruiter-odoo-integration-design.md`**. All 4 requirements
 - Message-send stays **MANUAL/gated**: `POST /v1/recruiter/jobs/{job_id}/send-messages`
 - 3 parameterized wfs: create-project `29ec1891`, search `f6f99011`, save `a352e1e4` — IDs in both `.env.prod` AND `docker-compose.prod.yml`
 
+**Bulk results-page save (lighter anti-bot, gated OFF by default).** `_after_search`
+can fire ONE `recruiter_save_results_to_project` run (select N on the results page +
+bulk-save, zero profile visits) instead of N per-candidate profile saves. **To
+activate:** set `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6-0d44-4298-b047-4fadb71ba559`
+("save current search URL results to project"; params `search_url`/`project_name`/`target_count`)
+in the box's `deploy/.env.prod` + restart the backend container, then do ONE deliberate
+live run to re-verify (the search extractor `CARD` selector was fixed 2026-06-09 and has
+NOT been re-run live since). Empty = legacy per-profile loop stays in effect.
+
 ### Key operational rules
 
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
