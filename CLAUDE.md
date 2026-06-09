@@ -58,13 +58,18 @@ empty params → empty search → "No hay resultados".)
 typed the boolean but did NOT commit the search → "Búsqueda vacía"/0 cards),
 `RECRUITER_DEFAULT_LOCATION="Costa Rica"`, `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6` (bulk).
 
-**CAVEAT — chained pipeline runs `tab_closed`:** the daemon's shared warm browser
-disrupts the SECOND run in a back-to-back session (search after create-project, or a
-calibration re-run) → `pause_reason=tab_closed` mid-run. Standalone single runs complete
-fine. Workaround until the daemon fix ships (needs restart + re-login): continue the
-paused step STANDALONE — copy its `origin.pipeline`, cancel it, `_create_pipeline_run(...)`
-a fresh single run; the terminal hook resumes the chain. See
-[[project_recruiter_pipeline_chained_run_bug]].
+**Chained pipeline runs `tab_closed` — FIXED 2026-06-09.** Symptom (was): chained
+pipeline runs (search after create-project, calibration re-runs) paused mid-run with
+`pause_reason=tab_closed`. Root cause was NOT the daemon: the dashboard `RunDetailPage`
+POSTs `/runs/{id}/tab-closed` on `pagehide` to suspend an INTERACTIVE daemon run whose
+watcher window closes — but it was also firing for AUTONOMOUS pipeline/webhook runs (no
+human watcher) whenever any dashboard tab navigated/closed (`run_tab_closed` actor=system
+→ daemon then 409s). Fix: `ExecutionService.tab_closed()` ignores runs whose
+`origin.event_kind` is backend-orchestrated (`_AUTONOMOUS_EVENT_KINDS`); `RunDetailPage`
+skips the POST for the same kinds. **Verified: full pipeline ran autonomously end-to-end
+on qaodoo job 312** (create-project → 3 chained searches → bulk-save, 30 leads + 2 saved,
+zero tab_closed, no manual intervention). The old standalone-continuation workaround is no
+longer needed. See [[project_recruiter_pipeline_chained_run_bug]].
 
 ### Key operational rules
 
