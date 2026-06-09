@@ -166,7 +166,11 @@ changes for a moment when Fernanda is at the host, or for the next boot. Pure-wo
 Full design: **`docs/recruiter-odoo-integration-design.md`**. The whole loop now runs end-to-end:
 Odoo new position → create `-EZ <position>` project → push its URL to `hr.job.recruiter_project_url`
 → AI-Copilot search → push candidates as `linkedin.lead` → save N to the project. **Message-send
-stays MANUAL/gated** (req B, the `lead_outreach_update` push, fires only on a real bulk-message run).
+stays MANUAL/gated** — req B is now WIRED but deliberate: `RecruiterPipelineService.send_messages(job_id)`
+(via `POST /v1/recruiter/jobs/{job_id}/send-messages`) reconstructs the job's saved candidates, fires a
+`recruiter_message` run (parameterized bulk-message wf `3541e5a8`); on completion the terminal hook
+(`_after_message`) pushes `/akcr/api/lead_outreach_update` → `outreach_status=messaged`. ⚠️ Sends real
+InMail; NEVER auto-fired by the pipeline. (Wiring deployed + endpoint verified; live send still gated.)
 **Live E2E (qaodoo job 307 "DevOps Engineer"):** created project `2053887530`, wrote its URL back to
 job 307, created **7 leads** (all `/talent/profile/` URLs), saved 2 candidates to the project.
 - **Trigger** = `recruiter_pipeline` event_kind on connector `2c7a49e9` (qaodoo). The
