@@ -507,15 +507,25 @@ export default function RunDetailPage() {
   // daemon, which re-checks run.status between steps, stops. We use a ref so the
   // listener always sees the latest run, and ONLY pagehide (not visibilitychange,
   // which also fires on a mere tab switch — we must not suspend on that).
-  const liveRunRef = useRef<{ target?: string; status?: string } | null>(null);
+  // Autonomous runs (Odoo pipeline / webhook / reconciler) have no human watcher —
+  // closing this window must NOT suspend them. Only INTERACTIVE daemon runs (no
+  // autonomous event_kind) are watch-gated. The backend enforces this too; this
+  // is the first line + avoids a wasteful POST. Keep in sync with
+  // execution_service._AUTONOMOUS_EVENT_KINDS.
+  const AUTONOMOUS_EVENT_KINDS = [
+    "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
+    "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
+  ];
+  const liveRunRef = useRef<{ target?: string; status?: string; eventKind?: string } | null>(null);
   liveRunRef.current = run
-    ? { target: run.origin?.execution_target, status: run.status }
+    ? { target: run.origin?.execution_target, status: run.status, eventKind: run.origin?.event_kind }
     : null;
   useEffect(() => {
     if (!runId) return;
     const onHide = () => {
       const r = liveRunRef.current;
       if (!r || r.target !== "daemon") return;
+      if (r.eventKind && AUTONOMOUS_EVENT_KINDS.includes(r.eventKind)) return;
       if (!["queued", "running", "recovering"].includes(r.status || "")) return;
       postKeepalive(`/runs/${runId}/tab-closed`);
     };

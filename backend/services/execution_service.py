@@ -24,6 +24,17 @@ log = get_logger()
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
+# Runs orchestrated by the backend (Odoo pipeline / webhook / reconciler) have NO
+# human "watcher" — they are driven autonomously, not by a dashboard operator. The
+# tab-closed suspend signal (a dashboard RunDetailPage unloading on pagehide) is a
+# safety for INTERACTIVE daemon runs a human launched and is watching; it must NOT
+# pause autonomous runs, or an automated pipeline stalls the moment anyone's
+# dashboard tab navigates/closes. Identified by the run's origin.event_kind.
+_AUTONOMOUS_EVENT_KINDS = frozenset({
+    "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
+    "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
+})
+
 
 def _substitute_runtime_params(steps: list[dict], runtime_params: dict) -> int:
     """In-place {{key}} substitution into each step's value / success_condition /
@@ -828,6 +839,17 @@ class ExecutionService:
         states are returned unchanged.
         """
         run = await self.get_run(run_id)
+        # Autonomous (pipeline/webhook/reconciler) runs have no dashboard watcher —
+        # a RunDetailPage unloading must never suspend them. Only interactive daemon
+        # runs (no autonomous event_kind) are watch-gated.
+        event_kind = (run.origin or {}).get("event_kind")
+        if event_kind in _AUTONOMOUS_EVENT_KINDS:
+            logger.info(
+                "tab_closed ignored for autonomous run %s (event_kind=%s) — "
+                "pipeline/webhook runs are not gated by a dashboard watcher",
+                run_id, event_kind,
+            )
+            return run
         active_states = {
             RunStatus.RUNNING.value,
             RunStatus.RECOVERING.value,
