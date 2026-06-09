@@ -25,6 +25,7 @@ from api.v1.integrations import router as integrations_router
 from api.v1.interventions import router as interventions_router
 from api.v1.runs import router as runs_router
 from api.v1.settings import router as settings_router
+from api.v1.recruiter import router as recruiter_router
 from api.v1.webhooks import router as webhooks_router
 from api.v1.workflows import router as workflows_router
 from core.config import settings
@@ -260,6 +261,7 @@ app.include_router(artifacts_router, prefix="/v1")
 app.include_router(client_logs_router, prefix="/v1")
 app.include_router(analysis_router, prefix="/v1")
 app.include_router(webhooks_router, prefix="/v1")
+app.include_router(recruiter_router, prefix="/v1")
 
 
 @app.get("/v1/health")

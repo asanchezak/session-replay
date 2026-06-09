@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     recruiter_create_project_workflow_id: str = ""
     recruiter_search_workflow_id: str = ""
     recruiter_save_workflow_id: str = ""
+    recruiter_message_workflow_id: str = ""
     # Cap how many of the search's candidates get auto-saved to the project per
     # position (each save is its own daemon run). 0 = use the payload's candidate_count.
     recruiter_max_saves_per_position: int = 5

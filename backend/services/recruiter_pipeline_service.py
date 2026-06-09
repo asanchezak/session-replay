@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 EVENT_CREATE_PROJECT = "recruiter_create_project"
 EVENT_SEARCH = "recruiter_search"
 EVENT_SAVE = "recruiter_save"
-PIPELINE_EVENT_KINDS = {EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE}
+EVENT_MESSAGE = "recruiter_message"
+PIPELINE_EVENT_KINDS = {EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE}
 
 _NON_TERMINAL = (
     RunStatus.QUEUED.value,
@@ -50,6 +51,13 @@ _NON_TERMINAL = (
 _PROJECT_URL_RE = re.compile(r"/talent/hire/(\d+)")
 # Prefix marking projects this automation created (so they're findable/cleanable).
 PROJECT_NAME_PREFIX = "-EZ "
+# Default outreach copy for req B (send_messages); overridable per call.
+DEFAULT_MESSAGE_SUBJECT = "Oportunidad en Akurey"
+DEFAULT_MESSAGE_BODY = (
+    "Hola, ¡espero que estés muy bien! Te escribo desde Akurey porque tu perfil "
+    "nos llamó la atención para una posición que tenemos abierta. ¿Te interesaría "
+    "que conversemos? ¡Saludos!"
+)
 
 
 class RecruiterPipelineService:
@@ -191,6 +199,8 @@ class RecruiterPipelineService:
                 job_id, pipeline.get("candidate_url"),
             )
             return {"stage": "save", "done": True}
+        if event_kind == EVENT_MESSAGE:
+            return await self._after_message(run, pipeline, connector_id, job_id)
         return {"skipped": "unknown_event_kind", "event_kind": event_kind}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
@@ -269,3 +279,93 @@ class RecruiterPipelineService:
                 "candidates NOT auto-saved to the project"
             )
         return {"stage": "search", "leads": lead_res, "save_runs": save_runs}
+
+    async def _after_message(self, run, pipeline, connector_id, job_id) -> dict:
+        # Req B: record that the job's candidates were messaged → Odoo
+        # outreach_status=messaged (via linkedin.lead.message).
+        messaged = pipeline.get("messaged") or []
+        res = await self.push.push_outreach_update(
+            run_id=run.id, job_id=job_id, connector_id=connector_id, messaged=messaged,
+        )
+        logger.info("recruiter pipeline: outreach update for job %s — %s", job_id, res)
+        return {"stage": "message", "outreach": res}
+
+    async def _gather_job_context(self, job_id) -> dict:
+        """Reconstruct a job's pipeline context from its prior runs: connector +
+        project + the candidates actually SAVED (completed save runs)."""
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        ctx = {"connector_id": None, "project_id": None, "project_url": None,
+               "project_name": None, "saved": []}
+        seen = set()
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") not in PIPELINE_EVENT_KINDS:
+                continue
+            p = o.get("pipeline") or {}
+            if str(p.get("job_id")) != str(job_id):
+                continue
+            ctx["connector_id"] = ctx["connector_id"] or p.get("connector_id") or o.get("connector_id")
+            ctx["project_id"] = ctx["project_id"] or p.get("project_id")
+            ctx["project_url"] = ctx["project_url"] or p.get("project_url")
+            ctx["project_name"] = ctx["project_name"] or p.get("project_name")
+            if o.get("event_kind") == EVENT_SAVE and r.status == RunStatus.COMPLETED.value:
+                url = p.get("candidate_url")
+                if url and url not in seen:
+                    seen.add(url)
+                    ctx["saved"].append({"profile_url": url})
+        return ctx
+
+    async def send_messages(self, job_id, subject: str | None = None,
+                            body: str | None = None) -> str | None:
+        """Deliberate (manual/gated) req B trigger: bulk-message a job's saved
+        candidates, recording it in Odoo on completion. ⚠️ SENDS real InMail.
+
+        Reconstructs the job's project + saved candidates from prior pipeline runs,
+        then fires a recruiter_message run (stamped with job_id + the recipients).
+        The transition terminal hook → _after_message → push_outreach_update.
+        """
+        wf = settings.recruiter_message_workflow_id
+        if not wf:
+            logger.warning("recruiter pipeline: recruiter_message_workflow_id unset — skip")
+            return None
+        ctx = await self._gather_job_context(job_id)
+        if not ctx.get("project_id"):
+            logger.warning("recruiter pipeline: no project for job %s — can't message", job_id)
+            return None
+        recipients = ctx.get("saved") or []
+        if not recipients:
+            logger.warning(
+                "recruiter pipeline: no saved candidates for job %s — nothing to message",
+                job_id,
+            )
+            return None
+        subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
+        body = (body or DEFAULT_MESSAGE_BODY).strip()
+        pipeline_url = (
+            f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
+        )
+        messaged = [
+            {**m, "subject": subject, "body": body, "message_type": "inmail"}
+            for m in recipients
+        ]
+        pipeline_ctx = {
+            "job_id": str(job_id),
+            "connector_id": ctx.get("connector_id"),
+            "project_id": ctx.get("project_id"),
+            "messaged": messaged,
+            "subject": subject,
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=wf,
+            event_kind=EVENT_MESSAGE,
+            runtime_params={"pipeline_url": pipeline_url, "subject": subject, "body": body},
+            pipeline=pipeline_ctx,
+            connector_id=ctx.get("connector_id"),
+        )
+        logger.info(
+            "recruiter pipeline: started message run %s for job %s (%d recipients)",
+            run.id, job_id, len(messaged),
+        )
+        return str(run.id)
