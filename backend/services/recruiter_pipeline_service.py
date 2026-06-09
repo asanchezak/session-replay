@@ -231,9 +231,12 @@ class RecruiterPipelineService:
                 "recruiter pipeline: boolean for job %s (t=%s): %s",
                 job_id, built["tightness"], built["query"],
             )
+            search_params = {"boolean_query": built["query"]}
+            if settings.recruiter_default_location:
+                search_params["location"] = settings.recruiter_default_location
             search_run = await self._create_pipeline_run(
                 workflow_id=adv_wf, event_kind=EVENT_SEARCH,
-                runtime_params={"boolean_query": built["query"]},
+                runtime_params=search_params,
                 pipeline=pipeline, connector_id=connector_id,
             )
             return {"stage": "create_project", "project_link": link_res,
@@ -329,9 +332,12 @@ class RecruiterPipelineService:
                 new_t = tightness - 1          # too few → broaden
             if new_t is not None and 0 <= new_t <= b.max_tightness(spec) and new_t != tightness:
                 query = b.assemble(spec, new_t)
+                re_params = {"boolean_query": query}
+                if settings.recruiter_default_location:
+                    re_params["location"] = settings.recruiter_default_location
                 re_run = await self._create_pipeline_run(
                     workflow_id=adv_wf, event_kind=EVENT_SEARCH,
-                    runtime_params={"boolean_query": query},
+                    runtime_params=re_params,
                     pipeline={**pipeline, "search_tightness": new_t,
                               "search_reruns": reruns + 1, "search_query": query},
                     connector_id=connector_id,

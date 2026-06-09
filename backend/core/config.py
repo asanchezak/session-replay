@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # Workflow params: search_url, project_name, target_count.
     # Env: RECRUITER_SAVE_RESULTS_WORKFLOW_ID.
     recruiter_save_results_workflow_id: str = ""
+    # Location facet for the advanced search. The focused boolean+location search
+    # workflow needs a location to commit reliably (the location facet + explicit
+    # "Run search" click is what actually executes the query; boolean-only Enter-
+    # commit can leave the page on "Búsqueda vacía"). Threaded as {{location}}.
+    # Env: RECRUITER_DEFAULT_LOCATION.
+    recruiter_default_location: str = ""
     # Boolean-search count calibration: target ~15; re-tune (tighten/broaden the
     # boolean) when the result count falls outside [min,max], capped at N re-runs.
     recruiter_target_count: int = 15
