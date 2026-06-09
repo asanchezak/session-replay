@@ -369,9 +369,42 @@ class RecruiterPipelineService:
             limit = len(candidates)
         to_save = candidates[:limit] if limit else candidates
 
-        save_wf = settings.recruiter_save_workflow_id
         project_name = pipeline.get("project_name", "")
         save_runs: list[str] = []
+
+        # Preferred: ONE bulk results-page save run — select N candidates on the
+        # search results page and save them together (no profile visits). Needs
+        # the concrete search URL the search run landed on.
+        bulk_wf = settings.recruiter_save_results_workflow_id
+        search_url = result.get("url")
+        if bulk_wf and project_name and to_save and search_url:
+            target_count = len(to_save)
+            save_run = await self._create_pipeline_run(
+                workflow_id=bulk_wf,
+                event_kind=EVENT_SAVE,
+                runtime_params={
+                    "search_url": search_url,
+                    "project_name": project_name,
+                    "target_count": target_count,
+                },
+                pipeline={**pipeline, "bulk_save_target": target_count},
+                connector_id=connector_id,
+            )
+            save_runs.append(str(save_run.id))
+            logger.info(
+                "recruiter pipeline: bulk save run %s for job %s (target=%s, project=%r)",
+                save_run.id, job_id, target_count, project_name,
+            )
+            return {"stage": "search", "leads": lead_res, "save_runs": save_runs,
+                    "bulk_save": True}
+
+        # Fallback: per-candidate save runs (the legacy profile-page save flow).
+        save_wf = settings.recruiter_save_workflow_id
+        if bulk_wf and not search_url:
+            logger.warning(
+                "recruiter pipeline: bulk save configured but search run produced no "
+                "URL — falling back to per-candidate saves"
+            )
         if save_wf and project_name and to_save:
             for cand in to_save:
                 url = cand.get("profile_url")
@@ -388,9 +421,9 @@ class RecruiterPipelineService:
                     connector_id=connector_id,
                 )
                 save_runs.append(str(save_run.id))
-        elif not save_wf:
+        elif not save_wf and not bulk_wf:
             logger.warning(
-                "recruiter pipeline: recruiter_save_workflow_id unset — leads pushed, "
+                "recruiter pipeline: no save workflow configured — leads pushed, "
                 "candidates NOT auto-saved to the project"
             )
         return {"stage": "search", "leads": lead_res, "save_runs": save_runs}

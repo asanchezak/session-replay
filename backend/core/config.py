@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     recruiter_save_workflow_id: str = ""
     recruiter_message_workflow_id: str = ""
     recruiter_advanced_search_workflow_id: str = ""
+    # Bulk results-page save: ONE daemon run selects N candidates on the search
+    # results page and bulk-saves them to the project (zero profile visits → much
+    # lighter anti-bot footprint than the per-candidate recruiter_save_workflow_id
+    # loop). When set, _after_search fires this instead of N per-profile save runs.
+    # Workflow params: search_url, project_name, target_count.
+    # Env: RECRUITER_SAVE_RESULTS_WORKFLOW_ID.
+    recruiter_save_results_workflow_id: str = ""
     # Boolean-search count calibration: target ~15; re-tune (tighten/broaden the
     # boolean) when the result count falls outside [min,max], capped at N re-runs.
     recruiter_target_count: int = 15
