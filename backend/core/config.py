@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     recruiter_count_band_min: int = 10
     recruiter_count_band_max: int = 25
     recruiter_max_search_reruns: int = 2
+    # Calibration STOP thresholds (so it converges and does NOT mechanically burn
+    # all reruns). A location-faceted tech search realistically returns 50-500 even
+    # when tightened; we only extract ~30 and save a handful, so any count at or
+    # below the acceptable ceiling is "good enough" → finalize without another
+    # search. And once tightening stops reducing the count by at least
+    # min_convergence (diminishing returns), stop — another rerun won't reach a
+    # usable set. Env: RECRUITER_COUNT_ACCEPTABLE_MAX / RECRUITER_COUNT_MIN_CONVERGENCE.
+    recruiter_count_acceptable_max: int = 150
+    recruiter_count_min_convergence: float = 0.2
     # Cap how many of the search's candidates get auto-saved to the project per
     # position (each save is its own daemon run). 0 = use the payload's candidate_count.
     recruiter_max_saves_per_position: int = 5

@@ -318,18 +318,30 @@ class RecruiterPipelineService:
         spec = pipeline.get("search_spec")
         tightness = pipeline.get("search_tightness")
         reruns = pipeline.get("search_reruns", 0)
+        prev_count = pipeline.get("search_prev_count")  # count before this run's tightness
         adv_wf = settings.recruiter_advanced_search_workflow_id
 
-        # --- count calibration: re-tune the boolean toward the target band ---
+        # --- count calibration: converge toward a usable set, but DON'T burn every
+        # rerun. Tighten only while the count is above the acceptable ceiling AND
+        # tightening is still meaningfully reducing it; broaden only when clearly too
+        # few. Anything in [band_min, acceptable_max] is good enough → finalize. ---
         if (adv_wf and spec is not None and tightness is not None and count is not None
                 and reruns < settings.recruiter_max_search_reruns):
             from services.boolean_query_builder import BooleanQueryBuilder
             b = BooleanQueryBuilder()
             new_t = None
-            if count > settings.recruiter_count_band_max:
-                new_t = tightness + 1          # too many → tighten
+            if count > settings.recruiter_count_acceptable_max:
+                # Diminishing-returns guard: if the previous tighten reduced the count
+                # by less than min_convergence, another tighten won't reach a usable
+                # set either — finalize with what we have instead of exhausting reruns.
+                converging = (
+                    prev_count is None or prev_count <= 0
+                    or (prev_count - count) / prev_count >= settings.recruiter_count_min_convergence
+                )
+                if converging:
+                    new_t = tightness + 1          # too many AND still converging → tighten
             elif count < settings.recruiter_count_band_min:
-                new_t = tightness - 1          # too few → broaden
+                new_t = tightness - 1              # clearly too few → broaden
             if new_t is not None and 0 <= new_t <= b.max_tightness(spec) and new_t != tightness:
                 query = b.assemble(spec, new_t)
                 re_params = {"boolean_query": query}
@@ -339,15 +351,21 @@ class RecruiterPipelineService:
                     workflow_id=adv_wf, event_kind=EVENT_SEARCH,
                     runtime_params=re_params,
                     pipeline={**pipeline, "search_tightness": new_t,
-                              "search_reruns": reruns + 1, "search_query": query},
+                              "search_reruns": reruns + 1, "search_query": query,
+                              "search_prev_count": count},
                     connector_id=connector_id,
                 )
                 logger.info(
-                    "recruiter pipeline: calibrate job %s count=%s t=%s→%s rerun=%s",
-                    job_id, count, tightness, new_t, str(re_run.id),
+                    "recruiter pipeline: calibrate job %s count=%s (prev=%s) t=%s→%s rerun=%s",
+                    job_id, count, prev_count, tightness, new_t, str(re_run.id),
                 )
                 return {"stage": "search", "calibrating": True, "count": count,
                         "tightness": new_t, "re_run": str(re_run.id)}
+            logger.info(
+                "recruiter pipeline: finalize job %s count=%s (prev=%s) — within "
+                "acceptable range or tightening saturated; not re-running",
+                job_id, count, prev_count,
+            )
 
         # --- in band (or no count / reruns exhausted): finalize ---
         if pipeline.get("search_query"):

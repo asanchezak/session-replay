@@ -50,6 +50,26 @@ per-profile loop stays in effect. The search extractor (`recruiter_search_people
 (Trigger note: extract-30 `1bc44128` needs `runtime_params.boolean_query` + `location`;
 empty params → empty search → "No hay resultados".)
 
+**Search calibration converges, does NOT burn every rerun (2026-06-09).** A
+location-faceted tech search realistically returns 50-500 even tightened; we only
+extract ~30 and save a handful, so `_after_search` finalizes once the count is at/below
+`recruiter_count_acceptable_max` (default 150) OR once tightening stops reducing the
+count by `recruiter_count_min_convergence` (default 0.2) — instead of mechanically
+exhausting `recruiter_max_search_reruns`. The old `[10,25]` band was unreachable and
+forced 3 full searches per position every time. Unit-tested
+(`test_recruiter_pipeline_calibration.py`); not yet live-verified (needs a daemon run).
+
+**Dashboard — related pipeline runs (2026-06-09).** The Runs list shows a "Pipeline"
+column: `<position> · <stage>` + a `job <id>` badge derived from `origin.pipeline` /
+`origin.event_kind`, so the chained create-project→search→save runs of one Odoo position
+read as one group. Helpers `pipelineLabel`/`pipelineJobId` in `frontend/src/hooks/useRuns.ts`.
+
+**Test-data cleanup (2026-06-09):** qaodoo test jobs 309/310/312 ("EZ-E2E") archived
+(active=False, unpublished, sync off) + their `linkedin.lead` rows deleted; synced jobs
+back to the 2 real ones (304/307). STILL MANUAL: the 3 leftover `-EZ Senior Full-Stack
+Engineer` test projects in LinkedIn Recruiter (sensitive account, no delete-project
+workflow) — delete by hand when convenient.
+
 **FULL pipeline E2E live-verified on qaodoo 2026-06-09 (job 310):** reconcile →
 `recruiter_pipeline` trigger → create-project → `recruiter_project_url` pushed to qaodoo
 → focused boolean+location search → **30 `linkedin.lead` rows in qaodoo** → bulk-save
