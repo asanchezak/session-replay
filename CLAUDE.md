@@ -39,7 +39,14 @@ Full design: **`docs/recruiter-odoo-integration-design.md`**. All 4 requirements
   `{{job_description}}` → create-project wf `29ec1891` step 5; live-verified job 317) →
   push URL back to `hr.job.recruiter_project_url`
 - AI-Copilot search → push candidates as `linkedin.lead` → save N to project
-- Message-send stays **MANUAL/gated**: `POST /v1/recruiter/jobs/{job_id}/send-messages`
+- Message-send stays **MANUAL/gated**: `POST /v1/recruiter/jobs/{job_id}/send-messages`.
+  Triggerable from Odoo: an **akcr button "Mandar mensaje a posibles aplicantes"** on the
+  hr.job form opens a wizard (subject/body) → POSTs to that endpoint (reuses
+  `ir.config_parameter` `akcr.session_replay_base_url` + `akcr.session_replay_api_key`,
+  set on qaodoo to the AWS backend). ⚠️ sends real InMail. The job form also now shows
+  `recruiter_search_query` (the boolean text). **Both ship via akodoo branch
+  `feat/recruiter-search-link` (commit `cc89a8e6`) and need a qaodoo `-u akcr` upgrade
+  (operator step — no filesystem access to qaodoo from here).**
 - 3 parameterized wfs: create-project `29ec1891`, search `f6f99011`, save `a352e1e4` — IDs in both `.env.prod` AND `docker-compose.prod.yml`
 
 **Bulk results-page save (lighter anti-bot, gated OFF by default).** `_after_search`
