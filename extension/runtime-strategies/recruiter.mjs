@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-perpage-verify-2";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-pick-exact-1";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -471,6 +471,7 @@ async function clickRecruiterBulkSave(page, orand, runtime) {
 // selected candidates, pick the existing project by name, and confirm.
 async function saveSelectionToProject(page, projectName, orand, runtime) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
   const opened = await clickRecruiterBulkSave(page, orand, runtime);
   if (!opened) return { ok: false, reason: "bulk_save_button_not_found" };
   await page.waitForSelector('#save-to-projects-typeahead, label[for="choose-existing-projects"], [role="dialog"]', { timeout: 10000 }).catch(() => {});
@@ -481,21 +482,62 @@ async function saveSelectionToProject(page, projectName, orand, runtime) {
   const typedProject = await typeSelectorChain(page, [
     { type: "css", value: "#save-to-projects-typeahead" },
   ], projectName, orand, 10000, runtime);
-  await sleep(1400 + Math.floor(orand() * 900));
-  const pickedProject = await clickSelectorChain(page, [
-    { type: "text", value: projectName },
-  ], orand, 10000, runtime);
-  await sleep(700 + Math.floor(orand() * 600));
-  const clickedSave = await clickSelectorChain(page, [
-    { type: "css", value: "button[data-test-action='save']" },
-  ], orand, 10000, runtime);
+  await sleep(1600 + Math.floor(orand() * 900));
+  // Pick the typeahead option whose text matches the EXACT project name. The
+  // typeahead lists ALL projects (it does not filter by the typed text), and the old
+  // fuzzy text-click selected the WRONG project (candidates landed elsewhere) — so we
+  // click the specific <li.artdeco-typeahead__result> that contains this exact name.
+  const pickTarget = await page.evaluate((name) => {
+    const opts = Array.from(document.querySelectorAll(
+      'li.artdeco-typeahead__result[role="option"], ul[role="listbox"] li[role="option"], [role="option"]',
+    ));
+    for (const li of opts) {
+      const txt = (li.textContent || "").replace(/\s+/g, " ");
+      if (txt.includes(name)) {
+        li.scrollIntoView({ block: "center" });
+        const r = li.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          return { x: r.left + Math.min(140, r.width * 0.4), y: r.top + r.height / 2 };
+        }
+      }
+    }
+    return null;
+  }, projectName).catch(() => null);
+  let pickedProject = false;
+  if (pickTarget) {
+    await moveMouseAlongBezier(page, pickTarget, orand).catch(() => {});
+    await sleep(120 + Math.floor(orand() * 160));
+    await page.mouse.click(pickTarget.x, pickTarget.y).catch(() => {});
+    pickedProject = true;
+  }
+  await sleep(900 + Math.floor(orand() * 600));
+  // GUARD: only save if the selected project chip actually matches our target — never
+  // save into the wrong project.
+  const selectedRight = await page.evaluate((name) => {
+    const chips = Array.from(document.querySelectorAll(
+      '[class*="chip"], [class*="pill"], [class*="selected"], [data-test*="selected"]',
+    ));
+    return chips.some((e) => (e.textContent || "").replace(/\s+/g, " ").includes(name));
+  }, projectName).catch(() => false);
+  let clickedSave = false;
+  if (selectedRight) {
+    clickedSave = await clickSelectorChain(page, [
+      { type: "css", value: "button[data-test-action='save']" },
+    ], orand, 10000, runtime);
+  }
   await sleep(1800 + Math.floor(orand() * 1000));  // let the "N guardados" toast settle
+  const toast = await page.evaluate(() => {
+    const m = (document.body.innerText || "").match(/Se han? guardado[^.\n]*|saved[^.\n]*to (?:the )?project[^.\n]*/i);
+    return m ? m[0].trim().slice(0, 90) : null;
+  }).catch(() => null);
   return {
-    ok: Boolean(typedProject && pickedProject && clickedSave),
+    ok: Boolean(typedProject && pickedProject && selectedRight && clickedSave),
     existing_mode_clicked: existingModeClicked,
     typed_project: typedProject,
     picked_project: pickedProject,
+    selected_right_project: selectedRight,
     clicked_save: clickedSave,
+    toast,
   };
 }
 
