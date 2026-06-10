@@ -50,14 +50,16 @@ per-profile loop stays in effect. The search extractor (`recruiter_search_people
 (Trigger note: extract-30 `1bc44128` needs `runtime_params.boolean_query` + `location`;
 empty params → empty search → "No hay resultados".)
 
-**Search calibration converges, does NOT burn every rerun (2026-06-09).** A
-location-faceted tech search realistically returns 50-500 even tightened; we only
-extract ~30 and save a handful, so `_after_search` finalizes once the count is at/below
-`recruiter_count_acceptable_max` (default 150) OR once tightening stops reducing the
-count by `recruiter_count_min_convergence` (default 0.2) — instead of mechanically
-exhausting `recruiter_max_search_reruns`. The old `[10,25]` band was unreachable and
-forced 3 full searches per position every time. Unit-tested
-(`test_recruiter_pipeline_calibration.py`); not yet live-verified (needs a daemon run).
+**Search calibration capped at 1 rerun → ≤2 searches/position (LIVE-VERIFIED 2026-06-10).**
+A location-faceted tech search realistically returns 50-500 even tightened (live: 670→507→206,
+582→446), and never dips under a tight band in 2 reruns — so the old `max_reruns=2` always
+exhausted (3 full searches on the sensitive account) while we extract ~30 + save a handful
+downstream regardless of the raw count. `recruiter_max_search_reruns` is now **1** (one
+tighten → ≤2 searches, guaranteed). The early-exit guards still apply when max_reruns>1:
+finalize once count ≤ `recruiter_count_acceptable_max` (150) or once tightening stops
+reducing it by `recruiter_count_min_convergence` (0.35). **Verified live on qaodoo job 315:**
+search1=582→tighten→search2=446→finalize (2 searches, vs 3 before) → bulk-save 2 + 30 leads +
+project_url. Unit-tested in `test_recruiter_pipeline_calibration.py`.
 
 **Dashboard — related pipeline runs (2026-06-09).** The Runs list shows a "Pipeline"
 column: `<position> · <stage>` + a `job <id>` badge derived from `origin.pipeline` /
