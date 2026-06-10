@@ -47,16 +47,23 @@ class Settings(BaseSettings):
     recruiter_target_count: int = 15
     recruiter_count_band_min: int = 10
     recruiter_count_band_max: int = 25
-    recruiter_max_search_reruns: int = 2
-    # Calibration STOP thresholds (so it converges and does NOT mechanically burn
-    # all reruns). A location-faceted tech search realistically returns 50-500 even
-    # when tightened; we only extract ~30 and save a handful, so any count at or
-    # below the acceptable ceiling is "good enough" → finalize without another
-    # search. And once tightening stops reducing the count by at least
-    # min_convergence (diminishing returns), stop — another rerun won't reach a
-    # usable set. Env: RECRUITER_COUNT_ACCEPTABLE_MAX / RECRUITER_COUNT_MIN_CONVERGENCE.
+    # At most ONE calibration → ≤2 searches per position. We extract ~30 and save a
+    # handful downstream regardless of the raw count, so the search count barely
+    # affects the OUTPUT — chasing a tighter count costs extra searches on the
+    # sensitive account for little gain. Live data: a full-stack+CR search goes
+    # 670→507→206 across tightness steps and never dips under 150 in 2 reruns, so
+    # max_reruns=2 always exhausted; 1 rerun gives the calibration benefit (one
+    # tighten) without the 3rd search. Env: RECRUITER_MAX_SEARCH_RERUNS.
+    recruiter_max_search_reruns: int = 1
+    # Calibration STOP thresholds — the early-exit guards (used when max_reruns > 1):
+    # finalize once the count is at/below the acceptable ceiling, or once tightening
+    # stops reducing it by at least min_convergence (diminishing returns), instead of
+    # mechanically burning reruns. A location-faceted tech search realistically
+    # returns 50-500 even tightened; we only extract ~30 + save a handful, so a count
+    # at/below the ceiling is "good enough". Env: RECRUITER_COUNT_ACCEPTABLE_MAX /
+    # RECRUITER_COUNT_MIN_CONVERGENCE.
     recruiter_count_acceptable_max: int = 150
-    recruiter_count_min_convergence: float = 0.2
+    recruiter_count_min_convergence: float = 0.35
     # Cap how many of the search's candidates get auto-saved to the project per
     # position (each save is its own daemon run). 0 = use the payload's candidate_count.
     recruiter_max_saves_per_position: int = 5
