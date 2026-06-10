@@ -394,18 +394,12 @@ class RecruiterPipelineService:
         )
         candidates = lead_res.get("leads") or []
 
-        # Cap how many we auto-save (each save is its own daemon run).
+        # Save EVERY extracted candidate to the project: the count saved == the count
+        # the search extracted (the extraction is itself bounded by the search
+        # workflow's target_count, ~30). recruiter_max_saves_per_position is now only
+        # an OPTIONAL absolute ceiling — 0 (default) = no cap = save all extracted.
         cap = settings.recruiter_max_saves_per_position or 0
-        pcount = pipeline.get("candidate_count") or 0
-        if cap and pcount:
-            limit = min(cap, pcount)
-        elif cap:
-            limit = cap
-        elif pcount:
-            limit = pcount
-        else:
-            limit = len(candidates)
-        to_save = candidates[:limit] if limit else candidates
+        to_save = candidates[:cap] if cap > 0 else candidates
 
         project_name = pipeline.get("project_name", "")
         save_runs: list[str] = []

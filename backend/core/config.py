@@ -64,9 +64,11 @@ class Settings(BaseSettings):
     # RECRUITER_COUNT_MIN_CONVERGENCE.
     recruiter_count_acceptable_max: int = 150
     recruiter_count_min_convergence: float = 0.35
-    # Cap how many of the search's candidates get auto-saved to the project per
-    # position (each save is its own daemon run). 0 = use the payload's candidate_count.
-    recruiter_max_saves_per_position: int = 5
+    # Optional ABSOLUTE ceiling on how many of the extracted candidates get saved
+    # to the project. 0 (default) = NO cap → save EVERY extracted candidate (the
+    # count saved == the count the search extracted, itself bounded by the search
+    # workflow target_count). Env: RECRUITER_MAX_SAVES_PER_POSITION.
+    recruiter_max_saves_per_position: int = 0
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True

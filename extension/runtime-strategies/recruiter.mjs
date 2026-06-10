@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-dedup-1";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-paginate-1";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -292,6 +292,40 @@ async function typeSelectorChain(page, selectorChain, value, orand, timeoutMs, r
   }
 }
 
+// Click the Recruiter results pager "Next" (an <a data-test-pagination-next> or an
+// aria-labelled next/siguiente control). Returns false when there's no enabled next
+// page. Selection persists in the bulk-action bar across pages, so we can keep
+// checking candidates page after page until we reach the target.
+async function clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand) {
+  const target = await page.evaluate(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const selectors = [
+      '[data-test-pagination-next]:not([disabled]):not([aria-disabled="true"])',
+      'a[aria-label*="siguiente" i]:not([aria-disabled="true"])',
+      'a[aria-label*="next" i]:not([aria-disabled="true"])',
+      'button[aria-label*="Siguiente" i]:not([disabled]):not([aria-disabled="true"])',
+      'button[aria-label*="Next" i]:not([disabled]):not([aria-disabled="true"])',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      const cs = window.getComputedStyle(el);
+      if (el.matches("[disabled], [aria-disabled='true']") || cs.visibility === "hidden" || cs.display === "none") continue;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      await sleep(350);
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    return null;
+  }).catch(() => null);
+  if (!target) return false;
+  await moveMouseAlongBezier(page, target, orand).catch(() => {});
+  await sleep(100 + Math.floor(orand() * 180));
+  await page.mouse.click(target.x, target.y).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
+  return true;
+}
+
 async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScrollPasses, runtime) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
@@ -300,7 +334,13 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
   const selectedUrls = new Set();
   const limit = Math.max(1, targetCount || 1);
   const passes = Math.max(1, maxScrollPasses || 12);
-  for (let pass = 0; pass < passes && selected.length < limit; pass++) {
+  // Select across pages: one Recruiter results page holds ~25, so reaching the
+  // full extracted count (e.g. 30) needs page 2+. Cap pages generously.
+  const maxPages = Math.max(1, Math.ceil(limit / 12) + 2);
+  for (let pg = 0; pg < maxPages && selected.length < limit; pg++) {
+   let stale = 0;
+   for (let pass = 0; pass < passes && selected.length < limit; pass++) {
+    const before = selected.length;
     const targets = await page.evaluate(({ rowSelector, seen, remaining }) => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
       const canon = (href) => {
@@ -377,8 +417,18 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
       await sleep(250 + Math.floor(orand() * 350));
     }
     if (selected.length >= limit) break;
+    // No new selection this pass → the current page is likely exhausted; after a
+    // couple of empty passes stop scrolling and move to the next page.
+    if (selected.length === before) { if (++stale >= 2) break; } else { stale = 0; }
     await page.mouse.wheel(0, 650 + Math.floor(orand() * 500)).catch(() => {});
     await sleep(900 + Math.floor(orand() * 700));
+   }
+   if (selected.length >= limit) break;
+   // Current page exhausted but still short of the target → next results page.
+   const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
+   if (!wentNext) break;
+   await page.waitForSelector(ROW, { timeout: 10000 }).catch(() => {});
+   await sleep(1500 + Math.floor(orand() * 800));
   }
   return selected;
 }
