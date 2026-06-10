@@ -3,15 +3,85 @@
   "description": "PARAMETERIZED create-project for the Odoo→Recruiter pipeline. Step 5 name = '-EZ {{position}}' (backend create_run substitutes runtime_params.position). Final extract step captures the new project URL (/talent/hire/<id>) into extracted_data so the job_project_link push can set hr.job.recruiter_project_url (req C). recruiter_search_people is graceful on the project landing page (waitForSelector .catch → returns [] but still posts {url}). Param: position.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
-    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
-    {"action_type":"navigate","intent":"Create-project wizard","value":"https://www.linkedin.com/talent/create/get-started"},
-    {"action_type":"scroll","intent":"form load 1"},
-    {"action_type":"scroll","intent":"form load 2"},
-    {"action_type":"type","intent":"Project name (= -EZ + position)","value":"-EZ {{position}}","selector_chain":[{"type":"css","value":"input[data-test-project-name-input]"},{"type":"accessibility","value":"Project name"}]},
-    {"action_type":"scroll","intent":"settle after name"},
-    {"action_type":"click","intent":"Create project","selector_chain":[{"type":"css","value":"button[data-test-create-button]"}]},
-    {"action_type":"scroll","intent":"creating / navigating 1"},
-    {"action_type":"scroll","intent":"creating / navigating 2"},
-    {"action_type":"extract","intent":"Capture new project URL (/talent/hire/<id>)","methods":[{"kind":"extract_strategy","strategy":"recruiter_search_people"}]}
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Create-project wizard",
+      "value": "https://www.linkedin.com/talent/create/get-started"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "form load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "form load 2"
+    },
+    {
+      "action_type": "type",
+      "intent": "Project name (= -EZ + position)",
+      "value": "-EZ {{position}}",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "input[data-test-project-name-input]"
+        },
+        {
+          "type": "accessibility",
+          "value": "Project name"
+        }
+      ]
+    },
+    {
+      "action_type": "type",
+      "intent": "Project description (= Odoo job description)",
+      "value": "{{job_description}}",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "textarea[data-test-project-description-input]"
+        },
+        {
+          "type": "accessibility",
+          "value": "Descripción del proyecto"
+        }
+      ]
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle after name"
+    },
+    {
+      "action_type": "click",
+      "intent": "Create project",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "button[data-test-create-button]"
+        }
+      ]
+    },
+    {
+      "action_type": "scroll",
+      "intent": "creating / navigating 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "creating / navigating 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Capture new project URL (/talent/hire/<id>)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_search_people"
+        }
+      ]
+    }
   ]
 }

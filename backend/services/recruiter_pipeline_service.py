@@ -51,6 +51,8 @@ _NON_TERMINAL = (
 _PROJECT_URL_RE = re.compile(r"/talent/hire/(\d+)")
 # Prefix marking projects this automation created (so they're findable/cleanable).
 PROJECT_NAME_PREFIX = "-EZ "
+# Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
+_PROJECT_DESC_MAX = 2000
 # Default outreach copy for req B (send_messages); overridable per call.
 DEFAULT_MESSAGE_SUBJECT = "Oportunidad en Akurey"
 DEFAULT_MESSAGE_BODY = (
@@ -158,6 +160,12 @@ class RecruiterPipelineService:
             candidate_count = int(job_payload.get("candidate_count") or 0) or None
         except (TypeError, ValueError):
             candidate_count = None
+        # The Odoo job description → the LinkedIn project's "Descripción del proyecto"
+        # textarea. job_payload.job_description is already HTML-stripped (fetch_jobs).
+        # Cap it so we don't overflow the textarea on very long JDs.
+        job_description = str(job_payload.get("job_description") or "").strip()
+        if len(job_description) > _PROJECT_DESC_MAX:
+            job_description = job_description[:_PROJECT_DESC_MAX].rsplit(" ", 1)[0].rstrip() + "…"
         pipeline = {
             "job_id": job_id,
             "connector_id": str(connector_id) if connector_id else None,
@@ -169,7 +177,7 @@ class RecruiterPipelineService:
         run = await self._create_pipeline_run(
             workflow_id=wf,
             event_kind=EVENT_CREATE_PROJECT,
-            runtime_params={"position": position},
+            runtime_params={"position": position, "job_description": job_description},
             pipeline=pipeline,
             connector_id=connector_id,
         )
