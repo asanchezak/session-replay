@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-09-search-card-fix-1";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-dedup-1";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -309,13 +309,21 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
       };
       const out = [];
       const seenSet = new Set(seen || []);
+      // Dedup WITHIN this batch too: the ROW selector (paginated-container OR
+      // article.profile-list-item) can match the same candidate's card twice
+      // (nested/duplicate match), which otherwise selected the same person N times
+      // and saved 1 unique instead of N. Guard by canonical profile URL AND by
+      // checkbox input id.
+      const batchUrls = new Set();
+      const batchInputs = new Set();
       for (const row of Array.from(document.querySelectorAll(rowSelector))) {
         if (out.length >= remaining) break;
         const link = row.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');
         const url = canon(link && link.getAttribute("href"));
-        if (!url || seenSet.has(url)) continue;
+        if (!url || seenSet.has(url) || batchUrls.has(url)) continue;
         const input = row.querySelector('input.small-input[type="checkbox"], input.small-input');
         if (!input || input.disabled || input.checked) continue;
+        if (input.id && batchInputs.has(input.id)) continue;
         const label = Array.from(row.querySelectorAll("label")).find(
           (candidate) => candidate.getAttribute("for") === input.id,
         );
@@ -328,6 +336,8 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
           }
         }
         if (!box) continue;
+        batchUrls.add(url);
+        if (input.id) batchInputs.add(input.id);
         out.push({
           x: box.left + box.width / 2,
           y: box.top + box.height / 2,
@@ -340,6 +350,7 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
     }, { rowSelector: ROW, seen: Array.from(selectedUrls), remaining: limit - selected.length }).catch(() => []);
     for (const target of targets) {
       if (selected.length >= limit) break;
+      if (selectedUrls.has(target.url)) continue;  // defensive: never select the same profile twice
       await moveMouseAlongBezier(page, { x: target.x, y: target.y }, orand).catch(() => {});
       await sleep(80 + Math.floor(orand() * 140));
       await page.mouse.click(target.x, target.y).catch(() => {});
