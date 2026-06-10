@@ -418,6 +418,9 @@ class RecruiterPipelineService:
                     "search_url": search_url,
                     "project_name": project_name,
                     "target_count": target_count,
+                    # Lets the save step VERIFY: it navigates to the project's candidate
+                    # list at the end (snapshot proof) and reads back the saved count.
+                    "project_url": pipeline.get("project_url") or "",
                 },
                 pipeline={**pipeline, "bulk_save_target": target_count},
                 connector_id=connector_id,

@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-paginate-1";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-perpage-verify-1";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -34,6 +34,7 @@ function readSaveResultsOptions(step) {
   ) || {};
   return {
     projectName: String(method.project_name ?? step?.value ?? "").trim(),
+    projectUrl: String(method.project_url ?? "").trim(),
     targetCount: readPositiveInt(method.target_count ?? method.count ?? method.max_people, 1),
     mode: String(method.mode || "bulk").trim().toLowerCase(),
     maxScrollPasses: readPositiveInt(method.max_scroll_passes, 12),
@@ -90,7 +91,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     return {
       handled: true,
       extraction: { save_result: saveResult },
-      log: `recruiter_save_results_to_project ok=${saveResult.ok} selected=${saveResult.selected_count || 0} project="${saveResult.project_name || ""}" reason="${saveResult.reason || ""}"`,
+      log: `recruiter_save_results_to_project ok=${saveResult.ok} saved=${saveResult.saved_count || 0}/${saveResult.target_count || 0} verified_in_project=${saveResult.verified_in_project} project="${saveResult.project_name || ""}" reason="${saveResult.reason || ""}"`,
     };
   }
 
@@ -334,12 +335,11 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
   const selectedUrls = new Set();
   const limit = Math.max(1, targetCount || 1);
   const passes = Math.max(1, maxScrollPasses || 12);
-  // Select across pages: one Recruiter results page holds ~25, so reaching the
-  // full extracted count (e.g. 30) needs page 2+. Cap pages generously.
-  const maxPages = Math.max(1, Math.ceil(limit / 12) + 2);
-  for (let pg = 0; pg < maxPages && selected.length < limit; pg++) {
-   let stale = 0;
-   for (let pass = 0; pass < passes && selected.length < limit; pass++) {
+  // Selects ONLY the current results page (Recruiter resets the checkbox selection
+  // when you paginate, so cross-page select-then-save loses everything but the last
+  // page — the page loop + save happens in saveRecruiterResultsToProject instead).
+  let stale = 0;
+  for (let pass = 0; pass < passes && selected.length < limit; pass++) {
     const before = selected.length;
     const targets = await page.evaluate(({ rowSelector, seen, remaining }) => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
@@ -417,18 +417,11 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
       await sleep(250 + Math.floor(orand() * 350));
     }
     if (selected.length >= limit) break;
-    // No new selection this pass → the current page is likely exhausted; after a
-    // couple of empty passes stop scrolling and move to the next page.
+    // No new selection this pass → the current page is exhausted; after a couple of
+    // empty passes stop.
     if (selected.length === before) { if (++stale >= 2) break; } else { stale = 0; }
     await page.mouse.wheel(0, 650 + Math.floor(orand() * 500)).catch(() => {});
     await sleep(900 + Math.floor(orand() * 700));
-   }
-   if (selected.length >= limit) break;
-   // Current page exhausted but still short of the target → next results page.
-   const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
-   if (!wentNext) break;
-   await page.waitForSelector(ROW, { timeout: 10000 }).catch(() => {});
-   await sleep(1500 + Math.floor(orand() * 800));
   }
   return selected;
 }
@@ -474,35 +467,12 @@ async function clickRecruiterBulkSave(page, orand, runtime) {
   return true;
 }
 
-async function saveRecruiterResultsToProject(page, options, orand, runtime) {
+// One dialog cycle: open the bulk "save to project" dialog for the CURRENTLY
+// selected candidates, pick the existing project by name, and confirm.
+async function saveSelectionToProject(page, projectName, orand, runtime) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
-  const projectName = String(options.projectName || "").trim();
-  if (!projectName) return { ok: false, reason: "missing_project_name" };
-  const selected = await selectRecruiterResultCheckboxes(
-    page,
-    options.targetCount,
-    orand,
-    options.maxScrollPasses,
-    runtime,
-  );
-  if (!selected.length) {
-    const diagnostics = await page.evaluate(() => ({
-      rows: document.querySelectorAll('[data-test-paginated-profile-list-item-container], article.profile-list-item').length,
-      checkboxes: document.querySelectorAll('input.small-input[type="checkbox"], input.small-input').length,
-      rowSelectors: document.querySelectorAll(".profile-list-item__selector").length,
-    })).catch(() => null);
-    return { ok: false, reason: "no_result_checkboxes_selected", selected_count: 0, diagnostics };
-  }
-  const openedBulkSave = await clickRecruiterBulkSave(page, orand, runtime);
-  if (!openedBulkSave) {
-    return {
-      ok: false,
-      reason: "bulk_save_button_not_found",
-      selected_count: selected.length,
-      selected,
-      project_name: projectName,
-    };
-  }
+  const opened = await clickRecruiterBulkSave(page, orand, runtime);
+  if (!opened) return { ok: false, reason: "bulk_save_button_not_found" };
   await page.waitForSelector('#save-to-projects-typeahead, label[for="choose-existing-projects"], [role="dialog"]', { timeout: 10000 }).catch(() => {});
   const existingModeClicked = await clickSelectorChain(page, [
     { type: "css", value: "label[for='choose-existing-projects']" },
@@ -519,15 +489,83 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
   const clickedSave = await clickSelectorChain(page, [
     { type: "css", value: "button[data-test-action='save']" },
   ], orand, 10000, runtime);
-  await sleep(1400 + Math.floor(orand() * 900));
+  await sleep(1800 + Math.floor(orand() * 1000));  // let the "N guardados" toast settle
   return {
     ok: Boolean(typedProject && pickedProject && clickedSave),
-    selected_count: selected.length,
-    selected,
-    project_name: projectName,
     existing_mode_clicked: existingModeClicked,
     typed_project: typedProject,
     picked_project: pickedProject,
     clicked_save: clickedSave,
+  };
+}
+
+async function saveRecruiterResultsToProject(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const projectName = String(options.projectName || "").trim();
+  if (!projectName) return { ok: false, reason: "missing_project_name" };
+  const limit = Math.max(1, options.targetCount || 1);
+  const maxPages = Math.max(1, Math.ceil(limit / 12) + 2);
+
+  // Save PAGE BY PAGE: Recruiter clears the checkbox selection on pagination, so we
+  // select the current page, save that batch to the project, then advance — instead
+  // of select-all-then-save-once (which only saved the last page).
+  const savedAll = [];
+  const pageResults = [];
+  let firstPageDiag = null;
+  for (let pg = 0; pg < maxPages && savedAll.length < limit; pg++) {
+    const remaining = limit - savedAll.length;
+    const selected = await selectRecruiterResultCheckboxes(page, remaining, orand, options.maxScrollPasses, runtime);
+    if (!selected.length) {
+      if (pg === 0) {
+        firstPageDiag = await page.evaluate(() => ({
+          rows: document.querySelectorAll('[data-test-paginated-profile-list-item-container], article.profile-list-item').length,
+          checkboxes: document.querySelectorAll('input.small-input[type="checkbox"], input.small-input').length,
+        })).catch(() => null);
+      }
+      break;
+    }
+    const dlg = await saveSelectionToProject(page, projectName, orand, runtime);
+    pageResults.push({ page: pg, selected: selected.length, ...dlg });
+    if (!dlg.ok) break;  // dialog failed — stop, report what we saved so far
+    savedAll.push(...selected);
+    if (savedAll.length >= limit) break;
+    const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
+    if (!wentNext) break;
+    await page.waitForSelector('[data-test-paginated-profile-list-item-container], article.profile-list-item', { timeout: 10000 }).catch(() => {});
+    await sleep(1500 + Math.floor(orand() * 800));
+  }
+
+  // --- VERIFICATION: land on the project's candidate list so the daemon's per-step
+  // snapshot captures it (visual proof), and read back how many candidates the
+  // project actually holds. ---
+  let verifiedInProject = null;
+  let verifyUrl = "";
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (m) {
+    verifyUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+    try {
+      await page.goto(verifyUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await sleep(3000 + Math.floor(orand() * 2000));
+      verifiedInProject = await page.evaluate(() => {
+        const t = document.body.innerText || "";
+        const mm = t.match(/([\d][\d.,]*)\s*(?:candidatos?|candidates?|perfiles?|profiles?)/i);
+        return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+      }).catch(() => null);
+    } catch { /* verification nav is best-effort */ }
+  }
+
+  const savedCount = savedAll.length;
+  return {
+    ok: savedCount > 0,
+    saved_count: savedCount,
+    target_count: limit,
+    selected: savedAll,
+    project_name: projectName,
+    verified_in_project: verifiedInProject,
+    verify_url: verifyUrl || null,
+    pages: pageResults,
+    ...(savedCount === 0 ? { reason: "no_result_checkboxes_selected", diagnostics: firstPageDiag } : {}),
   };
 }
