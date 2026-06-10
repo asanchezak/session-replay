@@ -33,7 +33,11 @@ Daemon session ops and restart gotchas: **`docs/recruiter-daemon-ops.md`**.
 ### Recruiter ↔ Odoo integration — E2E VERIFIED ✅ (2026-06-09)
 
 Full design: **`docs/recruiter-odoo-integration-design.md`**. All 4 requirements live-verified:
-- Odoo new position → create `-EZ <pos>` project → push URL back to `hr.job.recruiter_project_url`
+- Odoo new position → create `-EZ <pos>` project (name = `-EZ <position>`, **description =
+  the Odoo job description**, typed into `textarea[data-test-project-description-input]`;
+  pipeline `start()` threads `job_payload.job_description` capped 2000 chars as
+  `{{job_description}}` → create-project wf `29ec1891` step 5; live-verified job 317) →
+  push URL back to `hr.job.recruiter_project_url`
 - AI-Copilot search → push candidates as `linkedin.lead` → save N to project
 - Message-send stays **MANUAL/gated**: `POST /v1/recruiter/jobs/{job_id}/send-messages`
 - 3 parameterized wfs: create-project `29ec1891`, search `f6f99011`, save `a352e1e4` — IDs in both `.env.prod` AND `docker-compose.prod.yml`
