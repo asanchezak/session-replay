@@ -273,9 +273,9 @@ class RecruiterPushService:
         return {"url": url, "total_count": total, "leads": leads}
 
     async def push_search_link(self, *, run_id, job_id, connector_id,
-                               search_url, count, query) -> dict:
-        """Save the (final, in-band) search URL + count + boolean query on the Odoo
-        position (hr.job) via POST /akcr/api/job_search_link."""
+                               search_url, count, query, filters="") -> dict:
+        """Save the (final, in-band) search URL + count + boolean query + facet
+        filters on the Odoo position (hr.job) via POST /akcr/api/job_search_link."""
         if not job_id:
             return {"pushed": 0, "skipped": "no_job_id"}
         ep = await self._connector_endpoint(connector_id)
@@ -287,6 +287,7 @@ class RecruiterPushService:
             "search_url": search_url or "",
             "count": count,
             "query": query or "",
+            "filters": filters or "",
         }
         try:
             res = await self._post(base_url, api_key, "/akcr/api/job_search_link", payload)

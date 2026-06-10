@@ -377,10 +377,16 @@ class RecruiterPipelineService:
 
         # --- in band (or no count / reruns exhausted): finalize ---
         if pipeline.get("search_query"):
+            # Readable summary of the facet filters applied to the search (currently
+            # the location facet; extend here as more facets are added).
+            filter_parts = []
+            if settings.recruiter_default_location:
+                filter_parts.append(f"Location: {settings.recruiter_default_location}")
             await self.push.push_search_link(
                 run_id=run.id, job_id=job_id, connector_id=connector_id,
                 search_url=result.get("url"), count=count,
                 query=pipeline.get("search_query"),
+                filters=" · ".join(filter_parts),
             )
         # Requirement A: candidates → linkedin.lead.
         lead_res = await self.push.push_recruiter_leads(
