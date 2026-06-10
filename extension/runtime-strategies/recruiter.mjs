@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-perpage-verify-1";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-perpage-verify-2";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -546,13 +546,23 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
     verifyUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
     try {
       await page.goto(verifyUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-      await sleep(3000 + Math.floor(orand() * 2000));
-      verifiedInProject = await page.evaluate(() => {
-        const t = document.body.innerText || "";
-        const mm = t.match(/([\d][\d.,]*)\s*(?:candidatos?|candidates?|perfiles?|profiles?)/i);
-        return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+      // The project's candidate counts load lazily — poll up to ~16s for the
+      // "Todos los candidatos / All candidates N" total before snapshotting.
+      const readCount = () => page.evaluate(() => {
+        const bt = document.body.innerText || "";
+        const m1 = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
+        if (m1) return parseInt(m1[1].replace(/[.,]/g, ""), 10);
+        // Fallback: the "N Candidatos guardados / N saved" spotlight.
+        const m2 = bt.match(/([\d][\d.,]*)\s*(?:Candidatos guardados|saved candidates)/i);
+        return m2 ? parseInt(m2[1].replace(/[.,]/g, ""), 10) : null;
       }).catch(() => null);
+      for (let i = 0; i < 8; i++) {
+        await sleep(2000);
+        verifiedInProject = await readCount();
+        if (verifiedInProject && verifiedInProject > 0) break;
+      }
+      await sleep(1500);  // settle before the per-step snapshot captures the page
     } catch { /* verification nav is best-effort */ }
   }
 
