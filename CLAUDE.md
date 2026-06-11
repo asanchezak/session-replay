@@ -104,6 +104,19 @@ on qaodoo job 312** (create-project → 3 chained searches → bulk-save, 30 lea
 zero tab_closed, no manual intervention). The old standalone-continuation workaround is no
 longer needed. See [[project_recruiter_pipeline_chained_run_bug]].
 
+**Walled `/talent` seat → search FAILS + is relaunchable (2026-06-11).** A lapsed seat
+redirects the Recruiter surface to login; `recruiter_search_people` then "succeeds" with 0
+candidates and the run used to COMPLETE silently (0 leads pushed). The daemon now runs
+`assertNoBlocker` after any `recruiter_*` strategy step and **FAILS** the run (new
+`failRun` → `POST /runs/{id}/fail`) with a re-login hint instead. To retry after a fresh
+login: `POST /v1/runs/{id}/relaunch` (or the **"Relanzar"** button on a failed daemon run)
+— `ExecutionService.relaunch` CLONES the run preserving `origin` (pipeline +
+`target_operator=fernanda`) and leaves it QUEUED so the same daemon re-claims it and
+`_after_search` still fires. (FAILED is terminal, hence the clone.) The bulk-save
+`search_url` is normalized to `start=0` (the extractor stored its last page, e.g.
+`start=25`). The dead advanced-only search `034f4d58` is renamed `[DEPRECATED — use
+1bc44128 …]`.
+
 ### Key operational rules
 
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
