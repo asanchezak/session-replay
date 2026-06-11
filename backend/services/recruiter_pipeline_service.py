@@ -40,7 +40,10 @@ EVENT_CREATE_PROJECT = "recruiter_create_project"
 EVENT_SEARCH = "recruiter_search"
 EVENT_SAVE = "recruiter_save"
 EVENT_MESSAGE = "recruiter_message"
-PIPELINE_EVENT_KINDS = {EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE}
+EVENT_ARCHIVE = "recruiter_archive"
+PIPELINE_EVENT_KINDS = {
+    EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
+}
 
 _NON_TERMINAL = (
     RunStatus.QUEUED.value,
@@ -209,6 +212,8 @@ class RecruiterPipelineService:
             return {"stage": "save", "done": True}
         if event_kind == EVENT_MESSAGE:
             return await self._after_message(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_ARCHIVE:
+            return await self._after_archive(run, pipeline, connector_id, job_id)
         return {"skipped": "unknown_event_kind", "event_kind": event_kind}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
@@ -476,6 +481,34 @@ class RecruiterPipelineService:
         logger.info("recruiter pipeline: outreach update for job %s — %s", job_id, res)
         return {"stage": "message", "outreach": res}
 
+    async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
+        """An archive (remove-from-project) run completed. Only when the strategy
+        VERIFIED the candidate is gone from the active project list do we delete the
+        Odoo lead (/akcr/api/lead_removed). If unverified, leave the lead in its
+        'pending' removal state — safe, and re-runnable."""
+        profile_url = pipeline.get("profile_url")
+        name = pipeline.get("candidate_name") or pipeline.get("name")
+        archive = await self.push.read_archive_result(run.id)
+        verified_gone = bool(archive.get("verified_gone"))
+        archived = bool(archive.get("archived"))
+        if not (verified_gone or archived):
+            logger.warning(
+                "recruiter pipeline: archive run %s for job %s candidate %r NOT "
+                "confirmed (archived=%s verified_gone=%s reason=%r) — leaving Odoo "
+                "lead pending",
+                run.id, job_id, name, archived, verified_gone, archive.get("reason"),
+            )
+            return {"stage": "archive", "removed": False, "archive": archive}
+        res = await self.push.push_lead_removed(
+            run_id=run.id, job_id=job_id, connector_id=connector_id,
+            profile_url=profile_url, name=name,
+        )
+        logger.info(
+            "recruiter pipeline: archived+removed candidate %r (job %s) — %s",
+            name, job_id, res,
+        )
+        return {"stage": "archive", "removed": True, "archive": archive, "odoo": res}
+
     async def _gather_job_context(self, job_id) -> dict:
         """Reconstruct a job's pipeline context from its prior runs: connector +
         project + the candidates actually SAVED (completed save runs)."""
@@ -553,5 +586,75 @@ class RecruiterPipelineService:
         logger.info(
             "recruiter pipeline: started message run %s for job %s (%d recipients)",
             run.id, job_id, len(messaged),
+        )
+        return str(run.id)
+
+    async def remove_candidate(
+        self, job_id, *, profile_url: str | None = None, name: str | None = None,
+        project_url: str | None = None, connector_id=None, lead_id=None,
+    ) -> str | None:
+        """Deferred-delete trigger: an Odoo linkedin.lead was deleted → archive that
+        candidate from the LinkedIn project. Creates ONE daemon archive run that
+        locates the candidate by NAME on the project pipeline, archives them, and
+        verifies removal. On confirmed removal the terminal hook (_after_archive)
+        deletes the Odoo lead. Returns the run id, or None if it can't proceed.
+
+        Archive targets the candidate by visible NAME (the per-row archive button is
+        name-labelled), so a name is REQUIRED. project_url is taken from the caller
+        (hr.job.recruiter_project_url) or reconstructed from prior pipeline runs.
+        """
+        wf = settings.recruiter_archive_candidate_workflow_id
+        if not wf:
+            logger.warning("recruiter pipeline: recruiter_archive_candidate_workflow_id unset — skip")
+            return None
+        name = (name or "").strip()
+        if not name:
+            logger.warning(
+                "recruiter pipeline: remove_candidate for job %s lacks a candidate "
+                "name (profile_url=%r) — can't target the archive button", job_id, profile_url,
+            )
+            return None
+        # Resolve project + connector: prefer the caller's, else reconstruct.
+        ctx = None
+        if not project_url or not connector_id:
+            ctx = await self._gather_job_context(job_id)
+        project_url = project_url or (ctx or {}).get("project_url")
+        connector_id = connector_id or (ctx or {}).get("connector_id")
+        project_id = None
+        if project_url:
+            m = _PROJECT_URL_RE.search(project_url)
+            project_id = m.group(1) if m else None
+        elif ctx and ctx.get("project_id"):
+            project_id = ctx["project_id"]
+            project_url = f"https://www.linkedin.com/talent/hire/{project_id}/manage/all"
+        if not project_url:
+            logger.warning(
+                "recruiter pipeline: no project URL for job %s — can't archive %r",
+                job_id, name,
+            )
+            return None
+        pipeline_ctx = {
+            "job_id": str(job_id),
+            "connector_id": str(connector_id) if connector_id else None,
+            "project_id": project_id,
+            "project_url": project_url,
+            "profile_url": profile_url,
+            "candidate_name": name,
+            "lead_id": lead_id,
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=wf,
+            event_kind=EVENT_ARCHIVE,
+            runtime_params={
+                "project_url": project_url,
+                "candidate_name": name,
+                "profile_url": profile_url or "",
+            },
+            pipeline=pipeline_ctx,
+            connector_id=connector_id,
+        )
+        logger.info(
+            "recruiter pipeline: started archive run %s for job %s candidate %r",
+            run.id, job_id, name,
         )
         return str(run.id)

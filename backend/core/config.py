@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # Workflow params: search_url, project_name, target_count.
     # Env: RECRUITER_SAVE_RESULTS_WORKFLOW_ID.
     recruiter_save_results_workflow_id: str = ""
+    # Remove (= ARCHIVE; Recruiter has no hard-delete from a project) a single
+    # candidate from a project. Fired by POST /v1/recruiter/leads/remove when an
+    # Odoo linkedin.lead is deleted: one daemon archive run locates the candidate
+    # by NAME on the project pipeline, archives them, and VERIFIES they're gone;
+    # on confirmed removal the terminal hook deletes the Odoo lead
+    # (/akcr/api/lead_removed). Workflow params: project_url, candidate_name.
+    # Env: RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID.
+    recruiter_archive_candidate_workflow_id: str = ""
     # Location facet for the advanced search. The focused boolean+location search
     # workflow needs a location to commit reliably (the location facet + explicit
     # "Run search" click is what actually executes the query; boolean-only Enter-

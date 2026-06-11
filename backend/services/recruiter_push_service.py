@@ -299,3 +299,45 @@ class RecruiterPushService:
         except Exception:
             logger.exception("search link push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
+
+    # ------------------------------------------------------- archive read/push
+    async def read_archive_result(self, run_id) -> dict:
+        """Read an archive (remove-from-project) run's strategy result. The
+        recruiter_archive_candidate strategy posts {archive_result: {...}} as its
+        extraction → {archived, verified_gone, candidate_name, profile_url, reason}.
+        Last non-empty wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            ar = rec.get("archive_result")
+            if isinstance(ar, dict):
+                out = ar
+        return out
+
+    async def push_lead_removed(self, *, run_id, job_id, connector_id,
+                                profile_url: str | None, name: str | None = None) -> dict:
+        """Confirmed removal: the candidate is archived/gone in LinkedIn, so delete
+        the Odoo linkedin.lead via POST /akcr/api/lead_removed. Idempotent on the
+        Odoo side (lead not found → ok)."""
+        if not job_id:
+            return {"pushed": 0, "skipped": "no_job_id"}
+        if not profile_url:
+            return {"pushed": 0, "skipped": "no_profile_url"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "job_id": job_id,
+            "source_run_id": str(run_id),
+            "profile_url": _canonical_url(profile_url),
+            "name": name or "",
+        }
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/lead_removed", payload)
+            logger.info(
+                "lead removed push: job=%s url=%s odoo=%s", job_id, profile_url, res,
+            )
+            return {"pushed": 1, **res}
+        except Exception:
+            logger.exception("lead removed push: POST failed for run %s", run_id)
+            return {"pushed": 0, "error": True}

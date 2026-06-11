@@ -27,6 +27,7 @@ Daemon session ops and restart gotchas: **`docs/recruiter-daemon-ops.md`**.
 | 7 | Bulk-message send | DONE ✓ | bulk-message-send.json |
 | 7-orig | Bulk-message draft (no send) | DONE ✓ | bulk-message-draft.json |
 | Archive | Archive candidate | BUILT | archive-candidate.json / `77f6095c` |
+| Remove | Remove (archive) candidate — parameterized | DONE ✓ (live-verified) | archive-candidate-param.json / `fc9bb424` |
 | 6 | Single message | CAPTURED | (build-only) |
 | 9 | Public `/in/` profile bridge | DONE ✓ | via save-to-project |
 
@@ -117,6 +118,39 @@ login: `POST /v1/runs/{id}/relaunch` (or the **"Relanzar"** button on a failed d
 `start=25`). The dead advanced-only search `034f4d58` is renamed `[DEPRECATED — use
 1bc44128 …]`.
 
+### Remove candidate from project (Odoo lead delete → archive in LinkedIn → confirm → delete in Odoo) — LIVE-VERIFIED 2026-06-11
+
+Two-phase, confirm-gated. Deleting a `linkedin.lead` in Odoo ARCHIVES the candidate in
+the LinkedIn project (Recruiter has **no hard-delete** — archive IS the removal); only
+once removal is VERIFIED does the Odoo row get deleted.
+- **Trigger (akcr):** `linkedin.lead.unlink()` is deferred — for a lead with a project
+  link it POSTs `/v1/recruiter/leads/remove` + sets `removal_status='pending'` and does
+  NOT delete. Bypass (real delete) on context `akcr_removal_confirmed`, test rows, or no
+  project. Confirmed-removal callback `POST /akcr/api/lead_removed` hard-deletes.
+  (akcr branch `feat/recruiter-search-link`, PR **#1818** → qaodoo; needs `-u akcr`.)
+- **Backend:** `POST /v1/recruiter/leads/remove` → `RecruiterPipelineService.remove_candidate`
+  → daemon `recruiter_archive` run (workflow `fc9bb424`, env `RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID`).
+  Terminal hook `_after_archive` pushes `push_lead_removed` ONLY when verified → Odoo delete.
+- **Strategy `recruiter_archive_candidate`** (recruiter.mjs) — the archive interaction
+  cost 7 live iterations to nail; the working recipe:
+  1. The per-row archive button is `button[data-test-component='archive-profiles-btn']`
+     (NOT `data-view-name`); the candidate's FIRST name is in the button TEXT
+     ("Archivar a `<First>`, ya que…"), not an aria-label. Match the label as a PREFIX
+     of the full name; tag the button + its row.
+  2. The button lives in `.profile-item-actions`, **hidden until the ROW is hovered** —
+     `page.hover` the row FIRST, then click (clickResolved). A blind coordinate click does
+     nothing.
+  3. Clicking opens a confirm MODAL (`[data-test-archive-confirm-modal-body]`); the submit
+     button is `button[data-test-archive-confirm-modal-submit]` in the modal FOOTER
+     (`.artdeco-modal__actionbar`, a SIBLING of `__content` — scope to the modal ROOT, not
+     `__content`). Avoid `data-test-archive-confirm-modal-cancel`.
+  4. **Verify by the "Candidatos archivados / Archived candidates" counter increasing**
+     (0→1). Archived candidates STILL appear in "Todos los candidatos", so absence there
+     is NOT proof. The `sr-overlay` ("Automatización en curso") is OUR `pointer-events:none`
+     shield — never blocks clicks (red herring).
+- **Verified:** archived "Daniel De León" from job 323's project (count 0→1); Odoo lead
+  stayed intact (callback 404s until qaodoo akcr deploy → safe gate). See [[project_qaodoo_deploy_ops]].
+
 ### Key operational rules
 
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
@@ -124,6 +158,14 @@ login: `POST /v1/runs/{id}/relaunch` (or the **"Relanzar"** button on a failed d
 - **Strategy hot-reload** (no restart): edit `extension/runtime-strategies/recruiter.mjs` → `scp` to `linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/recruiter.mjs'`
 - **Daemon restart kills the `/talent` seat** and requires human re-login. Batch daemon-code changes; hot-reload strategy-only changes instead.
 - **Booleans from Odoo JDs only** — `scripts/boolean_from_odoo.py <id>` → never hand-craft.
+- **Creating a TEST position to drive the pipeline (qaodoo XML-RPC):** auth as
+  `support@akurey.com` / `Akurey1234*` (uid=2, db `qaodoo`). The `hr.job` needs
+  `linkedin_sync=True` + `is_published=True` (+`website_published`) + a real `description`
+  (→ boolean + project desc). akcr **caps LinkedIn sync at 4 jobs** — disable sync on stale
+  test jobs first (keep real 304/307). **Always set `job_location`** (`cr`/`latam`/`global`,
+  `required=True`): create succeeds without it, but the hr.job form then won't save and the
+  "ver candidatos" button rebounds with `Invalid fields: Job Location`. So pass `name` +
+  `department_id` + `job_location`. (Live job 323, 2026-06-11.)
 
 ## Read first
 

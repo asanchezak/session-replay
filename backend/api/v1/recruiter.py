@@ -21,6 +21,47 @@ class SendMessagesRequest(BaseModel):
     body: str | None = None
 
 
+class RemoveCandidateRequest(BaseModel):
+    job_id: str
+    profile_url: str | None = None
+    name: str | None = None
+    project_url: str | None = None
+    connector_id: str | None = None
+    lead_id: str | int | None = None
+
+
+@router.post("/leads/remove")
+async def remove_candidate(
+    req: RemoveCandidateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove (= ARCHIVE) a single candidate from the job's LinkedIn project.
+
+    Called by Odoo when a linkedin.lead is deleted (deferred two-phase delete):
+    enqueues ONE daemon archive run that locates the candidate by NAME on the
+    project pipeline, archives them, and VERIFIES they're gone. On confirmed
+    removal the terminal hook deletes the Odoo lead (/akcr/api/lead_removed).
+    Returns the run id (or skips if name/project can't be resolved).
+    """
+    svc = RecruiterPipelineService(db)
+    run_id = await svc.remove_candidate(
+        req.job_id,
+        profile_url=req.profile_url,
+        name=req.name,
+        project_url=req.project_url,
+        connector_id=req.connector_id,
+        lead_id=req.lead_id,
+    )
+    await db.commit()
+    if not run_id:
+        return {
+            "status": "skipped",
+            "job_id": req.job_id,
+            "reason": "missing candidate name or no project for this job",
+        }
+    return {"status": "queued", "job_id": req.job_id, "run_id": run_id}
+
+
 @router.post("/jobs/{job_id}/send-messages")
 async def send_messages(
     job_id: str,

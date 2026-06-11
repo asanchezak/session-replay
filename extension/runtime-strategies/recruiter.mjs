@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-10-save-pick-exact-1";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-archive-candidate-8";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -41,9 +41,23 @@ function readSaveResultsOptions(step) {
   };
 }
 
+function readArchiveOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_archive_candidate",
+  ) || {};
+  return {
+    projectUrl: String(method.project_url ?? "").trim(),
+    candidateName: String(method.candidate_name ?? step?.value ?? "").trim(),
+    profileUrl: String(method.profile_url ?? "").trim(),
+    maxPages: readPositiveInt(method.max_pages, 5),
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
     || strategy === "recruiter_save_results_to_project"
+    || strategy === "recruiter_archive_candidate"
     || strategy === "recruiter_hot_reload_probe";
 }
 
@@ -92,6 +106,20 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       extraction: { save_result: saveResult },
       log: `recruiter_save_results_to_project ok=${saveResult.ok} saved=${saveResult.saved_count || 0}/${saveResult.target_count || 0} verified_in_project=${saveResult.verified_in_project} project="${saveResult.project_name || ""}" reason="${saveResult.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_archive_candidate") {
+    const archiveResult = await archiveRecruiterCandidate(
+      page,
+      readArchiveOptions(step),
+      orand,
+      runtime,
+    );
+    return {
+      handled: true,
+      extraction: { archive_result: archiveResult },
+      log: `recruiter_archive_candidate ok=${archiveResult.ok} archived=${archiveResult.archived} verified_gone=${archiveResult.verified_gone} name="${archiveResult.candidate_name || ""}" reason="${archiveResult.reason || ""}"`,
     };
   }
 
@@ -539,6 +567,258 @@ async function saveSelectionToProject(page, projectName, orand, runtime) {
     clicked_save: clickedSave,
     toast,
   };
+}
+
+// Remove (= ARCHIVE; Recruiter has no hard-delete) a SINGLE candidate from a
+// project's pipeline. On the project /manage/all page each candidate row carries a
+// direct archive control `button[data-view-name='archive-profiles-btn']` whose
+// accessibility label is "Archivar a <First>, ya que parece que no encajaría… /
+// Archivar" — clicking it archives with the default "doesn't fit" reason (one click,
+// no checkbox). We target the SPECIFIC candidate by matching that button's enclosing
+// row (profile URL preferred, else full name), tag it, and click it with the
+// daemon's actionability-aware clickResolved (hover/scroll/retry). VERIFICATION is
+// the truth: the "Candidatos archivados / Archived candidates N" count must INCREASE
+// (archived candidates still show in "Todos los candidatos", so absence there is the
+// WRONG signal). Returns { ok, archived, verified_gone, archived_before/after,
+// candidate_name, profile_url, reason }. The backend only deletes the Odoo lead when
+// verified_gone, so an unconfirmed run is safe (lead stays pending, re-runnable).
+async function archiveRecruiterCandidate(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const name = String(options.candidateName || "").trim();
+  const profileUrl = String(options.profileUrl || "").trim();
+  if (!name && !profileUrl) {
+    return { ok: false, archived: false, verified_gone: false, reason: "missing_candidate_identity" };
+  }
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, archived: false, verified_gone: false, candidate_name: name, reason: "missing_project_id" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+  const ARCHIVE_BTN = "[data-test-component='archive-profiles-btn'], [data-live-test-component='archive-profiles-btn']";
+  const TARGET_SEL = "[data-sr-archive-target='1']";
+  const maxPages = Math.max(1, options.maxPages || 5);
+
+  // "Candidatos archivados / Archived candidates N" — the verification counter.
+  const readArchivedCount = () => page.evaluate(() => {
+    const bt = document.body.innerText || "";
+    const mm = bt.match(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i);
+    return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+  }).catch(() => null);
+
+  // Tag the target candidate's archive button. Each per-row archive control is
+  // labelled "Archivar a <Name>, ya que…" / "Archive <Name>, because…" — i.e. the
+  // button itself names the candidate, which is far more reliable than climbing the
+  // DOM to a row (an ancestor holding a profile link can span many candidates). We
+  // parse that label name and match it as a PREFIX of the target full name (so
+  // "Daniel" matches "Daniel De León"); when several match we take the longest
+  // (most specific) label. Returns {found, present}.
+  const tagTarget = (wantName, wantUrl) => page.evaluate(({ wantName, wantUrl, btnSel }) => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const canon = (href) => {
+      const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
+      return mm ? "https://www.linkedin.com" + mm[0] : "";
+    };
+    const target = clean(wantName);
+    const wantCanon = canon(wantUrl);
+    // Extract the candidate name from an archive button's a11y label.
+    const labelName = (btn) => {
+      const lab = clean(btn.getAttribute("aria-label") || btn.innerText || btn.textContent);
+      const mm = lab.match(/^(?:archivar a|archive)\s+(.+?)(?:,| ya que| because|$)/i);
+      return mm ? mm[1].trim() : "";
+    };
+    document.querySelectorAll("[data-sr-archive-target]").forEach((e) => e.removeAttribute("data-sr-archive-target"));
+    document.querySelectorAll("[data-sr-archive-row]").forEach((e) => e.removeAttribute("data-sr-archive-row"));
+    let best = null, bestLen = -1;
+    for (const btn of Array.from(document.querySelectorAll(btnSel))) {
+      const ln = labelName(btn);
+      if (!ln || !target) continue;
+      // Match when the label name is a prefix of the target (or vice-versa for
+      // truncated labels). Prefer the longest label (most specific).
+      const ok = target === ln || target.startsWith(ln + " ") || ln.startsWith(target + " ") || target === ln;
+      if (ok && ln.length > bestLen) { best = btn; bestLen = ln.length; }
+    }
+    if (best) {
+      best.setAttribute("data-sr-archive-target", "1");
+      // The per-row action buttons (.profile-item-actions) are revealed on ROW
+      // hover — tag the enclosing row so the caller can hover it before clicking.
+      const row = best.closest("[data-test-profile-list-view-list-row], .profile-list-item, li");
+      if (row) row.setAttribute("data-sr-archive-row", "1");
+      best.scrollIntoView({ block: "center" });
+      return { found: true, present: true, matched_name: labelName(best), has_row: !!row };
+    }
+    // Not tagged — is the candidate present at all (any profile link / archive label)?
+    let present = false;
+    for (const link of Array.from(document.querySelectorAll('a[href*="/talent/profile/"]'))) {
+      const url = canon(link.getAttribute("href"));
+      const rowName = clean(link.innerText || link.textContent);
+      if ((wantCanon && url && url === wantCanon)
+          || (target && rowName && (rowName === target || rowName.includes(target) || target.includes(rowName)))) {
+        present = true; break;
+      }
+    }
+    if (!present) {
+      for (const btn of Array.from(document.querySelectorAll(btnSel))) {
+        const ln = labelName(btn);
+        if (ln && target && (target.startsWith(ln) || ln.startsWith(target))) { present = true; break; }
+      }
+    }
+    return { found: false, present };
+  }, { wantName, wantUrl, btnSel: ARCHIVE_BTN }).catch(() => ({ found: false, present: false }));
+
+  const clickTagged = async () => {
+    // Reveal the row's hover-gated action buttons first (the archive control lives in
+    // .profile-item-actions, hidden until the row is hovered).
+    await page.hover("[data-sr-archive-row]").catch(() => {});
+    await sleep(450 + Math.floor(orand() * 350));
+    if (resolveLocatorWithWait && clickResolved) {
+      const t = await resolveLocatorWithWait(page, [{ type: "css", value: TARGET_SEL }], { timeoutMs: 8000 });
+      if (t) {
+        try { return await clickResolved(page, t, { moveMouseAlongBezier, orand }); }
+        finally { await t.handle?.dispose?.().catch(() => {}); }
+      }
+    }
+    // Fallback: keep the row hovered, then trusted coordinate click on the button.
+    const pt = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, TARGET_SEL).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(120 + Math.floor(orand() * 200));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector(ARCHIVE_BTN, { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    await sleep(1500 + Math.floor(orand() * 800));
+    const archivedBefore = await readArchivedCount();
+
+    // Find + tag the candidate (paginate if needed).
+    let loc = { found: false, present: false };
+    for (let pg = 0; pg < maxPages; pg++) {
+      loc = await tagTarget(name, profileUrl);
+      if (loc.found || loc.present) break;
+      const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
+      if (!wentNext) break;
+      await page.waitForSelector(ARCHIVE_BTN, { timeout: 10000 }).catch(() => {});
+      await sleep(1500 + Math.floor(orand() * 700));
+    }
+
+    // Already absent → removal satisfied (idempotent).
+    if (!loc.found && !loc.present) {
+      return { ok: true, archived: false, verified_gone: true, candidate_name: name,
+               profile_url: profileUrl || null, archived_before: archivedBefore,
+               reason: "not_present", manage_url: manageUrl };
+    }
+    if (!loc.found) {
+      return { ok: false, archived: false, verified_gone: false, candidate_name: name,
+               profile_url: profileUrl || null, archived_before: archivedBefore,
+               reason: "archive_button_not_found", manage_url: manageUrl };
+    }
+
+    const clicked = await clickTagged();
+    await sleep(1600 + Math.floor(orand() * 700));  // let the dropdown/menu render
+
+    // DIAGNOSTIC: capture what the archive click produced (a confirm dialog, a
+    // dropdown reason-picker, a snackbar, …) so we can tune the confirm step from a
+    // single run instead of guessing. Dumps the surface's element inventory + HTML.
+    const postClick = await page.evaluate(() => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+      const body = document.querySelector("[data-test-archive-confirm-modal-body]");
+      const cont = (body && body.closest(".artdeco-modal, [role='dialog']")) || document.querySelector(".artdeco-modal, [role='dialog'][aria-modal='true'], [role='alertdialog']");
+      const clickables = (root) => Array.from(root.querySelectorAll("button, [role='menuitem'], [role='option'], [role='button'], a, li, input")).filter(vis).map((b) => `${b.tagName.toLowerCase()}${b.getAttribute("role") ? "[" + b.getAttribute("role") + "]" : ""}: ${((b.innerText || b.textContent || "") + " | " + (b.getAttribute("aria-label") || "")).replace(/\s+/g, " ").trim().slice(0, 60)}`).filter((s) => s.length > 12).slice(0, 25);
+      const snackbar = (document.body.innerText || "").match(/[^\n]*\b(archivad|archived|deshacer|undo)\b[^\n]*/i);
+      return {
+        container_found: !!cont,
+        container_kind: cont ? (cont.getAttribute("role") || cont.className || cont.tagName).slice(0, 60) : null,
+        clickables: cont ? clickables(cont) : clickables(document.body).slice(0, 15),
+        container_html: cont ? cont.outerHTML.replace(/\s+/g, " ").slice(0, 1800) : null,
+        snackbar: snackbar ? snackbar[0].trim().slice(0, 100) : null,
+      };
+    }).catch(() => null);
+
+    // Clicking the per-row archive button opens a confirmation MODAL
+    // (data-test-archive-confirm-modal-body) whose action buttons live in the modal
+    // FOOTER (.artdeco-modal__actionbar) — a SIBLING of __content. So scope to the
+    // whole modal ROOT and click its primary "Archivar"/confirm button (NOT Cancelar).
+    const confirmPt = await page.evaluate(() => {
+      const body = document.querySelector("[data-test-archive-confirm-modal-body]");
+      const surface = (body && body.closest(".artdeco-modal, [role='dialog']"))
+        || document.querySelector(".artdeco-modal, [role='dialog'][aria-modal='true'], [role='alertdialog']");
+      if (!surface) return null;
+      // Precise submit button first (live-confirmed selector), then fall back to a
+      // text match in the footer — never the Cancelar/dismiss controls.
+      const submit = surface.querySelector(
+        "button[data-test-archive-confirm-modal-submit], button[data-test-dialog-primary-btn], button[data-test-modal-confirm-btn]");
+      const ptOf = (b) => { b.scrollIntoView({ block: "center" }); const r = b.getBoundingClientRect(); return (r.width > 0 && r.height > 0) ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; };
+      if (submit) { const p = ptOf(submit); if (p) return p; }
+      for (const b of Array.from(surface.querySelectorAll(".artdeco-modal__actionbar button, button"))) {
+        if (b.matches("[data-test-archive-confirm-modal-cancel], [data-test-modal-close-btn], .artdeco-modal__dismiss")) continue;
+        const t = ((b.innerText || b.textContent || "") + " " + (b.getAttribute("aria-label") || "")).trim().toLowerCase();
+        if (/\b(archivar|archive|confirmar|confirm)\b/.test(t) && !/\b(cancelar|cancel|descartar)\b/.test(t)) {
+          const p = ptOf(b); if (p) return p;
+        }
+      }
+      return null;
+    }).catch(() => null);
+    if (confirmPt) {
+      await moveMouseAlongBezier(page, confirmPt, orand).catch(() => {});
+      await sleep(120 + Math.floor(orand() * 200));
+      await page.mouse.click(confirmPt.x, confirmPt.y).catch(() => {});
+      await sleep(1200 + Math.floor(orand() * 600));
+    }
+    await sleep(1500 + Math.floor(orand() * 800));  // let the archive apply
+
+    // VERIFY via the archived counter (reload so it reflects the change).
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await page.waitForSelector(ARCHIVE_BTN, { timeout: 15000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    let archivedAfter = null;
+    for (let i = 0; i < 6; i++) {
+      await sleep(1800);
+      archivedAfter = await readArchivedCount();
+      if (archivedAfter != null && archivedBefore != null && archivedAfter > archivedBefore) break;
+    }
+    // Diagnostic only (paginate so it's meaningful): is the candidate still in the
+    // ACTIVE pipeline anywhere?
+    let stillActive = false;
+    for (let pg = 0; pg < maxPages; pg++) {
+      if ((await tagTarget(name, profileUrl)).found) { stillActive = true; break; }
+      const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
+      if (!wentNext) break;
+      await page.waitForSelector(ARCHIVE_BTN, { timeout: 8000 }).catch(() => {});
+      await sleep(1000 + Math.floor(orand() * 500));
+    }
+    await sleep(1000);  // settle before the per-step snapshot
+
+    // TRUTH = the archived counter increased. (Archived candidates still appear in
+    // "Todos los candidatos", so absence there is NOT proof — the count is.)
+    const verifiedGone = archivedAfter != null && archivedBefore != null && archivedAfter > archivedBefore;
+    return {
+      ok: verifiedGone,
+      archived: verifiedGone,
+      verified_gone: verifiedGone,
+      candidate_name: name,
+      profile_url: profileUrl || null,
+      archived_before: archivedBefore,
+      archived_after: archivedAfter,
+      clicked,
+      still_active: stillActive,
+      post_click: postClick,
+      manage_url: manageUrl,
+      ...(verifiedGone ? {} : { reason: "archived_count_unchanged" }),
+    };
+  } catch (e) {
+    return { ok: false, archived: false, verified_gone: false, candidate_name: name,
+             profile_url: profileUrl || null, reason: `error:${(e && e.message) || e}` };
+  }
 }
 
 async function saveRecruiterResultsToProject(page, options, orand, runtime) {
