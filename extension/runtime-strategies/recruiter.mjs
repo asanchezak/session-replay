@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-archive-candidate-8";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-archive-all-5";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -54,10 +54,22 @@ function readArchiveOptions(step) {
   };
 }
 
+function readArchiveAllOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_archive_all_in_project",
+  ) || {};
+  return {
+    projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
+    maxRounds: readPositiveInt(method.max_rounds, 15),
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
     || strategy === "recruiter_save_results_to_project"
     || strategy === "recruiter_archive_candidate"
+    || strategy === "recruiter_archive_all_in_project"
     || strategy === "recruiter_hot_reload_probe";
 }
 
@@ -120,6 +132,15 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       extraction: { archive_result: archiveResult },
       log: `recruiter_archive_candidate ok=${archiveResult.ok} archived=${archiveResult.archived} verified_gone=${archiveResult.verified_gone} name="${archiveResult.candidate_name || ""}" reason="${archiveResult.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_archive_all_in_project") {
+    const r = await archiveAllInProject(page, readArchiveAllOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { archive_all_result: r },
+      log: `recruiter_archive_all_in_project ok=${r.ok} archived_before=${r.archived_before} archived_after=${r.archived_after} rounds=${r.rounds} reason="${r.reason || ""}"`,
     };
   }
 
@@ -818,6 +839,145 @@ async function archiveRecruiterCandidate(page, options, orand, runtime) {
   } catch (e) {
     return { ok: false, archived: false, verified_gone: false, candidate_name: name,
              profile_url: profileUrl || null, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Remove ALL candidates from a project (= archive everyone). The select-all+bulk path
+// proved unreliable (no bulk archive-profiles-btn surfaces), so this loops the PROVEN
+// single-archive interaction in place: pick the FIRST active candidate row, hover it
+// to reveal the archive control, click it, confirm in the modal footer, let the SPA
+// drop the row, repeat. Driven by the "Todos los candidatos" counter (which EXCLUDES
+// archived) → stop at 0. Bounded by a per-candidate cap + a hard time budget (the
+// daemon kills a step at 240s). Returns { ok, archived_before/after,
+// active_start/after, archived_count, reason }.
+async function archiveAllInProject(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, archived_before: null, archived_after: null, reason: "missing_project_id" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+  const ARCHIVE_BTN = "[data-test-component='archive-profiles-btn'], [data-live-test-component='archive-profiles-btn']";
+  const ROW_SEL = "[data-test-profile-list-view-list-row], .profile-list-item, li";
+
+  const readCounts = () => page.evaluate(() => {
+    const bt = document.body.innerText || "";
+    const num = (re) => { const mm = bt.match(re); return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null; };
+    return {
+      archived: num(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i),
+      total: num(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i),
+    };
+  }).catch(() => ({ archived: null, total: null }));
+
+  // Tag the FIRST per-row archive button + its row. Does NOT filter by visibility —
+  // the .profile-item-actions buttons are display:none until the row is hovered, so
+  // the caller hovers the tagged row to reveal it (same as single-candidate archive).
+  const tagFirst = () => page.evaluate((btnSel) => {
+    document.querySelectorAll("[data-sr-arch-t]").forEach((e) => e.removeAttribute("data-sr-arch-t"));
+    document.querySelectorAll("[data-sr-arch-r]").forEach((e) => e.removeAttribute("data-sr-arch-r"));
+    const rows = Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item")).filter((r) => r.querySelector('a[href*="/talent/profile/"]'));
+    for (const row of rows) {
+      const btn = row.querySelector(btnSel);
+      if (!btn) continue;
+      btn.setAttribute("data-sr-arch-t", "1");
+      row.setAttribute("data-sr-arch-r", "1");
+      row.scrollIntoView({ block: "center" });
+      return { found: true, rows: rows.length };
+    }
+    return { found: false, rows: rows.length };
+  }, ARCHIVE_BTN).catch(() => ({ found: false }));
+
+  const clickSel = async (sel) => {
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  const BUDGET_MS = 175000;
+  const t0 = Date.now();
+
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector(`${ARCHIVE_BTN}, [data-live-test-select-all]`, { timeout: 20000 }).catch(() => {});
+    await sleep(1500 + Math.floor(orand() * 500));
+    const c0 = await readCounts();
+    const archivedBefore = c0.archived;
+    const activeStart = c0.total;
+
+    // Archive one candidate per iteration → allow plenty (the 175s budget is the real
+    // limiter). Floor at 40 so a small workflow max_rounds doesn't stop us early.
+    const cap = Math.min(Math.max(options.maxRounds || 40, 40), 60);
+    let archivedCount = 0;
+    let reason = null;
+    let stale = 0;
+    let prevArchived = archivedBefore;
+    for (let i = 0; i < cap && Date.now() - t0 < BUDGET_MS - 15000; i++) {
+      const c = await readCounts();
+      if (c.total != null && c.total <= 0) { reason = "all_archived"; break; }
+
+      const loc = await tagFirst();
+      if (!loc.found) {
+        // No candidate rows at all → done; rows present but no button → selector issue.
+        reason = (loc.rows === 0) ? "all_archived" : "archive_button_not_found";
+        break;
+      }
+
+      // Hover the row to reveal the action, then click the archive control.
+      await page.hover("[data-sr-arch-r]").catch(() => {});
+      await sleep(380 + Math.floor(orand() * 280));
+      let clicked = false;
+      if (resolveLocatorWithWait && clickResolved) {
+        const t = await resolveLocatorWithWait(page, [{ type: "css", value: "[data-sr-arch-t]" }], { timeoutMs: 6000 });
+        if (t) { try { clicked = await clickResolved(page, t, { moveMouseAlongBezier, orand }); } finally { await t.handle?.dispose?.().catch(() => {}); } }
+      }
+      if (!clicked) clicked = await clickSel("[data-sr-arch-t]");
+      await sleep(900 + Math.floor(orand() * 400));
+
+      // Confirm in the modal footer.
+      const confirmed = await clickSel("[data-test-archive-confirm-modal-submit], .artdeco-modal__actionbar button.artdeco-button--primary");
+      if (!confirmed) { reason = "confirm_submit_not_found"; break; }
+      await sleep(2200 + Math.floor(orand() * 700));  // archive applies; SPA drops the row
+
+      // Progress check via the archived counter (avoids re-archiving loops).
+      const c2 = await readCounts();
+      if (c2.archived != null && prevArchived != null && c2.archived > prevArchived) {
+        archivedCount += (c2.archived - prevArchived);
+        prevArchived = c2.archived;
+        stale = 0;
+      } else {
+        stale++;
+        if (stale >= 2) { reason = "no_progress"; break; }
+      }
+    }
+
+    await sleep(1200);
+    const cf = await readCounts();
+    const archivedAfter = cf.archived;
+    const activeAfter = cf.total;
+    const ok = (activeAfter != null && activeAfter <= 0)
+      || (archivedBefore != null && archivedAfter != null && archivedAfter > archivedBefore);
+    return {
+      ok,
+      archived_before: archivedBefore,
+      archived_after: archivedAfter,
+      active_start: activeStart,
+      active_after: activeAfter,
+      archived_count: archivedCount,
+      manage_url: manageUrl,
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, archived_before: null, archived_after: null, reason: `error:${(e && e.message) || e}` };
   }
 }
 

@@ -1,0 +1,11 @@
+{
+  "name": "Recruiter: Archive ALL candidates in a project (remove all)",
+  "description": "DEMO/bulk action: removes every candidate from a project by archiving (Recruiter has no hard-delete). Daemon-only recruiter_archive_all_in_project strategy: on the project /manage/all it clicks select-all, fires the bulk archive action, confirms in the modal footer, and loops page by page until the 'Candidatos archivados' counter reaches the saved total. Param: project_url. VERIFIES via the archived counter (archived_after > archived_before).",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"scroll","intent":"settle 1"},
+    {"action_type":"scroll","intent":"settle 2"},
+    {"action_type":"extract","intent":"Archive every candidate in the project and verify","methods":[{"kind":"extract_strategy","strategy":"recruiter_archive_all_in_project"},{"kind":"recruiter_archive_all_in_project","project_url":"{{project_url}}","max_rounds":40}]}
+  ]
+}

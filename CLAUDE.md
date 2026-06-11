@@ -151,6 +151,27 @@ once removal is VERIFIED does the Odoo row get deleted.
 - **Verified:** archived "Daniel De León" from job 323's project (count 0→1); Odoo lead
   stayed intact (callback 404s until qaodoo akcr deploy → safe gate). See [[project_qaodoo_deploy_ops]].
 
+### DEMO flow — wipe a project + add one profile (Claude-runnable)
+
+`scripts/demo_recruiter_reset_and_add.sh` runs two daemon workflows on fernanda's warm
+seat (anti-bot always on). Defaults: project `-EZ Senior QA Automation Engineer`
+(`2057213706`), profile `/in/crandrey/`; override via `PROJECT_URL`/`PROJECT_NAME`/`PROFILE_URL`.
+1. **Archive ALL** — workflow `511ceaab` / strategy `recruiter_archive_all_in_project`
+   (param `project_url`). Loops the proven single-archive (hover row → click
+   `archive-profiles-btn` → confirm modal submit) over the FIRST active candidate each
+   iteration; terminates when **"Todos los candidatos" (active, excludes archived) hits 0**,
+   with a hard **175s time budget** (the daemon's per-step watchdog kills at 240s — DO NOT
+   let a strategy exceed it; the first attempt did ~15 rounds with reloads and timed out).
+   Select-all + bulk-archive was NOT viable (no bulk `archive-profiles-btn` surfaces).
+   Live-verified: archived 15 in one run (active 19→4), counter-verified, no timeout.
+2. **Add `/in/` profile** — workflow `a352e1e4` (save-to-project-param; params
+   `candidate_url`, `project_name`). The public `/in/<slug>/` URL bridges to the Recruiter
+   profile (Save-to-project button) in a logged-in seat. Live-verified (run completed).
+
+⚠️ Each archives REAL candidates on the sensitive account — only run on a throwaway/test
+project. The demo script poll is NOT `set -e` (a transient empty curl must not abort it).
+See [[project_recruiter_archive_candidate]].
+
 ### Key operational rules
 
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
