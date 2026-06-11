@@ -313,6 +313,17 @@ class RecruiterPushService:
                 out = ar
         return out
 
+    async def read_message_compose_result(self, run_id) -> dict:
+        """Read a recruiter_message_compose run's result → {sent, recipients, ...}.
+        recipients are the project's active candidates the strategy messaged
+        (profile_url + name), used to mark outreach in Odoo. Last non-empty wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            mc = rec.get("message_compose_result")
+            if isinstance(mc, dict):
+                out = mc
+        return out
+
     async def push_lead_removed(self, *, run_id, job_id, connector_id,
                                 profile_url: str | None, name: str | None = None) -> dict:
         """Confirmed removal: the candidate is archived/gone in LinkedIn, so delete

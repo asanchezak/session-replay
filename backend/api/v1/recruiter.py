@@ -19,6 +19,9 @@ router = APIRouter(prefix="/recruiter", tags=["recruiter"])
 class SendMessagesRequest(BaseModel):
     subject: str | None = None
     body: str | None = None
+    # Gated: false (default) = compose + STOP for a snapshot preview (no real send);
+    # true = actually send InMail. The Odoo wizard sends false first, then true.
+    send: bool = False
 
 
 class RemoveCandidateRequest(BaseModel):
@@ -68,15 +71,17 @@ async def send_messages(
     req: SendMessagesRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """⚠️ SENDS real InMail. Bulk-messages the job's saved Recruiter candidates and
-    records the outreach in Odoo when the run completes. Creates a daemon run on the
-    LinkedIn operator; returns its id (or skips if the job has no project/candidates).
+    """Compose a templated bulk InMail to the job's ACTIVE project candidates. GATED:
+    send=false (default) types everything + STOPS for a snapshot preview (no real
+    send); send=true actually sends InMail + records outreach in Odoo. Creates a daemon
+    run on the LinkedIn operator; returns its id (or skips if the job has no project).
     """
     svc = RecruiterPipelineService(db)
     run_id = await svc.send_messages(
         job_id,
         subject=(req.subject if req else None),
         body=(req.body if req else None),
+        send=(req.send if req else False),
     )
     await db.commit()
     if not run_id:

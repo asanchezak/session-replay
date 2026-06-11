@@ -472,14 +472,30 @@ class RecruiterPipelineService:
         return {"stage": "search", "leads": lead_res, "save_runs": save_runs}
 
     async def _after_message(self, run, pipeline, connector_id, job_id) -> dict:
-        # Req B: record that the job's candidates were messaged → Odoo
-        # outreach_status=messaged (via linkedin.lead.message).
-        messaged = pipeline.get("messaged") or []
+        # GATED: only record outreach in Odoo when the message was actually SENT.
+        # A gated preview (send=false) types + stops — nothing was sent, so don't mark.
+        compose = await self.push.read_message_compose_result(run.id)
+        if not pipeline.get("send") or not compose.get("sent"):
+            logger.info(
+                "recruiter pipeline: message preview for job %s (send=%s sent=%s) — "
+                "no Odoo outreach update", job_id, pipeline.get("send"), compose.get("sent"),
+            )
+            return {"stage": "message", "sent": False, "preview": True}
+        # Req B: mark the candidates we actually messaged (the project's active
+        # candidates at send time, reported by the compose strategy) as messaged.
+        recipients = compose.get("recipients") or pipeline.get("messaged") or []
+        subject = pipeline.get("subject") or ""
+        messaged = [
+            ({"profile_url": r, "subject": subject, "message_type": "inmail"}
+             if isinstance(r, str)
+             else {**r, "subject": subject, "message_type": "inmail"})
+            for r in recipients
+        ]
         res = await self.push.push_outreach_update(
             run_id=run.id, job_id=job_id, connector_id=connector_id, messaged=messaged,
         )
         logger.info("recruiter pipeline: outreach update for job %s — %s", job_id, res)
-        return {"stage": "message", "outreach": res}
+        return {"stage": "message", "sent": True, "outreach": res}
 
     async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
         """An archive (remove-from-project) run completed. Only when the strategy
@@ -537,13 +553,17 @@ class RecruiterPipelineService:
         return ctx
 
     async def send_messages(self, job_id, subject: str | None = None,
-                            body: str | None = None) -> str | None:
-        """Deliberate (manual/gated) req B trigger: bulk-message a job's saved
-        candidates, recording it in Odoo on completion. ⚠️ SENDS real InMail.
+                            body: str | None = None, send: bool = False) -> str | None:
+        """Deliberate (manual/gated) req B trigger: bulk-message a job's project
+        candidates with a template body. Fires the recruiter_message_compose run
+        (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
+        send=True actually sends InMail). The `{Nombre}` token in the body becomes the
+        LinkedIn {firstName} variable chip. On completion the terminal hook
+        → _after_message → push_outreach_update marks the messaged leads in Odoo.
 
-        Reconstructs the job's project + saved candidates from prior pipeline runs,
-        then fires a recruiter_message run (stamped with job_id + the recipients).
-        The transition terminal hook → _after_message → push_outreach_update.
+        Recipients are whoever is ACTIVE in the project at send time (the compose
+        strategy selects them + reports them back); we no longer rely on the prior
+        save-run history for the recipient set.
         """
         wf = settings.recruiter_message_workflow_id
         if not wf:
@@ -553,39 +573,33 @@ class RecruiterPipelineService:
         if not ctx.get("project_id"):
             logger.warning("recruiter pipeline: no project for job %s — can't message", job_id)
             return None
-        recipients = ctx.get("saved") or []
-        if not recipients:
-            logger.warning(
-                "recruiter pipeline: no saved candidates for job %s — nothing to message",
-                job_id,
-            )
-            return None
         subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
         body = (body or DEFAULT_MESSAGE_BODY).strip()
-        pipeline_url = (
+        project_url = (
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
-        messaged = [
-            {**m, "subject": subject, "body": body, "message_type": "inmail"}
-            for m in recipients
-        ]
         pipeline_ctx = {
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
             "project_id": ctx.get("project_id"),
-            "messaged": messaged,
             "subject": subject,
+            "send": bool(send),
         }
         run = await self._create_pipeline_run(
             workflow_id=wf,
             event_kind=EVENT_MESSAGE,
-            runtime_params={"pipeline_url": pipeline_url, "subject": subject, "body": body},
+            runtime_params={
+                "project_url": project_url,
+                "subject": subject,
+                "body": body,
+                "send": "true" if send else "false",
+            },
             pipeline=pipeline_ctx,
             connector_id=ctx.get("connector_id"),
         )
         logger.info(
-            "recruiter pipeline: started message run %s for job %s (%d recipients)",
-            run.id, job_id, len(messaged),
+            "recruiter pipeline: started message-compose run %s for job %s (send=%s)",
+            run.id, job_id, send,
         )
         return str(run.id)
 

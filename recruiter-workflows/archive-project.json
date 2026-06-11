@@ -1,0 +1,10 @@
+{
+  "name": "Recruiter: Archive a PROJECT (testing tool)",
+  "description": "Testing-only: archives an entire LinkedIn Recruiter project. Navigates /talent/projects, locates the project by id (its /talent/hire/<id> link) or name, opens its overflow '…' menu, clicks 'Archivar proyecto'/'Archive project', confirms, and verifies it left the active projects list. Params: project_url (and/or project_name).",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"scroll","intent":"settle 1"},
+    {"action_type":"extract","intent":"Archive the project and verify","methods":[{"kind":"extract_strategy","strategy":"recruiter_archive_project"},{"kind":"recruiter_archive_project","project_url":"{{project_url}}","project_name":"{{project_name}}"}]}
+  ]
+}

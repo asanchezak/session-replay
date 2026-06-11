@@ -1,0 +1,20 @@
+{
+  "name": "Recruiter: compose bulk InMail — STOP before send (snapshot)",
+  "description": "SAFE preview: selects the project's ACTIVE candidates, opens the bulk InMail composer, types the body, and STOPS. Clicks NO Send button at all (not even the subject-reveal Send #1). With snapshot:true the final step captures the composer so a human can verify the recipient(s) + message before any real send. Params: pipeline_url, body.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Project pipeline","value":"{{pipeline_url}}"},
+    {"action_type":"scroll","intent":"settle"},
+    {"action_type":"scroll","intent":"settle (human pause)"},
+    {"action_type":"click","intent":"Select all active candidates","selector_chain":[{"type":"css","value":"input.small-input"}]},
+    {"action_type":"scroll","intent":"bulk-action bar"},
+    {"action_type":"click","intent":"Open bulk InMail composer","selector_chain":[{"type":"css","value":"button[data-test-action='send-message']"}]},
+    {"action_type":"scroll","intent":"composer load 1"},
+    {"action_type":"scroll","intent":"composer load 2"},
+    {"action_type":"scroll","intent":"composer load 3"},
+    {"action_type":"type","intent":"Body","value":"{{body}}","selector_chain":[{"type":"accessibility","value":"Compose a message or draft with AI"},{"type":"css","value":"div.ql-editor[contenteditable='true']"}]},
+    {"action_type":"scroll","intent":"settle after body (STOP — no Send click)"},
+    {"action_type":"scroll","intent":"settle for snapshot"}
+  ]
+}

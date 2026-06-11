@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-add-profile-5";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-msg-archive-project-7";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -85,6 +85,31 @@ function readAddProfileOptions(step) {
   };
 }
 
+function readMessageComposeOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_message_compose",
+  ) || {};
+  const send = method.send;
+  return {
+    projectUrl: String(method.project_url ?? "").trim(),
+    body: String(method.body ?? "").trim(),
+    subject: String(method.subject ?? "").trim(),
+    send: send === true || send === "true" || send === 1 || send === "1",
+  };
+}
+
+function readArchiveProjectOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_archive_project",
+  ) || {};
+  return {
+    projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
+    projectName: String(method.project_name ?? "").trim(),
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
     || strategy === "recruiter_save_results_to_project"
@@ -92,6 +117,8 @@ export function handlesStrategy(strategy) {
     || strategy === "recruiter_archive_all_in_project"
     || strategy === "recruiter_read_project"
     || strategy === "recruiter_add_profile"
+    || strategy === "recruiter_message_compose"
+    || strategy === "recruiter_archive_project"
     || strategy === "recruiter_hot_reload_probe";
 }
 
@@ -181,6 +208,24 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       extraction: { add_profile_result: r },
       log: `recruiter_add_profile ok=${r.ok} saved=${r.saved} verified=${r.verified} bridged=${r.bridged} reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_message_compose") {
+    const r = await composeRecruiterMessage(page, readMessageComposeOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { message_compose_result: r },
+      log: `recruiter_message_compose ok=${r.ok} sent=${r.sent} recipients=${r.recipient_count} var_inserted=${r.variable_inserted} reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_archive_project") {
+    const r = await archiveRecruiterProject(page, readArchiveProjectOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { archive_project_result: r },
+      log: `recruiter_archive_project ok=${r.ok} archived=${r.archived} verified=${r.verified} reason="${r.reason || ""}"`,
     };
   }
 
@@ -1032,6 +1077,300 @@ async function addProfileToProject(page, options, orand, runtime) {
     return { ok: true, bridged, saved: true, verified_active_count: verified, project_name: projectName };
   } catch (e) {
     return { ok: false, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Compose a bulk InMail to a project's ACTIVE candidates using a template body. The
+// literal `{Nombre}` token in the body is inserted as the LinkedIn VARIABLE CHIP (via
+// the composer's "Insert variables / Insertar variables" button) — typing it literally
+// would send the text "{Nombre}" to everyone. GATED: with send=false (default) it types
+// everything and STOPS (the per-step snapshot proves recipients + message); send=true
+// clicks Send. Params: project_url, body, subject, send.
+async function composeRecruiterMessage(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const typeHumanLike = runtimeValue(runtime, "typeHumanLike", null);
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const body = String(options.body || "");
+  const subject = String(options.subject || "").trim();
+  const send = !!options.send;
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, sent: false, reason: "missing_project_id" };
+  if (!body) return { ok: false, sent: false, reason: "missing_body" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+  const EDITOR = "[data-test-compose-body] .ql-editor[contenteditable='true'], .ql-editor[contenteditable='true']";
+  const SEND_BTN = "[data-test-compose-actions] button[aria-label*='Send this message' i], [data-test-compose-actions] button[aria-label*='Enviar este mensaje' i], button[aria-label*='Send this message' i], button[aria-label*='Enviar este mensaje' i]";
+  let lastVarDiag = null;
+
+  const clickSel = async (sel) => {
+    if (resolveLocatorWithWait && clickResolved) {
+      const t = await resolveLocatorWithWait(page, [{ type: "css", value: sel }], { timeoutMs: 8000 });
+      if (t) { try { if (await clickResolved(page, t, { moveMouseAlongBezier, orand })) return true; } finally { await t.handle?.dispose?.().catch(() => {}); } }
+    }
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s); if (!el) return null;
+      el.scrollIntoView({ block: "center" }); const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  // Click "Insert variables" → click the candidate FIRST-NAME option in the dropdown.
+  const insertNameVariable = async () => {
+    // The variable-insert control is the toolbar "{}" button (aria-label "Insert
+    // variables into the message" / "Insertar variables en el mensaje").
+    const VAR_BTN = "button[aria-label*='Insert variables' i], button[aria-label*='Insertar variables' i], [data-test-compose-body] button[aria-label*='variable' i]";
+    const opened = await clickSel(VAR_BTN);
+    if (!opened) { lastVarDiag = { button: false }; return false; }
+    await sleep(1100 + Math.floor(orand() * 400));
+    const res = await page.evaluate(() => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const norm = (e) => clean(e.innerText || e.textContent).toLowerCase().replace(/[^a-z]/g, "");  // "{firstName}" -> "firstname"
+      const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+      // The variable list is a portal <ul data-test-variables-dropdown> with items
+      // {firstName}, {lastName}, … (or Spanish {Nombre}/{Apellido}).
+      const surface = document.querySelector("ul[data-test-variables-dropdown]") || document.querySelector("[role='menu']");
+      const scope = surface || document;
+      const els = Array.from(scope.querySelectorAll(".artdeco-dropdown__item, [role='menuitem'], li")).filter(vis);
+      const items = els.map((e) => clean(e.innerText || e.textContent).slice(0, 30)).filter(Boolean);
+      const NAME = ["firstname", "primernombre", "nombre", "nombredepila"];
+      let pick = els.find((e) => NAME.includes(norm(e)));
+      if (!pick) pick = els.find((e) => { const n = norm(e); return (n.includes("firstname") || n === "nombre" || n.includes("primernombre")) && !n.includes("last") && !n.includes("apellido"); });
+      const surf = Array.from(document.querySelectorAll("ul[data-test-variables-dropdown], .artdeco-dropdown__content, [role='menu']")).filter(vis);
+      const surf_html = surf.length ? clean(surf[surf.length - 1].outerHTML).slice(0, 350) : null;
+      if (!pick) return { items, picked: null, surfaces: surf.length, surf_html };
+      pick.scrollIntoView({ block: "center" });
+      const r = pick.getBoundingClientRect();
+      return { items, picked: clean(pick.innerText || pick.textContent).slice(0, 30), x: r.left + r.width / 2, y: r.top + r.height / 2, surfaces: surf.length };
+    }).catch((e) => ({ items: [], picked: null, err: String(e).slice(0, 80) }));
+    lastVarDiag = { button: true, items: res.items, picked: res.picked, surfaces: res.surfaces, surf_html: res.surf_html, err: res.err };
+    if (!res || !res.picked || res.x == null) return false;
+    await moveMouseAlongBezier(page, { x: res.x, y: res.y }, orand).catch(() => {});
+    await sleep(100 + Math.floor(orand() * 150));
+    await page.mouse.click(res.x, res.y).catch(() => {});
+    await sleep(500 + Math.floor(orand() * 250));
+    return true;
+  };
+
+  const typeSubject = async () => {
+    const ok = await page.evaluate(() => {
+      const el = document.querySelector("input[data-test-compose-subject-input], input[aria-label='Message subject'], input[aria-label='Haz clic para editar el asunto del mensaje'], input.compose-subject__input");
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      el.scrollIntoView({ block: "center" }); el.focus();
+      return true;
+    }).catch(() => false);
+    if (!ok) return false;
+    await page.keyboard.press("Control+A").catch(() => {});
+    if (typeHumanLike) await typeHumanLike(page, subject, orand);
+    else await page.keyboard.type(subject, { delay: 30 });
+    return true;
+  };
+
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 600));
+    const recipientCount = await page.evaluate(() => {
+      const bt = document.body.innerText || "";
+      const mm = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
+      return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+    }).catch(() => null);
+    if (recipientCount === 0) return { ok: false, sent: false, recipient_count: 0, reason: "no_active_candidates" };
+
+    // Capture the active candidates we're about to message (profile_url + name), so the
+    // backend can mark exactly these as messaged in Odoo.
+    const recipients = await page.evaluate(() => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+      const out = []; const seen = new Set();
+      for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
+        const link = row.querySelector('a[href*="/talent/profile/"]');
+        const url = canon(link && link.getAttribute("href"));
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        out.push({ profile_url: url, name: clean(link.innerText || link.textContent) });
+      }
+      return out;
+    }).catch(() => []);
+
+    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
+      return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
+    }
+    await sleep(900 + Math.floor(orand() * 400));
+    if (!await clickSel("button[data-test-action='send-message']")) {
+      return { ok: false, sent: false, recipient_count: recipientCount, reason: "composer_open_failed" };
+    }
+    await page.waitForSelector(EDITOR, { timeout: 15000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 700));
+
+    // Clear the AI-drafted body so only the template remains.
+    await clickSel(EDITOR);
+    await sleep(400);
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await sleep(500);
+
+    // Type the body; replace each literal {Nombre} with the variable chip.
+    const parts = body.split("{Nombre}");
+    let variableInserted = false;
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      if (seg) {
+        await clickSel(EDITOR);
+        if (typeHumanLike) await typeHumanLike(page, seg, orand);
+        else await page.keyboard.type(seg, { delay: 22 });
+        await sleep(150 + Math.floor(orand() * 150));
+      }
+      if (i < parts.length - 1) {
+        if (await insertNameVariable()) variableInserted = true;
+        await clickSel(EDITOR);
+      }
+    }
+    await sleep(800 + Math.floor(orand() * 400));
+
+    // Subject: type directly if the field is visible, else reveal it via a Send attempt.
+    let subjectSet = true;
+    if (subject) {
+      subjectSet = await typeSubject();
+      if (!subjectSet) {
+        await clickSel(SEND_BTN);  // blocked when subject empty → reveals subject field
+        await sleep(1200 + Math.floor(orand() * 500));
+        subjectSet = await typeSubject();
+      }
+    }
+    await sleep(1200);
+
+    if (!send) {
+      await sleep(1500);  // settle for the per-step snapshot (gated preview)
+      return { ok: true, sent: false, gated: true, recipient_count: recipientCount, recipients, variable_inserted: variableInserted, subject_set: subjectSet, var_diag: lastVarDiag, manage_url: manageUrl };
+    }
+
+    // send=true → click the real Send.
+    const sent = await clickSel(SEND_BTN);
+    await sleep(2500 + Math.floor(orand() * 1000));
+    return { ok: sent, sent, recipient_count: recipientCount, recipients, variable_inserted: variableInserted, subject_set: subjectSet };
+  } catch (e) {
+    return { ok: false, sent: false, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Archive a whole project (testing-only). Navigates /talent/projects, locates the
+// project by id (its /talent/hire/<id> link) or name, opens its overflow "…" menu,
+// clicks "Archivar proyecto" / "Archive project", confirms, and verifies it left the
+// active projects list. Params: project_url (and/or project_name).
+async function archiveRecruiterProject(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  const projectId = m ? m[1] : "";
+  const projectName = String(options.projectName || "").trim();
+  if (!projectId && !projectName) return { ok: false, archived: false, reason: "missing_project_identity" };
+  const PROJECTS_URL = "https://www.linkedin.com/talent/projects";
+
+  const clickPt = async (pt) => {
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(120 + Math.floor(orand() * 180));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  // Find the overflow "…" button of the project card matching id/name. Each card is a
+  // .hp-project-list-item with TWO /talent/hire/<id> links (overview + discover) and a
+  // [data-test-project-list-item-actions] dropdown trigger.
+  const findOverflow = () => page.evaluate(({ projectId, projectName }) => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const want = clean(projectName);
+    // Start from each per-project actions dropdown trigger; climb to its card.
+    const triggers = Array.from(document.querySelectorAll(
+      "[data-test-project-list-item-actions] .artdeco-dropdown__trigger, [data-test-project-list-item-actions] button, .hp-project-list-item__more-actions button"));
+    let diagCards = 0;
+    for (const btn of triggers) {
+      let card = btn;
+      for (let i = 0; i < 10 && card; i++) {
+        if (card.classList && card.classList.contains("hp-project-list-item")) break;
+        if (card.querySelector && card.querySelector('a[href*="/talent/hire/"]')) break;
+        card = card.parentElement;
+      }
+      if (!card) continue;
+      diagCards++;
+      const byId = projectId && card.querySelector(`a[href*="/talent/hire/${projectId}"]`);
+      const byName = want && clean(card.innerText).includes(want);
+      if (projectId ? !byId : !byName) continue;
+      btn.scrollIntoView({ block: "center" });
+      const r = btn.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    return { found: false, triggers: triggers.length, cards: diagCards };
+  }, { projectId, projectName }).catch(() => ({ found: false }));
+
+  const stillPresent = () => page.evaluate((projectId) => !!document.querySelector(`a[href*="/talent/hire/${projectId}"]`), projectId).catch(() => false);
+
+  try {
+    await page.goto(PROJECTS_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector('a[href*="/talent/hire/"]', { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(2000 + Math.floor(orand() * 700));
+
+    const loc = await findOverflow();
+    if (!loc.found) return { ok: false, archived: false, reason: "project_overflow_not_found", project_id: projectId, triggers: loc.triggers, cards: loc.cards };
+    await clickPt({ x: loc.x, y: loc.y });
+    await sleep(900 + Math.floor(orand() * 400));
+
+    // Click "Archivar proyecto" / "Archive project" in the opened menu. Capture the
+    // open menu's items for diagnostics.
+    const menu = await page.evaluate(() => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const low = (s) => clean(s).toLowerCase();
+      const surfaces = Array.from(document.querySelectorAll(".artdeco-dropdown__content--is-open, [role='menu']")).filter((d) => { const r = d.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      const scope = surfaces[surfaces.length - 1] || document;
+      const items = Array.from(scope.querySelectorAll("[role='menuitem'], button, a, li, div[role='button'], div[tabindex]")).filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && clean(e.innerText || e.textContent); });
+      const labels = items.map((e) => clean(e.innerText || e.textContent).slice(0, 30));
+      const pick = items.find((e) => /archivar proyecto|archive project|^archivar$|^archive$/.test(low(e.innerText || e.textContent)));
+      if (!pick) return { labels, picked: null };
+      pick.scrollIntoView({ block: "center" });
+      const r = pick.getBoundingClientRect();
+      return { labels, picked: clean(pick.innerText || pick.textContent).slice(0, 30), x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }).catch(() => ({ labels: [], picked: null }));
+    if (!menu || !menu.picked || menu.x == null) {
+      return { ok: false, archived: false, reason: "archive_item_not_found", project_id: projectId, menu_items: menu && menu.labels };
+    }
+    await clickPt({ x: menu.x, y: menu.y });
+    await sleep(1300 + Math.floor(orand() * 500));
+
+    // Confirm if a modal appears (primary button, not Cancel). Capture diag.
+    const modal = await page.evaluate(() => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const surface = document.querySelector(".artdeco-modal, [role='dialog'][aria-modal='true'], [role='alertdialog']");
+      if (!surface) return { found: false };
+      const btns = Array.from(surface.querySelectorAll("button")).filter((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      const labels = btns.map((b) => clean((b.innerText || b.textContent || "") + "|" + (b.getAttribute("aria-label") || "")).slice(0, 40));
+      let pick = btns.find((b) => { const t = clean((b.innerText || b.textContent || "") + " " + (b.getAttribute("aria-label") || "")).toLowerCase(); return /archivar|archive|confirmar|confirm|aceptar/.test(t) && !/cancelar|cancel|descartar/.test(t); });
+      if (!pick) return { found: true, labels, picked: null };
+      pick.scrollIntoView({ block: "center" });
+      const r = pick.getBoundingClientRect();
+      return { found: true, labels, picked: clean(pick.innerText || pick.textContent).slice(0, 30), x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }).catch(() => ({ found: false }));
+    if (modal.found && modal.x != null) { await clickPt({ x: modal.x, y: modal.y }); await sleep(1600 + Math.floor(orand() * 600)); }
+    await sleep(1500);
+
+    // Verify: reload the projects list and confirm the project is gone from active.
+    await page.goto(PROJECTS_URL, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await page.waitForSelector('a[href*="/talent/hire/"]', { timeout: 15000 }).catch(() => {});
+    await sleep(2500);
+    const gone = projectId ? !(await stillPresent()) : true;
+    return { ok: gone, archived: true, verified: gone, project_id: projectId, menu_picked: menu.picked, modal_diag: modal, ...(gone ? {} : { reason: "still_in_active_projects" }) };
+  } catch (e) {
+    return { ok: false, archived: false, reason: `error:${(e && e.message) || e}` };
   }
 }
 

@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # (/akcr/api/lead_removed). Workflow params: project_url, candidate_name.
     # Env: RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID.
     recruiter_archive_candidate_workflow_id: str = ""
+    # Archive a whole project (testing tool). Triggered on-demand (run-with-params),
+    # not by the autonomous pipeline. Env: RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID.
+    recruiter_archive_project_workflow_id: str = ""
     # Location facet for the advanced search. The focused boolean+location search
     # workflow needs a location to commit reliably (the location facet + explicit
     # "Run search" click is what actually executes the query; boolean-only Enter-
