@@ -1,0 +1,10 @@
+{
+  "name": "Recruiter: Add a profile to a project (public /in/ or /talent/profile/) — robust",
+  "description": "Adds ONE profile to a project as an active candidate. Daemon-only recruiter_add_profile strategy: navigates {{candidate_url}} (a public /in/<slug> bridges via 'View in Recruiter' to /talent/profile/), opens Save-to-project, switches to existing-project mode, types {{project_name}}, CLICKS the exact dropdown option (typing alone leaves Save disabled — the known gotcha), waits for Save to enable, saves, and VERIFIES via the project's active count ({{project_url}}). Params: candidate_url, project_name, project_url.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"scroll","intent":"settle 1"},
+    {"action_type":"extract","intent":"Add the profile to the project and verify","methods":[{"kind":"extract_strategy","strategy":"recruiter_add_profile"},{"kind":"recruiter_add_profile","candidate_url":"{{candidate_url}}","project_name":"{{project_name}}","project_url":"{{project_url}}"}]}
+  ]
+}

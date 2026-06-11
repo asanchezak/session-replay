@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-archive-all-5";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-add-profile-5";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -65,11 +65,33 @@ function readArchiveAllOptions(step) {
   };
 }
 
+function readReadProjectOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_read_project",
+  ) || {};
+  return { projectUrl: String(method.project_url ?? step?.value ?? "").trim() };
+}
+
+function readAddProfileOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_add_profile",
+  ) || {};
+  return {
+    candidateUrl: String(method.candidate_url ?? step?.value ?? "").trim(),
+    projectName: String(method.project_name ?? "").trim(),
+    projectUrl: String(method.project_url ?? "").trim(),
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
     || strategy === "recruiter_save_results_to_project"
     || strategy === "recruiter_archive_candidate"
     || strategy === "recruiter_archive_all_in_project"
+    || strategy === "recruiter_read_project"
+    || strategy === "recruiter_add_profile"
     || strategy === "recruiter_hot_reload_probe";
 }
 
@@ -141,6 +163,24 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       extraction: { archive_all_result: r },
       log: `recruiter_archive_all_in_project ok=${r.ok} archived_before=${r.archived_before} archived_after=${r.archived_after} rounds=${r.rounds} reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_read_project") {
+    const r = await readRecruiterProject(page, readReadProjectOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { project_read: r },
+      log: `recruiter_read_project active=${r.active} archived=${r.archived} names=${(r.names || []).length}`,
+    };
+  }
+
+  if (strategy === "recruiter_add_profile") {
+    const r = await addProfileToProject(page, readAddProfileOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { add_profile_result: r },
+      log: `recruiter_add_profile ok=${r.ok} saved=${r.saved} verified=${r.verified} bridged=${r.bridged} reason="${r.reason || ""}"`,
     };
   }
 
@@ -839,6 +879,194 @@ async function archiveRecruiterCandidate(page, options, orand, runtime) {
   } catch (e) {
     return { ok: false, archived: false, verified_gone: false, candidate_name: name,
              profile_url: profileUrl || null, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Add ONE profile to a project (active). Handles the public /in/ → Recruiter bridge
+// (navigating /in/<slug> lands on the PUBLIC profile, which has NO save-to-project
+// button — only a "View in Recruiter" link to /talent/profile/<id>; we follow that).
+// Then opens Save-to-project, switches to existing-project mode, types the project
+// name, CLICKS the exact dropdown option (typing alone leaves Save disabled), waits
+// for Save to ENABLE, clicks it, and VERIFIES via the project's active count.
+async function addProfileToProject(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const typeHumanLike = runtimeValue(runtime, "typeHumanLike", null);
+  const candidateUrl = String(options.candidateUrl || "").trim();
+  const projectName = String(options.projectName || "").trim();
+  if (!candidateUrl || !projectName) return { ok: false, reason: "missing_candidate_or_project" };
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+
+  // Prefer Playwright actionability (scroll into view, wait visible/enabled, retry) —
+  // critical for the below-the-fold "Choose existing project" radio and the
+  // initially-disabled Save button. Falls back to a trusted coordinate click.
+  const clickSel = async (sel) => {
+    if (resolveLocatorWithWait && clickResolved) {
+      const t = await resolveLocatorWithWait(page, [{ type: "css", value: sel }], { timeoutMs: 8000 });
+      if (t) {
+        try { if (await clickResolved(page, t, { moveMouseAlongBezier, orand })) return true; }
+        finally { await t.handle?.dispose?.().catch(() => {}); }
+      }
+    }
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(120 + Math.floor(orand() * 180));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  try {
+    await page.goto(candidateUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await sleep(2500 + Math.floor(orand() * 800));
+
+    // Bridge: if we're not on a Recruiter profile, follow "View in Recruiter".
+    let bridged = false;
+    if (!/\/talent\/profile\//.test(page.url())) {
+      const href = await page.evaluate(() => {
+        const a = Array.from(document.querySelectorAll('a[href*="/talent/profile/"]')).find((x) => x.href);
+        return a ? a.href.split("?")[0] : null;
+      }).catch(() => null);
+      if (!href) return { ok: false, bridged: false, reason: "no_recruiter_profile_link", url: page.url() };
+      await page.goto(href, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await sleep(2500 + Math.floor(orand() * 800));
+      bridged = true;
+    }
+
+    // Open Save-to-project, switch to existing-project mode. The button renders after
+    // the Recruiter profile chrome loads — wait for it.
+    await page.waitForSelector("[data-test-action='save-to-project']", { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1200 + Math.floor(orand() * 500));
+    if (!await clickSel("[data-test-action='save-to-project']")) return { ok: false, bridged, reason: "save_button_not_found" };
+    await page.waitForSelector("#choose-existing-projects, label[for='choose-existing-projects']", { timeout: 12000 }).catch(() => {});
+    await sleep(1000 + Math.floor(orand() * 500));
+
+    // Switch to existing-project mode. The radio (#choose-existing-projects) is a
+    // custom/hidden input, so a trusted click on the label may not toggle it — fall
+    // back to a synthetic radio .click() which fires the React onChange.
+    const TYPEAHEAD = "#save-to-projects-typeahead, input[data-test-save-to-projects-typeahead], input[aria-label*='proyecto' i][role='combobox'], input[aria-label*='project' i][role='combobox']";
+    await clickSel("label[for='choose-existing-projects']");
+    let inExisting = await page.waitForSelector(TYPEAHEAD, { timeout: 5000 }).then(() => true).catch(() => false);
+    if (!inExisting) {
+      await page.evaluate(() => {
+        const r = document.querySelector("#choose-existing-projects");
+        if (r) { r.click(); }
+        const lab = document.querySelector("label[for='choose-existing-projects']");
+        if (lab) lab.click();
+      }).catch(() => {});
+      inExisting = await page.waitForSelector(TYPEAHEAD, { timeout: 8000 }).then(() => true).catch(() => false);
+    }
+    await sleep(800 + Math.floor(orand() * 400));
+
+    // Type the project name into the existing-project typeahead.
+    const typed = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" }); el.focus();
+      return el.id || "(no-id)";
+    }, TYPEAHEAD).catch(() => null);
+    if (!typed) {
+      const diag = await page.evaluate(() => Array.from(document.querySelectorAll("input.artdeco-typeahead__input, input[role='combobox']")).map((i) => `${i.id || "?"}|${(i.getAttribute("aria-label") || i.getAttribute("placeholder") || "").slice(0, 40)}`).slice(0, 12)).catch(() => []);
+      return { ok: false, bridged, reason: "typeahead_not_found", in_existing: inExisting, typeahead_diag: diag };
+    }
+    if (typeHumanLike) await typeHumanLike(page, projectName, orand);
+    else await page.keyboard.type(projectName, { delay: 60 });
+    await sleep(1600 + Math.floor(orand() * 700));  // let the dropdown populate
+
+    // CLICK the exact matching dropdown option (typing alone leaves Save disabled).
+    const picked = await page.evaluate((name) => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const want = norm(name);
+      const opts = Array.from(document.querySelectorAll(
+        "[role='option'], .basic-typeahead__selectable, [data-test-typeahead-result], li[role='option'], ul[role='listbox'] li"));
+      let pick = opts.find((o) => norm(o.innerText || o.textContent) === want)
+        || opts.find((o) => norm(o.innerText || o.textContent).includes(want));
+      if (!pick) return { ok: false, n: opts.length };
+      pick.scrollIntoView({ block: "center" });
+      const r = pick.getBoundingClientRect();
+      pick.setAttribute("data-sr-proj-opt", "1");
+      return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, projectName).catch(() => ({ ok: false }));
+    if (!picked.ok) return { ok: false, bridged, reason: "project_option_not_found", options_seen: picked.n };
+    await moveMouseAlongBezier(page, { x: picked.x, y: picked.y }, orand).catch(() => {});
+    await sleep(120 + Math.floor(orand() * 160));
+    await page.mouse.click(picked.x, picked.y).catch(() => {});
+    await sleep(900 + Math.floor(orand() * 400));
+
+    // Wait for Save to ENABLE, then click it.
+    let saveClicked = false;
+    for (let i = 0; i < 8; i++) {
+      const st = await page.evaluate(() => {
+        const b = document.querySelector("button[data-test-action='save']");
+        if (!b) return "missing";
+        return (b.disabled || b.getAttribute("aria-disabled") === "true") ? "disabled" : "enabled";
+      }).catch(() => "missing");
+      if (st === "enabled") { saveClicked = await clickSel("button[data-test-action='save']"); break; }
+      await sleep(700);
+    }
+    if (!saveClicked) return { ok: false, bridged, saved: false, reason: "save_stayed_disabled" };
+    await sleep(2000 + Math.floor(orand() * 800));  // let the save persist
+
+    // VERIFY via the project's active count (saved candidates are active).
+    let verified = null;
+    const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+    if (m) {
+      const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+      await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await sleep(2500);
+      verified = await page.evaluate(() => {
+        const bt = document.body.innerText || "";
+        const mm = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
+        return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+      }).catch(() => null);
+    }
+    return { ok: true, bridged, saved: true, verified_active_count: verified, project_name: projectName };
+  } catch (e) {
+    return { ok: false, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// READ-ONLY: report a project's candidate counts + the visible active candidate names.
+// Navigates the project /manage/all and reads the "Todos los candidatos" (active —
+// excludes archived) and "Candidatos archivados" counters. Does NOT modify anything.
+async function readRecruiterProject(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, reason: "missing_project_id" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector("[data-test-profile-list-view-list-row], .profile-list-item, [data-live-test-select-all]", { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    await sleep(2500 + Math.floor(orand() * 800));
+    const data = await page.evaluate(() => {
+      const bt = document.body.innerText || "";
+      const num = (re) => { const mm = bt.match(re); return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null; };
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const names = [];
+      for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
+        const link = row.querySelector('a[href*="/talent/profile/"]');
+        const n = clean(link && (link.innerText || link.textContent));
+        if (n) names.push(n);
+      }
+      return {
+        active: num(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i),
+        archived: num(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i),
+        names,
+      };
+    }).catch(() => ({ active: null, archived: null, names: [] }));
+    return { ok: true, manage_url: manageUrl, ...data };
+  } catch (e) {
+    return { ok: false, reason: `error:${(e && e.message) || e}` };
   }
 }
 
