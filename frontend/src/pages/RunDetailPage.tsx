@@ -586,6 +586,23 @@ export default function RunDetailPage() {
     setActionLoading(null);
   };
 
+  const handleRelaunch = async () => {
+    if (!runId) return;
+    // Re-queue this run preserving its pipeline origin + target operator, so the same
+    // (Fernanda) daemon re-claims it. Used after re-logging the /talent seat.
+    setActionLoading("relaunch");
+    setError(null);
+    try {
+      const data = await request<{ id: string }>("POST", `/runs/${runId}/relaunch`);
+      navigate(`/runs/${data.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to relaunch";
+      logger.error("RunDetailPage", "relaunch", { run_id: runId }, err instanceof Error ? err : undefined);
+      setError(msg);
+    }
+    setActionLoading(null);
+  };
+
   const handleRetry = async () => {
     if (!runId || !run) return;
     setActionLoading("retry");
@@ -820,6 +837,16 @@ export default function RunDetailPage() {
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border text-text-gray hover:text-error hover:border-error transition-colors disabled:opacity-50"
             >
               <Square size={14} /> {actionLoading === "stop" ? "..." : "Stop"}
+            </button>
+          )}
+          {run.status === "failed" && run.origin?.execution_target === "daemon" && (
+            <button
+              onClick={handleRelaunch}
+              disabled={actionLoading !== null}
+              title="Re-queue this run with the same pipeline + operator so Fernanda's daemon re-claims it (re-login the /talent seat first if it lapsed)"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+            >
+              <RotateCcw size={14} /> {actionLoading === "relaunch" ? "Relanzando..." : "Relanzar"}
             </button>
           )}
           {run.status === "failed" && (

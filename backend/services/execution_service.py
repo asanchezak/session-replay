@@ -557,6 +557,25 @@ class ExecutionService:
         logger.info("Created rerun id=%s source_run_id=%s", run.id, source.id)
         return run
 
+    async def relaunch(self, source_run_id: str) -> ExecutionRun:
+        """Re-launch a terminal run (e.g. a search that FAILED on a walled /talent seat):
+        clone it like rerun BUT preserve the source `origin` (pipeline context +
+        execution_target=daemon + target_operator + execution_options + runtime_params +
+        event_kind) and leave it QUEUED — so the SAME operator's daemon re-claims it and
+        the pipeline terminal hook (`_after_search`) still fires on completion.
+        """
+        source = await self.get_run(source_run_id)
+        new_run = await self.rerun(source_run_id)  # cloned snapshot, status=queued
+        if source.origin:
+            new_run.origin = deepcopy(source.origin)
+            flag_modified(new_run, "origin")
+            await self.session.flush()
+        logger.info(
+            "Relaunched run id=%s from source=%s (origin/target preserved, queued)",
+            new_run.id, source_run_id,
+        )
+        return new_run
+
     async def get_run(self, run_id: str) -> ExecutionRun:
         """Get a run by ID."""
         try:

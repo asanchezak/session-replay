@@ -465,6 +465,32 @@ async def rerun_run(
     }
 
 
+@router.post("/{run_id}/relaunch")
+async def relaunch_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-launch a terminal run preserving its origin (pipeline context + target
+    operator), left QUEUED so the targeted daemon re-claims it. Used to retry a
+    Recruiter search that FAILED on a walled /talent seat (after a fresh login)."""
+    svc = ExecutionService(db)
+    try:
+        new_run = await svc.relaunch(run_id)
+    except NotFoundError:
+        return _error("NOT_FOUND", "Source run not found")
+    except StateTransitionError as e:
+        return _error("STATE_ERROR", str(e), status=409)
+    await db.commit()
+    origin = new_run.origin or {}
+    return {
+        "id": str(new_run.id),
+        "workflow_id": new_run.workflow_id,
+        "status": new_run.status,
+        "relaunch_of": run_id,
+        "target_operator": origin.get("target_operator"),
+    }
+
+
 class ExpandForEachRequest(BaseModel):
     step_index: int
 

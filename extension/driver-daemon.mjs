@@ -229,6 +229,21 @@ async function pauseRun(runId, reason, stepIndex) {
   }
 }
 
+// Mark a run FAILED (terminal). Used when a Recruiter step hits a walled /talent seat:
+// the run must visibly fail (not complete with 0 results), then be relaunched after a
+// fresh login (POST /v1/runs/{id}/relaunch re-queues it for this daemon).
+async function failRun(runId, reason) {
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/fail`, {
+      method: "POST",
+      body: JSON.stringify({ error: reason }),
+    });
+    console.log(`[daemon] FAILED run ${runId}: ${reason}`);
+  } catch (err) {
+    console.error(`[daemon] failRun ${runId} failed:`, err.message?.slice(0, 200));
+  }
+}
+
 // Atomically claim a QUEUED run (QUEUED→RUNNING) before driving it. The backend
 // takes SELECT … FOR UPDATE on the row, so a lost race (run already claimed)
 // comes back 409 — return false and let the next poll pick a different run.
@@ -1572,6 +1587,21 @@ async function driveRun(run) {
             const runtimeResult = await runRuntimeStrategy(strategy, { page, step, orand });
             if (runtimeResult?.handled) {
               lastIdx = idx; mark = `runtime-strategy:${strategy}:${idx}`;
+              // A lapsed /talent seat redirects the Recruiter surface to a login wall:
+              // the strategy then "succeeds" with 0 candidates and the run would
+              // COMPLETE silently (pushing 0 leads). Detect the wall and FAIL the run
+              // (visible + relaunchable) instead. assertNoBlocker throws on a warm seat
+              // only if it actually hits login/checkpoint — no false positives.
+              if (String(strategy).startsWith("recruiter_")) {
+                let walled = null;
+                try { await assertNoBlocker(page, `${strategy}:${idx}`); } catch (e) { walled = e; }
+                if (walled) {
+                  await captureDebug(page, runId, idx, `recruiter seat walled at ${mark}: ${walled.message}`, consoleBuf).catch(() => {});
+                  await failRun(runId, "Recruiter seat walled — re-login (login-talent.bat) then Relaunch the run");
+                  blocked = true;
+                  break;
+                }
+              }
               if (Array.isArray(runtimeResult.seenProfileUrls)) seenPool.push(...runtimeResult.seenProfileUrls);
               const log = runtimeResult.log || `${strategy} handled`;
               dbg(`step${idx} ${log}`);

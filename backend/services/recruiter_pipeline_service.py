@@ -408,7 +408,10 @@ class RecruiterPipelineService:
         # search results page and save them together (no profile visits). Needs
         # the concrete search URL the search run landed on.
         bulk_wf = settings.recruiter_save_results_workflow_id
-        search_url = result.get("url")
+        # The search extractor stores the LAST page it landed on (often start=25).
+        # Normalize to start=0 so the bulk save begins on page 1 and can paginate
+        # forward over the whole result set.
+        search_url = re.sub(r"([?&]start=)\d+", r"\g<1>0", result.get("url") or "")
         if bulk_wf and project_name and to_save and search_url:
             target_count = len(to_save)
             save_run = await self._create_pipeline_run(
