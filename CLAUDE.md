@@ -28,6 +28,11 @@ Daemon session ops and restart gotchas: **`docs/recruiter-daemon-ops.md`**.
 | 7-orig | Bulk-message draft (no send) | DONE ✓ | bulk-message-draft.json |
 | Archive | Archive candidate | BUILT | archive-candidate.json / `77f6095c` |
 | Remove | Remove (archive) candidate — parameterized | DONE ✓ (live-verified) | archive-candidate-param.json / `fc9bb424` |
+| Remove-all | Archive ALL candidates in a project | DONE ✓ (live-verified) | archive-all-in-project.json / `511ceaab` |
+| Add | Add a profile (public `/in/` bridge) to a project | DONE ✓ (live-verified) | add-profile-to-project.json / `f003f090` |
+| Read | Read a project's counts (read-only) | DONE ✓ | read-project-counts.json / `b5e3d433` |
+| Msg-compose | Templated bulk InMail ({firstName} chip, gated send) | DONE ✓ (live-verified, real send) | message-compose.json / `c46c296f` |
+| Archive-proj | Archive a whole PROJECT (testing) | DONE ✓ (live-verified) | archive-project.json / `752753a9` |
 | 6 | Single message | CAPTURED | (build-only) |
 | 9 | Public `/in/` profile bridge | DONE ✓ | via save-to-project |
 
@@ -171,6 +176,32 @@ seat (anti-bot always on). Defaults: project `-EZ Senior QA Automation Engineer`
 ⚠️ Each archives REAL candidates on the sensitive account — only run on a throwaway/test
 project. The demo script poll is NOT `set -e` (a transient empty curl must not abort it).
 See [[project_recruiter_archive_candidate]].
+
+### Per-position message TEMPLATE (Odoo) + templated send + archive-project — LIVE-VERIFIED 2026-06-11
+
+- **Odoo template (akcr):** `hr.job.recruiter_message_template` (Text) — auto-default from
+  the position `name` + public `website_url` with the `{Nombre}` token; user-editable in
+  the hr.job form. The "Mandar mensaje" wizard prefills its body from it and has a **`send`
+  checkbox** (unchecked = preview only). Ships on akcr branch `feat/recruiter-search-link`
+  / PR **#1818** (operator `-u akcr` upgrade needed for the field + wizard).
+- **Templated send (`recruiter_message_compose`, wf `c46c296f`, env
+  `RECRUITER_MESSAGE_WORKFLOW_ID`):** selects the project's ACTIVE candidates → bulk InMail
+  composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
+  LinkedIn's **`{firstName}` variable CHIP** (the "Insert variables" `{}` button →
+  `ul[data-test-variables-dropdown]` items `{firstName}`/`{lastName}`/`{fullName}`) → sets
+  subject (`input[data-test-compose-subject-input]`) → **GATED**: `send=false` (default)
+  types + STOPS for a snapshot preview; `send=true` clicks Send
+  (`button[data-test-messaging-submit-btn]`). Reports the recipients it messaged so the
+  backend marks exactly those in Odoo. `POST /v1/recruiter/jobs/{id}/send-messages {body,
+  subject, send}`. **Live-verified: real InMail to Andrey only → Odoo `outreach_status=messaged`.**
+- **profile_url URN gotcha:** the project `/manage/all` rows report the `AEMAA…` urn, but
+  the public-`/in/`-bridge save yields a different `ACoAA…` urn — they must match for the
+  Odoo outreach-status update. Align the lead's `profile_url` to the `AEMAA…` form.
+- **Archive a PROJECT (`recruiter_archive_project`, wf `752753a9`, testing tool):**
+  `/talent/projects` → card by id/name → `[data-test-project-list-item-actions]` overflow
+  → "Archive project" menu item → **confirm modal "Archive project"** (NOT Cancel/Dismiss)
+  → verify gone from the active list. Live-verified (archived project `2056118114`).
+- See [[project_recruiter_archive_candidate]].
 
 ### Key operational rules
 
