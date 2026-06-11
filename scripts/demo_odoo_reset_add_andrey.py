@@ -25,9 +25,12 @@ JOB_ID = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("JOB_ID",
 
 ANDREY = {
     "name": "Andrey Sanchez",
+    # Use the /talent/hire/<project>/manage/all profile_url format (AEMAA…) so the
+    # message-compose strategy's reported recipients match this lead for the Odoo
+    # outreach-status update. (The public-profile bridge yields a different ACoAA… urn.)
     "profile_url": os.environ.get(
         "ANDREY_PROFILE_URL",
-        "https://www.linkedin.com/talent/profile/ACoAACWxMLsB-0PnIXIpo6vdyZmCCAmsK5Zl3tM",
+        "https://www.linkedin.com/talent/profile/AEMAACWxMLsB5kMmgFGox0pPupKEQfe9C-YJ3Sw",
     ),
     "headline": os.environ.get("ANDREY_HEADLINE", "Software Engineer @ Akurey"),
 }
