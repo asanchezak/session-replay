@@ -91,3 +91,30 @@ async def send_messages(
             "reason": "no project or no saved candidates for this job",
         }
     return {"status": "queued", "job_id": job_id, "run_id": run_id}
+
+
+@router.get("/jobs/{job_id}/pipeline")
+async def pipeline_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only one-shot summary of a job's pipeline: the chained runs (id/kind/
+    status/priority), the boolean, per-search total_count, project URL, and the
+    zero-result flag — so you don't have to poll /runs + pull snapshots."""
+    svc = RecruiterPipelineService(db)
+    return await svc.pipeline_status(job_id)
+
+
+@router.post("/jobs/{job_id}/preview-count")
+async def preview_count(
+    job_id: str,
+    tightness: int = 4,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cheap strictness calibration: build the JD boolean at `tightness` and fire a
+    COUNT-ONLY search (no 30-candidate extract, no save, no lead push). Returns the
+    run id + boolean; poll the run's extraction for total_count."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.preview_count(job_id, tightness)
+    await db.commit()
+    return res

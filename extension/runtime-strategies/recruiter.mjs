@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-add-profile-fullname-12";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-countonly-archivedetect-13";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -57,6 +57,9 @@ function readSearchOptions(step) {
       method.max_scroll_passes ?? process.env.RECRUITER_SEARCH_MAX_SCROLL_PASSES,
       18,
     ),
+    // Count-only: read just the result total from the first page (no pagination, no
+    // per-card collection) — cheap strictness calibration with minimal anti-bot cost.
+    countOnly: !!method.count_only,
   };
 }
 
@@ -222,7 +225,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     return {
       handled: true,
       extraction: { archive_all_result: r },
-      log: `recruiter_archive_all_in_project ok=${r.ok} archived_before=${r.archived_before} archived_after=${r.archived_after} rounds=${r.rounds} reason="${r.reason || ""}"`,
+      log: `recruiter_archive_all_in_project ok=${r.ok} archived_before=${r.archived_before} archived_after=${r.archived_after} archived_count=${r.archived_count} active_after=${r.active_after} more_remaining=${r.more_remaining} reason="${r.reason || ""}"`,
     };
   }
 
@@ -409,6 +412,12 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
     await sleep(1600 + Math.floor(Math.random() * 900));
     return true;
   };
+  // Count-only: one extract of the first page for the result total, then bail — no
+  // pagination, no per-card collection. Cheap strictness calibration (preview-count).
+  if (options.countOnly) {
+    await collectVisible();
+    return { total_count: totalCount, count_only: true, people: [], collected_count: 0 };
+  }
   const MAX_PAGES = Math.max(1, readPositiveInt(options.maxPages, 4));
   for (let pg = 0; pg < MAX_PAGES; pg++) {
     await scrollAndCollectPage();
@@ -1087,7 +1096,15 @@ async function addProfileToProject(page, options, orand, runtime) {
       target.setAttribute("data-sr-proj-opt", "1");
       return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }, projectName).catch(() => ({ ok: false }));
-    if (!picked.ok) return { ok: false, bridged, reason: "project_option_not_found", options_seen: picked.n, options_seen_labels: picked.seen };
+    if (!picked.ok) {
+      // Distinguish the two failure modes for an actionable error:
+      //  - 0 options at all → the typeahead never populated (typing/render issue).
+      //  - options present but the target absent → the project is almost certainly
+      //    ARCHIVED (archived projects never appear in this typeahead) or older than
+      //    the typeahead's recency cap. Either way it CAN'T be targeted by add-to-project.
+      const reason = (picked.n || 0) > 0 ? "project_archived_or_inactive" : "typeahead_empty";
+      return { ok: false, bridged, reason, options_seen: picked.n, options_seen_labels: picked.seen };
+    }
     await moveMouseAlongBezier(page, { x: picked.x, y: picked.y }, orand).catch(() => {});
     await sleep(120 + Math.floor(orand() * 160));
     await page.mouse.click(picked.x, picked.y).catch(() => {});
@@ -1567,6 +1584,9 @@ async function archiveAllInProject(page, options, orand, runtime) {
       active_start: activeStart,
       active_after: activeAfter,
       archived_count: archivedCount,
+      // Did we hit the per-step time budget with candidates still active? The caller
+      // (orchestrator) re-runs archive-all until more_remaining is false → active 0.
+      more_remaining: typeof activeAfter === "number" && activeAfter > 0,
       manage_url: manageUrl,
       ...(reason ? { reason } : {}),
     };

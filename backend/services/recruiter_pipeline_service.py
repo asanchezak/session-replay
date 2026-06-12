@@ -87,7 +87,7 @@ class RecruiterPipelineService:
 
     async def _create_pipeline_run(
         self, *, workflow_id: str, event_kind: str, runtime_params: dict,
-        pipeline: dict, connector_id,
+        pipeline: dict, connector_id, priority: int = 10,
     ) -> ExecutionRun:
         """Create a QUEUED daemon run for the next pipeline step.
 
@@ -95,6 +95,11 @@ class RecruiterPipelineService:
         daemon path: execution_target=daemon + target_operator=linkedin_operator
         (so the daemon claims it) + use_profile (the warm Recruiter seat).
         runtime_params are substituted into the snapshot by create_run.
+
+        `priority` lands in origin.priority — the daemon claims higher-priority runs
+        first (FIFO within a priority). Pipeline/message steps default to +10; bulk
+        cleanup (deferred-removal archive) passes a low value so a flood of removals
+        can't starve an interactive run.
         """
         run = await self.exec_svc.create_run(
             workflow_id=workflow_id, runtime_params=runtime_params
@@ -109,6 +114,7 @@ class RecruiterPipelineService:
             "execution_options": {"use_profile": True, "snapshot": True},
             "operator_id": settings.linkedin_operator,
             "target_operator": settings.linkedin_operator,
+            "priority": priority,
             "runtime_params": runtime_params,
             "pipeline": pipeline,
             # Keep a job_payload so the existing push paths that read
@@ -400,6 +406,23 @@ class RecruiterPipelineService:
         )
         candidates = lead_res.get("leads") or []
 
+        # Loud signal: finalizing with ZERO candidates is almost always a problem
+        # (a walled seat, a search that committed empty, or a boolean too tight after
+        # reruns) — NOT a normal success. Mark it on the run origin and warn so it's
+        # visible instead of silently completing with no leads. (The calibration above
+        # already broadens while reruns remain; this is the terminal 0 case.)
+        if not candidates:
+            logger.warning(
+                "recruiter pipeline: job %s search finalized with 0 candidates "
+                "(count=%s, tightness=%s, reruns=%s) — flagging zero_results",
+                job_id, count, tightness, reruns,
+            )
+            origin = dict(run.origin or {})
+            origin["zero_results"] = True
+            run.origin = origin
+            flag_modified(run, "origin")
+            await self.session.flush()
+
         # Save EVERY extracted candidate to the project: the count saved == the count
         # the search extracted (the extraction is itself bounded by the search
         # workflow's target_count, ~30). recruiter_max_saves_per_position is now only
@@ -667,9 +690,95 @@ class RecruiterPipelineService:
             },
             pipeline=pipeline_ctx,
             connector_id=connector_id,
+            # Low priority: deferred-removal archives are bulk cleanup. A burst of them
+            # (e.g. a demo reset deleting many leads) must NOT queue ahead of an
+            # interactive pipeline/message run on the single daemon.
+            priority=-10,
         )
         logger.info(
             "recruiter pipeline: started archive run %s for job %s candidate %r",
             run.id, job_id, name,
         )
         return str(run.id)
+
+    # --------------------------------------------------------------- status / preview
+    async def pipeline_status(self, job_id) -> dict:
+        """Read-only summary of a job's pipeline: the chained runs + the boolean,
+        per-search total_count, project URL, and zero-result flag — one call instead
+        of polling /runs + pulling snapshots. (origin is JSON → filter in Python.)"""
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        runs, project_url, search_query, zero_results = [], None, None, False
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") not in PIPELINE_EVENT_KINDS:
+                continue
+            p = o.get("pipeline") or {}
+            if str(p.get("job_id")) != str(job_id):
+                continue
+            project_url = project_url or p.get("project_url")
+            if o.get("event_kind") == EVENT_SEARCH:
+                search_query = p.get("search_query") or search_query
+            zero_results = zero_results or bool(o.get("zero_results"))
+            entry = {
+                "run_id": str(r.id),
+                "event_kind": o.get("event_kind"),
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "priority": o.get("priority", 0),
+            }
+            if o.get("event_kind") == EVENT_SEARCH:
+                entry["tightness"] = p.get("search_tightness")
+                try:
+                    entry["total_count"] = (await self.push.read_search_result(r.id)).get("total_count")
+                except Exception:
+                    pass
+            runs.append(entry)
+        runs.reverse()  # chronological
+        return {"job_id": str(job_id), "project_url": project_url,
+                "search_query": search_query, "zero_results": zero_results, "runs": runs}
+
+    async def preview_count(self, job_id, tightness: int) -> dict:
+        """Cheap strictness calibration: build the boolean from the job's JD at the
+        given tightness and fire a COUNT-ONLY search (one page, no 30-candidate
+        pagination, no save, no lead push). Returns {run_id, boolean, tightness};
+        poll the run's extraction for total_count. The count-only flag is patched onto
+        the extract method in this run's snapshot, so no separate workflow is needed."""
+        adv_wf = settings.recruiter_advanced_search_workflow_id
+        if not adv_wf:
+            return {"error": "recruiter_advanced_search_workflow_id unset"}
+        ctx = await self._gather_job_context(job_id)
+        connector_id = ctx.get("connector_id")
+        corpus, title = await self._fetch_job_corpus(job_id, connector_id)
+        from services.boolean_query_builder import BooleanQueryBuilder
+        b = BooleanQueryBuilder()
+        spec = await b.extract_spec(corpus, fallback_title=title)
+        t = max(0, min(int(tightness), b.max_tightness(spec)))
+        query = b.assemble(spec, t)
+        params = {"boolean_query": query}
+        if settings.recruiter_default_location:
+            params["location"] = settings.recruiter_default_location
+        run = await self.exec_svc.create_run(workflow_id=adv_wf, runtime_params=params)
+        # Patch the extract method → count-only (one page, no pagination/collection).
+        snap = run.workflow_snapshot or {}
+        for st in snap.get("steps", []):
+            for mth in (st.get("methods") or []):
+                if isinstance(mth, dict) and mth.get("strategy") == "recruiter_search_people":
+                    mth["count_only"] = True
+        run.workflow_snapshot = snap
+        flag_modified(run, "workflow_snapshot")
+        run.origin = {
+            "connector_id": str(connector_id) if connector_id else None,
+            "event_kind": "recruiter_preview_count",  # NOT a pipeline kind → advance() skips (no save)
+            "execution_target": "daemon",
+            "execution_options": {"use_profile": True, "snapshot": False},
+            "operator_id": settings.linkedin_operator,
+            "target_operator": settings.linkedin_operator,
+            "priority": 20,  # quick human-facing feedback → jump the queue
+            "runtime_params": params,
+            "pipeline": {"job_id": str(job_id)},
+        }
+        flag_modified(run, "origin")
+        await self.session.flush()
+        return {"run_id": str(run.id), "boolean": query, "tightness": t}

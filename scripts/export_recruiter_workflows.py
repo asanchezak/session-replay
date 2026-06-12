@@ -31,7 +31,7 @@ BASE = os.environ.get("SR_BACKEND", "https://52-5-45-84.sslip.io").rstrip("/") +
 KEY = os.environ.get("SR_API_KEY", "28e54ef83e040faa366260aa13af5f5b1947b364731e1f22")
 
 # Step fields we persist (drop runtime-only/derived columns like dom_context, scores, ids).
-STEP_FIELDS = ["action_type", "intent", "selector_chain", "value", "methods", "success_condition"]
+STEP_FIELDS = ["action_type", "intent", "selector_chain", "value", "methods", "success_condition", "checkpoint"]
 
 
 def get(path):
@@ -47,8 +47,11 @@ def normalize(wf):
         step = {}
         for f in STEP_FIELDS:
             v = s.get(f)
-            if v is not None:
-                step[f] = v
+            # Omit nulls AND falsy `checkpoint` (the common case) so specs stay clean —
+            # only steps explicitly marked critical carry "checkpoint": true.
+            if v is None or (f == "checkpoint" and not v):
+                continue
+            step[f] = v
         steps.append(step)
     return {
         "name": wf.get("name"),

@@ -27,7 +27,7 @@ REGISTRY = os.path.join(WF_DIR, "registry.json")
 BASE = os.environ.get("SR_BACKEND", "https://52-5-45-84.sslip.io").rstrip("/") + "/v1"
 KEY = os.environ.get("SR_API_KEY", "28e54ef83e040faa366260aa13af5f5b1947b364731e1f22")
 
-STEP_FIELDS = ["action_type", "intent", "selector_chain", "value", "methods", "success_condition"]
+STEP_FIELDS = ["action_type", "intent", "selector_chain", "value", "methods", "success_condition", "checkpoint"]
 
 
 def call(method, path, body=None):

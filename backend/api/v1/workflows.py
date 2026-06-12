@@ -577,6 +577,7 @@ async def get_workflow(
                 "value": s.value,
                 "methods": s.methods,
                 "success_condition": s.success_condition,
+                "checkpoint": s.checkpoint,
                 "dom_context": s.dom_context,
             }
             for s in steps
