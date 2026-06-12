@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-locale-proof-9";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-add-profile-fullname-12";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -1051,25 +1051,43 @@ async function addProfileToProject(page, options, orand, runtime) {
       const diag = await page.evaluate(() => Array.from(document.querySelectorAll("input.artdeco-typeahead__input, input[role='combobox']")).map((i) => `${i.id || "?"}|${(i.getAttribute("aria-label") || i.getAttribute("placeholder") || "").slice(0, 40)}`).slice(0, 12)).catch(() => []);
       return { ok: false, bridged, reason: "typeahead_not_found", in_existing: inExisting, typeahead_diag: diag };
     }
+    // Type the FULL project name (the typeahead matches from the start, so the "-EZ "
+    // prefix is required). NOTE: the project must be ACTIVE — an ARCHIVED project never
+    // appears in this save-to-project typeahead, so add-to-project can't target it.
     if (typeHumanLike) await typeHumanLike(page, projectName, orand);
     else await page.keyboard.type(projectName, { delay: 60 });
-    await sleep(1600 + Math.floor(orand() * 700));  // let the dropdown populate
+    await sleep(1700 + Math.floor(orand() * 700));  // let the dropdown populate
 
     // CLICK the exact matching dropdown option (typing alone leaves Save disabled).
+    // Prefer the project-title hook `[data-test-project-typeahead-result-title]` (the
+    // option text is "<name>  <created-date> · …", so match by PREFIX, not equality);
+    // generic [role=option]/li are the fallback. The earlier matcher hit the "Matching
+    // projects" group label instead of the project rows → project_option_not_found.
     const picked = await page.evaluate((name) => {
       const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
       const want = norm(name);
-      const opts = Array.from(document.querySelectorAll(
-        "[role='option'], .basic-typeahead__selectable, [data-test-typeahead-result], li[role='option'], ul[role='listbox'] li"));
-      let pick = opts.find((o) => norm(o.innerText || o.textContent) === want)
-        || opts.find((o) => norm(o.innerText || o.textContent).includes(want));
-      if (!pick) return { ok: false, n: opts.length };
-      pick.scrollIntoView({ block: "center" });
-      const r = pick.getBoundingClientRect();
-      pick.setAttribute("data-sr-proj-opt", "1");
+      const hit = (el) => { const t = norm(el.innerText || el.textContent); return t === want || t.startsWith(want) || t.includes(want); };
+      const titles = Array.from(document.querySelectorAll(
+        "[data-test-project-typeahead-result-title], [data-live-test-project-typeahead-result-title]"));
+      let pick = titles.find(hit);
+      let opts = [];
+      if (!pick) {
+        opts = Array.from(document.querySelectorAll(
+          "li[role='option'], [role='option'], .basic-typeahead__selectable, [data-test-typeahead-result], ul[role='listbox'] li"));
+        pick = opts.find(hit);
+      }
+      if (!pick) {
+        const pool = titles.length ? titles : opts;
+        return { ok: false, n: pool.length, seen: pool.map((o) => norm(o.innerText || o.textContent).slice(0, 50)).slice(0, 10) };
+      }
+      // Click the option ROW (the title's clickable ancestor), else the title itself.
+      const target = pick.closest("li[role='option'], [role='option'], .basic-typeahead__selectable, .basic-typeahead__triggered-content li") || pick;
+      target.scrollIntoView({ block: "center" });
+      const r = target.getBoundingClientRect();
+      target.setAttribute("data-sr-proj-opt", "1");
       return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }, projectName).catch(() => ({ ok: false }));
-    if (!picked.ok) return { ok: false, bridged, reason: "project_option_not_found", options_seen: picked.n };
+    if (!picked.ok) return { ok: false, bridged, reason: "project_option_not_found", options_seen: picked.n, options_seen_labels: picked.seen };
     await moveMouseAlongBezier(page, { x: picked.x, y: picked.y }, orand).catch(() => {});
     await sleep(120 + Math.floor(orand() * 160));
     await page.mouse.click(picked.x, picked.y).catch(() => {});

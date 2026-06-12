@@ -40,8 +40,9 @@ JOB_ID="${JOB_ID:-323}"
 PROJECT_URL="${PROJECT_URL:-https://www.linkedin.com/talent/hire/2057213706/discover/recruiterSearch}"
 PROJECT_NAME="${PROJECT_NAME:--EZ Senior QA Automation Engineer}"
 PROFILE_URL="${PROFILE_URL:-https://www.linkedin.com/in/crandrey/}"
-MSG_SUBJECT="${MSG_SUBJECT:-Oportunidad en Akurey}"
-MSG_BODY="${MSG_BODY:-Hola {Nombre}, en Akurey tenemos abierta la posición de Senior QA Automation Engineer y tu perfil nos llamó la atención. ¿Te interesaría que conversemos? Saludos.}"
+# exported so the inline `python3 -c` (step 3 payload) can read them via os.environ
+export MSG_SUBJECT="${MSG_SUBJECT:-Oportunidad en Akurey}"
+export MSG_BODY="${MSG_BODY:-Hola {Nombre}, en Akurey tenemos abierta la posición de Senior QA Automation Engineer y tu perfil nos llamó la atención. ¿Te interesaría que conversemos? Saludos.}"
 
 PREFLIGHT_WF="7246989f-a6ce-4b8a-b7f4-16a49d930cae"
 ARCHIVE_ALL_WF="511ceaab-34c2-4d8b-9241-725a61e1cc32"
@@ -49,7 +50,7 @@ ADD_WF="f003f090-d74a-41bc-90a9-67f5fd603a5d"
 READ_WF="b5e3d433-fa33-4795-881a-40d3125c773f"
 ARCHIVE_PROJ_WF="752753a9-17b5-4e36-afcb-82bae204726e"
 
-SEND="${SEND:-0}"; ARCHIVE="${ARCHIVE:-0}"; SKIP_RESET="${SKIP_RESET:-0}"
+export SEND="${SEND:-0}"; ARCHIVE="${ARCHIVE:-0}"; SKIP_RESET="${SKIP_RESET:-0}"
 
 jqpy() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
 

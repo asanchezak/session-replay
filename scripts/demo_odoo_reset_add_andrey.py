@@ -5,9 +5,10 @@ Mirrors the LinkedIn-project reset (archive all + add Andrey) on the Odoo side s
 end-to-end demo can show the Odoo outreach-status update while messaging ONLY Andrey
 (your own profile) — never real candidates.
 
-Deletes every linkedin.lead for the job, then creates a single Andrey lead. On qaodoo
-the deferred-removal unlink (akcr PR #1818) is not deployed, so unlink hard-deletes
-directly (no archive callback) — exactly what the demo wants here.
+Deletes every linkedin.lead for the job, then creates a single Andrey lead. qaodoo now
+has akcr's deferred-removal (PR #1818) deployed, so a plain unlink would be DEFERRED
+(removal_status=pending + a LinkedIn archive run) instead of deleting — we pass the
+`akcr_removal_confirmed` bypass context to hard-delete, exactly what the demo wants here.
 
 Usage:
     python3 scripts/demo_odoo_reset_add_andrey.py [JOB_ID]
@@ -46,16 +47,21 @@ def main():
     def kw(model, method, args, kwargs=None):
         return models.execute_kw(DB, uid, PASSWORD, model, method, args, kwargs or {})
 
+    # HARD-delete. qaodoo now has akcr's deferred-removal (PR #1818): a plain unlink on a
+    # project-linked lead is DEFERRED (marks removal_status=pending + fires a LinkedIn
+    # archive run) instead of deleting. For a demo reset we want a real delete, so pass
+    # the documented bypass context `akcr_removal_confirmed` (also: test rows / no project).
+    DEL_CTX = {"context": {"akcr_removal_confirmed": True}}
     existing = kw("linkedin.lead", "search", [[["job_id", "=", JOB_ID]]])
     if existing:
-        kw("linkedin.lead", "unlink", [existing])
+        kw("linkedin.lead", "unlink", [existing], DEL_CTX)
     print(f"deleted {len(existing)} existing lead(s) for job {JOB_ID}")
 
     # Avoid the (job_id, profile_url) unique-constraint if Andrey somehow lingered.
     dup = kw("linkedin.lead", "search",
              [[["job_id", "=", JOB_ID], ["profile_url", "=", ANDREY["profile_url"]]]])
     if dup:
-        kw("linkedin.lead", "unlink", [dup])
+        kw("linkedin.lead", "unlink", [dup], DEL_CTX)
     lead_id = kw("linkedin.lead", "create", [{
         "job_id": JOB_ID,
         "name": ANDREY["name"],
