@@ -39,7 +39,8 @@ Return ONLY this JSON object (no markdown, no comments):
   "location": "country or region the role targets, or null",
   "years_min": integer or null,
   "years_max": integer or null,
-  "exclude": ["titles/terms to NOT match, e.g. \\"Manager\\", \\"Intern\\", max 4"]
+  "exclude": ["titles/terms to NOT match, e.g. \\"Manager\\", \\"Intern\\", max 4"],
+  "recommended_tightness": "integer: how many of the most-important skills above to REQUIRE (AND together), counting must_have first then optional. This sets how STRICT the search is. Choose it from how specific/senior the role is and how many skills are genuinely mandatory: a focused senior/lead role with a clear, distinctive stack → 5-7; a normal mid/senior role → 4-5; a broad or vague/junior role → 2-3. Never exceed the number of skills you listed."
 }}
 
 Rules: skills must be concrete searchable tech/tools, NOT soft skills or sentences.
@@ -106,7 +107,7 @@ class BooleanQueryBuilder:
         spec["exclude"] = _clean_terms(spec.get("exclude"), 4)
         spec["seniority"] = (spec.get("seniority") or None)
         spec["location"] = (spec.get("location") or None)
-        for k in ("years_min", "years_max"):
+        for k in ("years_min", "years_max", "recommended_tightness"):
             try:
                 spec[k] = int(spec[k]) if spec.get(k) not in (None, "", "null") else None
             except (TypeError, ValueError):
@@ -151,7 +152,17 @@ class BooleanQueryBuilder:
         )
 
     async def build(self, corpus: str, fallback_title: str = "", start_tightness: int = 2) -> dict:
-        """One-shot: corpus → {query, spec, tightness}. Start at title + 2 skills."""
+        """One-shot: corpus → {query, spec, tightness}.
+
+        The AI decides the STRICTNESS via spec.recommended_tightness (how many of its
+        own ranked skills to AND). `start_tightness` is an operator FLOOR (minimum
+        strictness) — the AI may go stricter but not below it. Both are clamped to the
+        number of skills the AI actually returned (max_tightness). Calibration can still
+        adjust ±1 from here."""
         spec = await self.extract_spec(corpus, fallback_title)
-        t = max(0, min(start_tightness, self.max_tightness(spec)))
-        return {"query": self.assemble(spec, t), "spec": spec, "tightness": t}
+        mx = self.max_tightness(spec)
+        floor = max(0, min(int(start_tightness), mx))
+        ai_t = spec.get("recommended_tightness")
+        t = floor if ai_t is None else max(floor, min(int(ai_t), mx))
+        return {"query": self.assemble(spec, t), "spec": spec, "tightness": t,
+                "ai_tightness": ai_t, "tightness_floor": floor}
