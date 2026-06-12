@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # commit can leave the page on "Búsqueda vacía"). Threaded as {{location}}.
     # Env: RECRUITER_DEFAULT_LOCATION.
     recruiter_default_location: str = ""
+    # How many skills the INITIAL boolean AND's (musts first, then optionals) on top
+    # of the (title OR …) clause — i.e. how STRICT the first search is. The builder's
+    # default is 2 (title + 2 skills); raise it for a tighter first pass on rich JDs.
+    # Bounded per-position by max_tightness(spec) = title + all skills. The calibration
+    # below still broadens (-1) if the tightened query returns too few. Env:
+    # RECRUITER_SEARCH_START_TIGHTNESS.
+    recruiter_search_start_tightness: int = 2
     # Boolean-search count calibration: target ~15; re-tune (tighten/broaden the
     # boolean) when the result count falls outside [min,max], capped at N re-runs.
     recruiter_target_count: int = 15

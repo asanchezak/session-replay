@@ -234,7 +234,8 @@ class RecruiterPipelineService:
             from services.boolean_query_builder import BooleanQueryBuilder
             corpus, title = await self._fetch_job_corpus(job_id, connector_id)
             built = await BooleanQueryBuilder().build(
-                corpus, fallback_title=title or pipeline.get("position", "")
+                corpus, fallback_title=title or pipeline.get("position", ""),
+                start_tightness=settings.recruiter_search_start_tightness,
             )
             pipeline["search_spec"] = built["spec"]
             pipeline["search_tightness"] = built["tightness"]
