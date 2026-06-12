@@ -28,10 +28,6 @@
         {
           "type": "css",
           "value": "input[data-test-project-name-input]"
-        },
-        {
-          "type": "accessibility",
-          "value": "Project name"
         }
       ],
       "value": "-EZ {{position}}"
@@ -43,10 +39,6 @@
         {
           "type": "css",
           "value": "textarea[data-test-project-description-input]"
-        },
-        {
-          "type": "accessibility",
-          "value": "Descripción del proyecto"
         }
       ],
       "value": "{{job_description}}"

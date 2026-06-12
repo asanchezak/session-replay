@@ -37,7 +37,11 @@
           "type": "css",
           "value": "button[aria-label=\"Añadir Palabras clave del perfil u operadores booleanos\"]"
         }
-      ]
+      ],
+      "success_condition": {
+        "type": "selector_exists",
+        "selector": "textarea[data-test-free-text-single-value-facet-textarea]"
+      }
     },
     {
       "action_type": "scroll",
@@ -78,7 +82,11 @@
           "type": "css",
           "value": "button[aria-label=\"Añadir ubicación del candidato\"]"
         }
-      ]
+      ],
+      "success_condition": {
+        "type": "selector_exists",
+        "selector": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
+      }
     },
     {
       "action_type": "scroll",

@@ -7,7 +7,40 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-msg-archive-project-8";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-locale-proof-9";
+
+// Read a project's pipeline counts WITHOUT matching localized label text. The
+// manage/all pipeline tabs are keyed by a locale-independent attribute
+// (`data-test-pipeline-state="ALL"|"ARCHIVED"`) and carry the number in a
+// `[data-test-pipeline-profile-count]` child — so we read the digits from the
+// element selected by data-test, never from words like "Todos los candidatos /
+// All candidates" (which broke when the /talent seat flipped ES↔EN). The old
+// localized regexes survive only as a last-resort fallback for older DOM.
+// Returns { active, archived } (numbers or null).
+async function readPipelineCounts(page) {
+  return page.evaluate(() => {
+    const digits = (s) => {
+      const mm = String(s || "").match(/(\d[\d.,]*)/);
+      return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+    };
+    const byState = (state) => {
+      const tab = document.querySelector(
+        `[data-test-pipeline-state="${state}"], [data-live-test-pipeline-state="${state}"]`);
+      if (!tab) return null;
+      const cnt = tab.querySelector(
+        "[data-test-pipeline-profile-count], [data-live-test-pipeline-profile-count]");
+      return digits((cnt && cnt.textContent) || tab.textContent);
+    };
+    const bt = document.body.innerText || "";
+    const byLabel = (re) => { const mm = bt.match(re); return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null; };
+    let active = byState("ALL");
+    if (active == null) active = byLabel(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
+    if (active == null) active = byLabel(/([\d][\d.,]*)\s*(?:Candidatos guardados|saved candidates)/i);
+    let archived = byState("ARCHIVED");
+    if (archived == null) archived = byLabel(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i);
+    return { active, archived };
+  }).catch(() => ({ active: null, archived: null }));
+}
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -705,12 +738,8 @@ async function archiveRecruiterCandidate(page, options, orand, runtime) {
   const TARGET_SEL = "[data-sr-archive-target='1']";
   const maxPages = Math.max(1, options.maxPages || 5);
 
-  // "Candidatos archivados / Archived candidates N" — the verification counter.
-  const readArchivedCount = () => page.evaluate(() => {
-    const bt = document.body.innerText || "";
-    const mm = bt.match(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i);
-    return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
-  }).catch(() => null);
+  // The verification counter — read locale-independently from the ARCHIVED pipeline tab.
+  const readArchivedCount = () => readPipelineCounts(page).then((c) => c.archived);
 
   // Tag the target candidate's archive button. Each per-row archive control is
   // labelled "Archivar a <Name>, ya que…" / "Archive <Name>, because…" — i.e. the
@@ -1068,11 +1097,7 @@ async function addProfileToProject(page, options, orand, runtime) {
       await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
       await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
       await sleep(2500);
-      verified = await page.evaluate(() => {
-        const bt = document.body.innerText || "";
-        const mm = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
-        return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
-      }).catch(() => null);
+      verified = await readPipelineCounts(page).then((c) => c.active);
     }
     return { ok: true, bridged, saved: true, verified_active_count: verified, project_name: projectName };
   } catch (e) {
@@ -1178,11 +1203,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
     await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(1800 + Math.floor(orand() * 600));
-    const recipientCount = await page.evaluate(() => {
-      const bt = document.body.innerText || "";
-      const mm = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
-      return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
-    }).catch(() => null);
+    const recipientCount = await readPipelineCounts(page).then((c) => c.active);
     if (recipientCount === 0) return { ok: false, sent: false, recipient_count: 0, reason: "no_active_candidates" };
 
     // Capture the active candidates we're about to message (profile_url + name), so the
@@ -1387,23 +1408,18 @@ async function readRecruiterProject(page, options, orand, runtime) {
     await page.waitForSelector("[data-test-profile-list-view-list-row], .profile-list-item, [data-live-test-select-all]", { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await sleep(2500 + Math.floor(orand() * 800));
-    const data = await page.evaluate(() => {
-      const bt = document.body.innerText || "";
-      const num = (re) => { const mm = bt.match(re); return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null; };
+    const counts = await readPipelineCounts(page);
+    const names = await page.evaluate(() => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-      const names = [];
+      const out = [];
       for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
         const link = row.querySelector('a[href*="/talent/profile/"]');
         const n = clean(link && (link.innerText || link.textContent));
-        if (n) names.push(n);
+        if (n) out.push(n);
       }
-      return {
-        active: num(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i),
-        archived: num(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i),
-        names,
-      };
-    }).catch(() => ({ active: null, archived: null, names: [] }));
-    return { ok: true, manage_url: manageUrl, ...data };
+      return out;
+    }).catch(() => []);
+    return { ok: true, manage_url: manageUrl, active: counts.active, archived: counts.archived, names };
   } catch (e) {
     return { ok: false, reason: `error:${(e && e.message) || e}` };
   }
@@ -1428,14 +1444,7 @@ async function archiveAllInProject(page, options, orand, runtime) {
   const ARCHIVE_BTN = "[data-test-component='archive-profiles-btn'], [data-live-test-component='archive-profiles-btn']";
   const ROW_SEL = "[data-test-profile-list-view-list-row], .profile-list-item, li";
 
-  const readCounts = () => page.evaluate(() => {
-    const bt = document.body.innerText || "";
-    const num = (re) => { const mm = bt.match(re); return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null; };
-    return {
-      archived: num(/(?:Candidatos archivados|Archived candidates)\s*\n?\s*([\d][\d.,]*)/i),
-      total: num(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i),
-    };
-  }).catch(() => ({ archived: null, total: null }));
+  const readCounts = () => readPipelineCounts(page).then((c) => ({ archived: c.archived, total: c.active }));
 
   // Tag the FIRST per-row archive button + its row. Does NOT filter by visibility —
   // the .profile-item-actions buttons are display:none until the row is hovered, so
@@ -1598,14 +1607,9 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
       await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
       // The project's candidate counts load lazily — poll up to ~16s for the
       // "Todos los candidatos / All candidates N" total before snapshotting.
-      const readCount = () => page.evaluate(() => {
-        const bt = document.body.innerText || "";
-        const m1 = bt.match(/(?:Todos los candidatos|All candidates)\s*\n?\s*([\d][\d.,]*)/i);
-        if (m1) return parseInt(m1[1].replace(/[.,]/g, ""), 10);
-        // Fallback: the "N Candidatos guardados / N saved" spotlight.
-        const m2 = bt.match(/([\d][\d.,]*)\s*(?:Candidatos guardados|saved candidates)/i);
-        return m2 ? parseInt(m2[1].replace(/[.,]/g, ""), 10) : null;
-      }).catch(() => null);
+      // Locale-independent: ALL pipeline-tab count, with the "N saved candidates"
+      // spotlight folded in as a fallback inside readPipelineCounts.
+      const readCount = () => readPipelineCounts(page).then((c) => c.active);
       for (let i = 0; i < 8; i++) {
         await sleep(2000);
         verifiedInProject = await readCount();

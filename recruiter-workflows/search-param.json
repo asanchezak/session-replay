@@ -28,10 +28,6 @@
         {
           "type": "css",
           "value": "textarea.copilot-chat-input__textbox"
-        },
-        {
-          "type": "accessibility",
-          "value": "Send your request"
         }
       ],
       "value": "Buscar candidatos para: {{position}}\n"
