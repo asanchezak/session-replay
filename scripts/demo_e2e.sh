@@ -103,7 +103,7 @@ RID=$(run_wf "$READ_WF" "{\"project_url\":\"$PROJECT_URL\"}"); wait_run "$RID" "
 
 echo "==> 3/4 Templated message (send=$([ "$SEND" = 1 ] && echo true || echo false))"
 RID=$(curl -s -X POST "$BASE/recruiter/jobs/$JOB_ID/send-messages" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d "$(python3 -c "import json,os;print(json.dumps({'subject':os.environ['MSG_SUBJECT'],'body':os.environ['MSG_BODY'],'send':os.environ['SEND']=='1'}))")" | jqpy 'd.get("run_id")')
+  -d "$(python3 -c "import json,os;print(json.dumps(dict(subject=os.environ['MSG_SUBJECT'],body=os.environ['MSG_BODY'],send=os.environ['SEND']=='1')))")" | jqpy 'd.get("run_id")')
 if [ -n "$RID" ]; then
   wait_run "$RID" "message"; result "$RID" message_compose_result
   echo "   Snapshot (recipient + composed message):"

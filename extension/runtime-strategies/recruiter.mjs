@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-msg-archive-project-7";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-11-msg-archive-project-8";
 
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
@@ -1100,7 +1100,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   if (!body) return { ok: false, sent: false, reason: "missing_body" };
   const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
   const EDITOR = "[data-test-compose-body] .ql-editor[contenteditable='true'], .ql-editor[contenteditable='true']";
-  const SEND_BTN = "[data-test-compose-actions] button[aria-label*='Send this message' i], [data-test-compose-actions] button[aria-label*='Enviar este mensaje' i], button[aria-label*='Send this message' i], button[aria-label*='Enviar este mensaje' i]";
+  const SEND_BTN = "button[data-test-messaging-submit-btn], button[data-live-test-messaging-submit-btn], button[aria-label*='Send this message' i], button[aria-label*='Enviar este mensaje' i]";
   let lastVarDiag = null;
 
   const clickSel = async (sel) => {
