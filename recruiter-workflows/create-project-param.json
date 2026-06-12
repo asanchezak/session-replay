@@ -24,7 +24,6 @@
     {
       "action_type": "type",
       "intent": "Project name (= -EZ + position)",
-      "value": "-EZ {{position}}",
       "selector_chain": [
         {
           "type": "css",
@@ -34,12 +33,12 @@
           "type": "accessibility",
           "value": "Project name"
         }
-      ]
+      ],
+      "value": "-EZ {{position}}"
     },
     {
       "action_type": "type",
       "intent": "Project description (= Odoo job description)",
-      "value": "{{job_description}}",
       "selector_chain": [
         {
           "type": "css",
@@ -49,7 +48,8 @@
           "type": "accessibility",
           "value": "Descripción del proyecto"
         }
-      ]
+      ],
+      "value": "{{job_description}}"
     },
     {
       "action_type": "scroll",

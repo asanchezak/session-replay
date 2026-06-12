@@ -3,16 +3,68 @@
   "description": "PARAMETERIZED AI-Copilot search for the Odoo→Recruiter pipeline. Step 5 types 'Buscar candidatos para: {{position}}' into textarea.copilot-chat-input__textbox + submit (\\n) → AI builds & runs the search → extract candidate cards (recruiter_search_people → name + /talent/profile/ URL + headline). backend create_run substitutes runtime_params.position. The AI Copilot is the recording's real search entry (steps 13-15) — far more reliable than the advanced facets. Param: position.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
-    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
-    {"action_type":"navigate","intent":"Search (AI copilot lives here)","value":"https://www.linkedin.com/talent/search"},
-    {"action_type":"scroll","intent":"load 1"},
-    {"action_type":"scroll","intent":"load 2"},
-    {"action_type":"type","intent":"AI request (= position) + submit","value":"Buscar candidatos para: {{position}}\n","selector_chain":[{"type":"css","value":"textarea.copilot-chat-input__textbox"},{"type":"accessibility","value":"Send your request"}]},
-    {"action_type":"scroll","intent":"AI builds search 1"},
-    {"action_type":"scroll","intent":"AI builds search 2"},
-    {"action_type":"scroll","intent":"AI builds search 3"},
-    {"action_type":"scroll","intent":"AI builds search 4"},
-    {"action_type":"scroll","intent":"results settle 5"},
-    {"action_type":"extract","intent":"Extract candidate cards","methods":[{"kind":"extract_strategy","strategy":"recruiter_search_people"}]}
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Search (AI copilot lives here)",
+      "value": "https://www.linkedin.com/talent/search"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 2"
+    },
+    {
+      "action_type": "type",
+      "intent": "AI request (= position) + submit",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "textarea.copilot-chat-input__textbox"
+        },
+        {
+          "type": "accessibility",
+          "value": "Send your request"
+        }
+      ],
+      "value": "Buscar candidatos para: {{position}}\n"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "AI builds search 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "AI builds search 2"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "AI builds search 3"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "AI builds search 4"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "results settle 5"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Extract candidate cards",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_search_people"
+        }
+      ]
+    }
   ]
 }

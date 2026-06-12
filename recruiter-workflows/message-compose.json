@@ -3,8 +3,31 @@
   "description": "Selects a project's ACTIVE candidates, opens the bulk InMail composer, clears the AI draft, and types the template {{body}} — replacing each literal {Nombre} token with the LinkedIn variable CHIP (via 'Insert variables'/'Insertar variables'). Sets the subject (handles the subject-reveal quirk). If send=false (default) it STOPS so the per-step snapshot proves recipients + message; if send=true it clicks Send (REAL InMail). Params: project_url, body, subject, send.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
-    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
-    {"action_type":"scroll","intent":"settle 1"},
-    {"action_type":"extract","intent":"Compose the templated message (gated)","methods":[{"kind":"extract_strategy","strategy":"recruiter_message_compose"},{"kind":"recruiter_message_compose","project_url":"{{project_url}}","body":"{{body}}","subject":"{{subject}}","send":"{{send}}"}]}
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle 1"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Compose the templated message (gated)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_message_compose"
+        },
+        {
+          "kind": "recruiter_message_compose",
+          "project_url": "{{project_url}}",
+          "body": "{{body}}",
+          "subject": "{{subject}}",
+          "send": "{{send}}"
+        }
+      ]
+    }
   ]
 }

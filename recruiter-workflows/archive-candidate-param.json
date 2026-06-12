@@ -3,9 +3,35 @@
   "description": "Remove ONE candidate from a project pipeline (Recruiter has no hard-delete → archive). Daemon-only recruiter_archive_candidate strategy: navigates the project's /manage/all (derived from {{project_url}}), locates the candidate by NAME (paginating if needed), clicks the per-row archive button (handles an overflow menu + a confirm modal), then VERIFIES the candidate is no longer in the active pipeline. Params: project_url, candidate_name (optionally profile_url). Fired by POST /v1/recruiter/leads/remove when an Odoo linkedin.lead is deleted; on verified removal the backend deletes the Odoo lead (/akcr/api/lead_removed). The verify gate makes an unconfirmed run safe (lead stays pending, re-runnable).",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
-    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
-    {"action_type":"scroll","intent":"settle 1"},
-    {"action_type":"scroll","intent":"settle 2"},
-    {"action_type":"extract","intent":"Archive the target candidate from the project and verify removal","methods":[{"kind":"extract_strategy","strategy":"recruiter_archive_candidate"},{"kind":"recruiter_archive_candidate","project_url":"{{project_url}}","candidate_name":"{{candidate_name}}","profile_url":"{{profile_url}}","max_pages":5}]}
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Archive the target candidate from the project and verify removal",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_archive_candidate"
+        },
+        {
+          "kind": "recruiter_archive_candidate",
+          "project_url": "{{project_url}}",
+          "candidate_name": "{{candidate_name}}",
+          "profile_url": "{{profile_url}}",
+          "max_pages": 5
+        }
+      ]
+    }
   ]
 }
