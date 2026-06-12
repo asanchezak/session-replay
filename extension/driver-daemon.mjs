@@ -296,9 +296,14 @@ async function findPendingRun() {
     return true;
   });
   if (watched.length === 0) return null;
-  // Oldest first (FIFO). The list endpoint orders created_at DESC, so sort
-  // ascending here and take the head.
+  // Priority first (origin.priority, default 0 — higher wins), then FIFO by created_at
+  // within a priority. Interactive pipeline/message runs stamp +10; bulk cleanup
+  // (deferred-removal archives) stamp −10, so a flood of removals can't starve an
+  // interactive run on this single-seat daemon.
   watched.sort((a, b) => {
+    const pa = (a.origin && a.origin.priority) || 0;
+    const pb = (b.origin && b.origin.priority) || 0;
+    if (pb !== pa) return pb - pa;
     const ta = a.created_at ? Date.parse(a.created_at) : 0;
     const tb = b.created_at ? Date.parse(b.created_at) : 0;
     return ta - tb;
@@ -1737,14 +1742,28 @@ async function driveRun(run) {
             }
             if (acted) { actedTarget = target; break; }
           }
+          // A step flagged `checkpoint:true` is CRITICAL — if it doesn't act or its
+          // success_condition fails, HARD-FAIL the run (visible + relaunchable) instead
+          // of the default soft-miss/advance. This catches silent breakage like the
+          // locale regression (a facet that never opened → empty search "completed").
+          // Non-checkpoint steps keep the soft-miss policy (protects the other ~130 wfs).
+          let critFail = null;
           if (!acted) {
-            console.log(`  step ${idx}: ${action} — no selector resolved (soft-miss, advancing)`);
+            if (step.checkpoint) critFail = "no selector resolved";
+            else console.log(`  step ${idx}: ${action} — no selector resolved (soft-miss, advancing)`);
           } else if (step.success_condition) {
-            // Verify the recorded success condition via the SHARED predicate
-            // (same logic as replay.ts). Soft: log on mismatch, still advance —
-            // a step-result success:false would fail the whole run.
             const verdict = await checkSuccessConditionDaemon(page, step, actedTarget);
-            if (!verdict.ok) console.log(`  step ${idx}: ${action} success_condition not met (${verdict.reason}) — soft, advancing`);
+            if (!verdict.ok) {
+              if (step.checkpoint) critFail = `success_condition unmet (${verdict.reason})`;
+              else console.log(`  step ${idx}: ${action} success_condition not met (${verdict.reason}) — soft, advancing`);
+            }
+          }
+          if (critFail) {
+            console.error(`  step ${idx}: ${action} CRITICAL — ${critFail} → failing run`);
+            await captureDebug(page, runId, idx, `critical step failed: ${critFail}`, consoleBuf).catch(() => {});
+            await failRun(runId, `step ${idx} '${step.intent || action}' failed: ${critFail}`);
+            blocked = true;
+            break;
           }
           await reportStepResult(runId, idx, action);
         } else {

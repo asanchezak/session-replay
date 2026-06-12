@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-countonly-archivedetect-13";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-phaseD-daemon-14";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute

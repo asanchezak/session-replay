@@ -58,7 +58,9 @@ def main():
         if only and not wid.startswith(only) and only != entry["spec"]:
             continue
         spec = json.load(open(os.path.join(WF_DIR, entry["spec"])))
-        steps = [{f: s.get(f) for f in STEP_FIELDS} for s in spec["steps"]]
+        # `checkpoint` is a strict bool server-side (no null) — coerce absent → False.
+        steps = [{f: (bool(s.get(f)) if f == "checkpoint" else s.get(f)) for f in STEP_FIELDS}
+                 for s in spec["steps"]]
         print(f"{entry['spec']} -> {wid}  ({len(steps)} steps){'  [dry-run]' if dry else ''}")
         if dry:
             continue

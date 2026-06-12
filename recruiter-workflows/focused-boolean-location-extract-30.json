@@ -41,7 +41,8 @@
       "success_condition": {
         "type": "selector_exists",
         "selector": "textarea[data-test-free-text-single-value-facet-textarea]"
-      }
+      },
+      "checkpoint": true
     },
     {
       "action_type": "scroll",
@@ -86,7 +87,8 @@
       "success_condition": {
         "type": "selector_exists",
         "selector": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
-      }
+      },
+      "checkpoint": true
     },
     {
       "action_type": "scroll",
