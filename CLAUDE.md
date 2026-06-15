@@ -61,12 +61,15 @@ immediate scan since the timer is module-level) — so it ships by `scp`, NO res
   multiple contracts → it lands on `/talent/contract-chooser`; click the Recruiter contract
   `button[data-test-contract-select][data-live-test-contract-select*="Morsoft" i]` (NOT the "Job
   Posting" one) to proceed. `/talent/messages` 404s — don't use it.
-- **Reply signal (locale-proof):** per `[data-test-conversation-card-container]`, an UNREAD
-  conversation (`[data-test-unread-badge]` present) = a new inbound message = they replied.
-  Name is `[data-test-participant-name]`; the thread key is the `data-test-conversation-urn` attr.
-  `data-test-latest-reply-status` is a reply-state badge ("Aceptado"), NOT a direction flag, and
-  snippet text has no "Tú:" prefix — so unread-badge is the signal. NEVER open a thread (marks it
-  read, erasing the human's cue). Cards expose NO `/talent/profile/` link → match by NAME.
+- **Reply signal — TWO (the unread-badge-only approach FAILED):** (1) cards
+  `[data-test-conversation-card-container]` with `[data-test-unread-badge]` (older unread); (2) the
+  AUTO-OPENED thread — **LinkedIn force-opens the most-recent conversation on inbox navigation**
+  (even `/talent/inbox/0/main` redirects to `/id/<thread>`), sending a read receipt → the freshest
+  reply loses its badge, so detect via the open thread's LAST `[data-test-message-list-item]` →
+  `[data-test-message-sender-name]` NOT being the seat owner (`SEAT_OWNER_MATCH="Benavides"`) =
+  inbound. Name `[data-test-participant-name]`; cards expose NO `/talent/profile/` link → match by
+  NAME. `data-test-latest-reply-status` is a state badge ("Aceptado"), not a direction flag.
+  Tradeoff: the force-open marks the most-recent thread read each scan (unavoidable).
 - **Backend:** `POST /v1/recruiter/inbox-replies {replies:[{name, profile_url?}]}` →
   `record_inbox_replies` (resolves the recruiter connector from the latest pipeline run) →
   `push_inbox_replies` → akcr `POST /akcr/api/lead_replied`. Passive (no ExecutionRun). akcr matches
