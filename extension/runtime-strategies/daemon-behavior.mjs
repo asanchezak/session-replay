@@ -29,11 +29,17 @@ export const BEHAVIOR_VERSION = "2026-06-15-behavior-4-reply-scan";
 // reusing the ONE warm tab. NEVER opens a thread (that would mark it read and erase
 // the human recruiter's unread cues). Matched by participant NAME — the inbox cards
 // expose no /talent/profile/ link — so akcr matches name among 'messaged' leads.
-const INBOX_URL = "https://www.linkedin.com/talent/inbox";
+// Land on the inbox FOLDER (list) without an /id/<thread> — navigating to bare
+// /talent/inbox auto-opens the most-recent conversation, which sends a READ receipt
+// (marks the freshest reply read → scanner misses it AND mutates the human's inbox).
+const INBOX_URL = "https://www.linkedin.com/talent/inbox/0/main";
 // The seat has multiple contracts → /talent/inbox lands on a contract-chooser. Pick
 // the Recruiter contract (NOT the "Job Posting" one). Matched locale-proof by the
 // account-specific contract name in data-live-test-contract-select.
 const CONTRACT_MATCH = "Morsoft";
+// The seat owner's name — a message whose sender is NOT this is INBOUND (a candidate
+// reply). Substring match, robust to "María Fernanda Benavides" variants.
+const SEAT_OWNER_MATCH = "Benavides";
 // Scan cadence (tunable by scp — module-level, resets on hot-reload so re-syncing
 // this file forces an immediate scan on the next warm tick).
 const REPLY_SCAN_MS = 45 * 60_000;
@@ -62,33 +68,44 @@ async function gotoInbox(page, h) {
   return !/contract-chooser/i.test(page.url());
 }
 
-// Read-only scan: collect participants of UNREAD conversations (a new inbound msg =
-// they replied) and POST to the backend. Returns the count reported.
+// Read-only scan: collect candidates who REPLIED and POST to the backend. Two signals:
+//  (1) conversation cards with an UNREAD badge (a new inbound msg we haven't opened);
+//  (2) the auto-opened (most-recent) thread — LinkedIn force-opens it on navigation
+//      (clearing its unread badge), so detect inbound by its LAST message's sender NOT
+//      being the seat owner. Together these catch the freshest reply + any older unread.
 async function scanInboxReplies(page, api) {
   const h = api.helpers;
   const reached = await gotoInbox(page, h);
   if (!reached) { console.log("[reply-scan] could not reach inbox (contract chooser?)"); return 0; }
-  const replies = await page.evaluate(() => {
+  await h.sleep(1500);
+  const replies = await page.evaluate((SEAT_OWNER) => {
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
     const out = []; const seen = new Set();
-    for (const card of Array.from(document.querySelectorAll("[data-test-conversation-card-container]"))) {
-      // Only UNREAD conversations = a new inbound message from the candidate.
+    const add = (name, urn, via) => {
+      name = clean(name);
+      if (!name || name.includes(SEAT_OWNER) || seen.has(name)) return;
+      seen.add(name); out.push({ name, conversation_urn: urn || "", via });
+    };
+    // (1) Unread conversation cards.
+    for (const card of document.querySelectorAll("[data-test-conversation-card-container]")) {
       if (!card.querySelector("[data-test-unread-badge]")) continue;
-      const name = clean(card.querySelector("[data-test-participant-name]")?.textContent);
-      const urn = card.getAttribute("data-test-conversation-urn") || "";
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      out.push({ name, conversation_urn: urn });
+      add(card.querySelector("[data-test-participant-name]")?.textContent,
+          card.getAttribute("data-test-conversation-urn"), "unread");
     }
+    // (2) Auto-opened thread: last message inbound (sender != seat owner) = a reply.
+    const items = document.querySelectorAll("[data-test-message-list-item]");
+    const last = items[items.length - 1];
+    const lastSender = clean(last?.querySelector("[data-test-message-sender-name]")?.textContent);
+    if (lastSender && !lastSender.includes(SEAT_OWNER)) add(lastSender, "", "open-thread");
     return out;
-  }).catch(() => []);
-  if (!replies.length) { console.log("[reply-scan] no unread replies"); return 0; }
+  }, SEAT_OWNER_MATCH).catch(() => []);
+  if (!replies.length) { console.log("[reply-scan] no replies"); return 0; }
   try {
     const res = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/inbox-replies`, {
       method: "POST",
       body: JSON.stringify({ replies }),
     });
-    console.log(`[reply-scan] reported ${replies.length} unread reply(ies) → ${JSON.stringify(res).slice(0, 220)}`);
+    console.log(`[reply-scan] reported ${replies.length} reply(ies) ${JSON.stringify(replies.map(r => r.name + ":" + r.via))} → ${JSON.stringify(res).slice(0, 200)}`);
   } catch (e) {
     console.log(`[reply-scan] POST failed: ${(e && e.message) || e}`);
   }
