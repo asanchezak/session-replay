@@ -50,6 +50,31 @@ verifies via the ACTIVE-count delta (NOT a per-url match — that under-counts a
 and one bounded retry on shortfall. `recruiter_recommendations` event_kind → `_after_recommendations`
 reuses `push_recruiter_leads`. See [[project_recruiter_demo_e2e]].
 
+### Reply-scanner — inbox replies → Odoo lead `responded` (2026-06-15)
+
+Closes the outreach loop: when a candidate REPLIES in the Recruiter inbox, mark the Odoo
+`linkedin.lead` `outreach_status='responded'`. It's a **passive, read-only** scan that lives
+in the daemon's hot-loaded `keepAliveTick` (`extension/runtime-strategies/daemon-behavior.mjs`,
+`scanInboxReplies`) on a slow cadence (`REPLY_SCAN_MS`=45m; re-syncing the file forces an
+immediate scan since the timer is module-level) — so it ships by `scp`, NO restart.
+- **Inbox surface (capture-verified):** `https://www.linkedin.com/talent/inbox`. The seat has
+  multiple contracts → it lands on `/talent/contract-chooser`; click the Recruiter contract
+  `button[data-test-contract-select][data-live-test-contract-select*="Morsoft" i]` (NOT the "Job
+  Posting" one) to proceed. `/talent/messages` 404s — don't use it.
+- **Reply signal (locale-proof):** per `[data-test-conversation-card-container]`, an UNREAD
+  conversation (`[data-test-unread-badge]` present) = a new inbound message = they replied.
+  Name is `[data-test-participant-name]`; the thread key is the `data-test-conversation-urn` attr.
+  `data-test-latest-reply-status` is a reply-state badge ("Aceptado"), NOT a direction flag, and
+  snippet text has no "Tú:" prefix — so unread-badge is the signal. NEVER open a thread (marks it
+  read, erasing the human's cue). Cards expose NO `/talent/profile/` link → match by NAME.
+- **Backend:** `POST /v1/recruiter/inbox-replies {replies:[{name, profile_url?}]}` →
+  `record_inbox_replies` (resolves the recruiter connector from the latest pipeline run) →
+  `push_inbox_replies` → akcr `POST /akcr/api/lead_replied`. Passive (no ExecutionRun). akcr matches
+  by profile_url, falls back to NAME among `messaged` leads, logs an INBOUND `linkedin.lead.message`
+  → `_sync_lead_status` flips to `responded`. Idempotent (skips a lead with an existing inbound msg).
+  No model change (`'responded'` already exists). akcr route ships via akodoo
+  `feat/recruiter-search-link` PR **#1821** → qaodoo (needs `-u akcr`). See [[project_daemon_hot_behavior]].
+
 ### Source of truth, tooling & ops (2026-06-12 → 06-15)
 
 - **Workflows are versioned in `recruiter-workflows/`** (not just the AWS DB). `registry.json`
