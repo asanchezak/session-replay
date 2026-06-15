@@ -514,6 +514,7 @@ export default function RunDetailPage() {
   // execution_service._AUTONOMOUS_EVENT_KINDS.
   const AUTONOMOUS_EVENT_KINDS = [
     "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
+    "recruiter_archive", "recruiter_recommendations", "recruiter_preview_count",
     "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
   ];
   const liveRunRef = useRef<{ target?: string; status?: string; eventKind?: string } | null>(null);

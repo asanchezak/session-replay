@@ -32,7 +32,7 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 # dashboard tab navigates/closes. Identified by the run's origin.event_kind.
 _AUTONOMOUS_EVENT_KINDS = frozenset({
     "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
-    "recruiter_archive",
+    "recruiter_archive", "recruiter_recommendations", "recruiter_preview_count",
     "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
 })
 
