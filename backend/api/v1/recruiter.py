@@ -93,6 +93,24 @@ async def send_messages(
     return {"status": "queued", "job_id": job_id, "run_id": run_id}
 
 
+@router.post("/jobs/{job_id}/save-recommendations")
+async def save_recommendations(
+    job_id: str,
+    count: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    """Add the job's project RECOMMENDED matches (LinkedIn Automated Sourcing → Recommended
+    matches) to the pipeline — top `count` (default 10). Fires a daemon run; the terminal
+    hook pushes the added candidates to Odoo as linkedin.lead. Skips if the job has no project."""
+    svc = RecruiterPipelineService(db)
+    run_id = await svc.save_recommendations(job_id, count=count)
+    await db.commit()
+    if not run_id:
+        return {"status": "skipped", "job_id": job_id,
+                "reason": "no project for this job or recommendations workflow unset"}
+    return {"status": "queued", "job_id": job_id, "run_id": run_id, "count": count}
+
+
 @router.get("/jobs/{job_id}/pipeline")
 async def pipeline_status(
     job_id: str,

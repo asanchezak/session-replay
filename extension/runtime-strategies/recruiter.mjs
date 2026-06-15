@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-12-phaseD-daemon-14";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-save-recommendations-15";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -101,6 +101,17 @@ function readArchiveAllOptions(step) {
   };
 }
 
+function readSaveRecommendationsOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_save_recommendations",
+  ) || {};
+  return {
+    projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
+    targetCount: readPositiveInt(method.target_count ?? method.count, 10),
+  };
+}
+
 function readReadProjectOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
   const method = methods.find(
@@ -151,6 +162,7 @@ export function handlesStrategy(strategy) {
     || strategy === "recruiter_save_results_to_project"
     || strategy === "recruiter_archive_candidate"
     || strategy === "recruiter_archive_all_in_project"
+    || strategy === "recruiter_save_recommendations"
     || strategy === "recruiter_read_project"
     || strategy === "recruiter_add_profile"
     || strategy === "recruiter_message_compose"
@@ -226,6 +238,17 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       extraction: { archive_all_result: r },
       log: `recruiter_archive_all_in_project ok=${r.ok} archived_before=${r.archived_before} archived_after=${r.archived_after} archived_count=${r.archived_count} active_after=${r.active_after} more_remaining=${r.more_remaining} reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_save_recommendations") {
+    const r = await saveRecommendations(page, readSaveRecommendationsOptions(step), orand, runtime);
+    return {
+      handled: true,
+      // `people` at the extraction top level lets the backend push these as linkedin.lead
+      // via the SAME path as search→save (RecruiterPushService._collect_recruiter_leads).
+      extraction: { save_recommendations_result: r, people: r.people || [] },
+      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved}/${r.requested} active ${r.active_before}->${r.active_after} reason="${r.reason || ""}"`,
     };
   }
 
@@ -1592,6 +1615,126 @@ async function archiveAllInProject(page, options, orand, runtime) {
     };
   } catch (e) {
     return { ok: false, archived_before: null, archived_after: null, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Add a project's RECOMMENDED candidates (LinkedIn "Automated Sourcing" → Recommended
+// matches, at /discover/automatedSourcing/review) to the pipeline. Each recommendation row
+// carries a hover-gated "Save to first stage" button (data-test-save-to-first-stage, inside
+// .profile-item-actions) that moves the candidate into the pipeline. Mirrors the proven
+// archive-all per-row pattern: pick the first UNprocessed row, collect its name+profile_url,
+// hover to reveal the action, click it, mark the row done, repeat up to target_count. Verify
+// by the project's ACTIVE pipeline count rising (read locale-independently). Returns
+// { ok, requested, saved, active_before/after, review_url, people:[{name,profile_url}] } —
+// `people` lets the backend push them as linkedin.lead (same path as search→save).
+async function saveRecommendations(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, reason: "missing_project_id" };
+  const projectId = m[1];
+  const reviewUrl = `https://www.linkedin.com/talent/hire/${projectId}/discover/automatedSourcing/review`;
+  const manageUrl = `https://www.linkedin.com/talent/hire/${projectId}/manage/all`;
+  const target = Math.max(1, readPositiveInt(options.targetCount, 10));
+  const ROW = "[data-test-paginated-profile-list-item-container], [data-test-profile-list-view-list-row]";
+  const SAVE_BTN = "[data-test-save-to-first-stage], [data-live-test-save-to-first-stage]";
+
+  const clickSel = async (sel) => {
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  // Tag the FIRST not-yet-processed recommendation row + its Save button, and capture the
+  // candidate identity in the same pass (the row may change after saving). Marks the row
+  // done so the next call advances. Buttons are display:none until hover, so we don't filter
+  // by visibility here (the caller hovers the tagged row).
+  const tagNext = () => page.evaluate(({ rowSel, btnSel }) => {
+    document.querySelectorAll("[data-sr-rec-t]").forEach((e) => e.removeAttribute("data-sr-rec-t"));
+    document.querySelectorAll("[data-sr-rec-r]").forEach((e) => e.removeAttribute("data-sr-rec-r"));
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const canon = (href) => { const mm = (href || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+    const rows = Array.from(document.querySelectorAll(rowSel))
+      .filter((r) => !r.hasAttribute("data-sr-rec-done") && r.querySelector(btnSel) && r.querySelector('a[href*="/talent/profile/"]'));
+    if (!rows.length) return { found: false, remaining: 0 };
+    const row = rows[0];
+    const btn = row.querySelector(btnSel);
+    const link = row.querySelector("a[data-test-link-to-profile-link], a[data-live-test-link-to-profile-link], a[href*='/talent/profile/']");
+    row.setAttribute("data-sr-rec-r", "1");
+    row.setAttribute("data-sr-rec-done", "1");  // commit: processed once
+    btn.setAttribute("data-sr-rec-t", "1");
+    row.scrollIntoView({ block: "center" });
+    return { found: true, remaining: rows.length,
+             name: clean(link && (link.innerText || link.textContent)),
+             profile_url: canon(link && link.getAttribute("href")) };
+  }, { rowSel: ROW, btnSel: SAVE_BTN }).catch(() => ({ found: false }));
+
+  const BUDGET_MS = 175000;
+  const t0 = Date.now();
+  try {
+    // Baseline ACTIVE pipeline count (locale-independent).
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 500));
+    const activeBefore = (await readPipelineCounts(page)).active;
+
+    // Recommended-matches review surface.
+    await page.goto(reviewUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector(`[data-live-test-candidates-container], ${ROW}`, { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(2500 + Math.floor(orand() * 800));
+
+    const people = [];
+    let reason = null;
+    for (let i = 0; i < target && Date.now() - t0 < BUDGET_MS - 15000; i++) {
+      const next = await tagNext();
+      if (!next.found) { reason = i === 0 ? "no_recommendations" : "exhausted"; break; }
+      // Hover the row to reveal the Save action, then click it.
+      await page.hover("[data-sr-rec-r]").catch(() => {});
+      await sleep(380 + Math.floor(orand() * 260));
+      let clicked = false;
+      if (resolveLocatorWithWait && clickResolved) {
+        const t = await resolveLocatorWithWait(page, [{ type: "css", value: "[data-sr-rec-t]" }], { timeoutMs: 6000 });
+        if (t) { try { clicked = await clickResolved(page, t, { moveMouseAlongBezier, orand }); } finally { await t.handle?.dispose?.().catch(() => {}); } }
+      }
+      if (!clicked) clicked = await clickSel("[data-sr-rec-t]");
+      await sleep(1400 + Math.floor(orand() * 600));  // save applies (moves to pipeline)
+      if (clicked && next.profile_url) people.push({ name: next.name, profile_url: next.profile_url });
+      // Scroll a touch to keep lazy rows loading as we consume the list.
+      await page.mouse.wheel(0, 200 + Math.floor(orand() * 200)).catch(() => {});
+      await sleep(250 + Math.floor(orand() * 250));
+    }
+
+    // Verify by the project's ACTIVE pipeline count rising.
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(2000 + Math.floor(orand() * 600));
+    const activeAfter = (await readPipelineCounts(page)).active;
+    const ok = people.length > 0 && (activeBefore == null || activeAfter == null || activeAfter >= activeBefore);
+    return {
+      ok,
+      requested: target,
+      saved: people.length,
+      active_before: activeBefore,
+      active_after: activeAfter,
+      review_url: reviewUrl,
+      manage_url: manageUrl,
+      people,  // {name, profile_url} — backend pushes these as linkedin.lead
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, reason: `error:${(e && e.message) || e}` };
   }
 }
 

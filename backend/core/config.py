@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # Archive a whole project (testing tool). Triggered on-demand (run-with-params),
     # not by the autonomous pipeline. Env: RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID.
     recruiter_archive_project_workflow_id: str = ""
+    # Add a project's RECOMMENDED matches (LinkedIn Automated Sourcing) to the pipeline.
+    # Triggered via POST /v1/recruiter/jobs/{id}/save-recommendations; the terminal hook
+    # pushes the added candidates as linkedin.lead. Env: RECRUITER_RECOMMENDATIONS_WORKFLOW_ID.
+    recruiter_recommendations_workflow_id: str = ""
     # Location facet for the advanced search. The focused boolean+location search
     # workflow needs a location to commit reliably (the location facet + explicit
     # "Run search" click is what actually executes the query; boolean-only Enter-

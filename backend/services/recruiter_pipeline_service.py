@@ -41,8 +41,10 @@ EVENT_SEARCH = "recruiter_search"
 EVENT_SAVE = "recruiter_save"
 EVENT_MESSAGE = "recruiter_message"
 EVENT_ARCHIVE = "recruiter_archive"
+EVENT_RECOMMENDATIONS = "recruiter_recommendations"
 PIPELINE_EVENT_KINDS = {
     EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
+    EVENT_RECOMMENDATIONS,
 }
 
 _NON_TERMINAL = (
@@ -220,7 +222,23 @@ class RecruiterPipelineService:
             return await self._after_message(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_ARCHIVE:
             return await self._after_archive(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_RECOMMENDATIONS:
+            return await self._after_recommendations(run, pipeline, connector_id, job_id)
         return {"skipped": "unknown_event_kind", "event_kind": event_kind}
+
+    async def _after_recommendations(self, run, pipeline, connector_id, job_id) -> dict:
+        """Terminal hook: the recommended matches were added to the LinkedIn project —
+        push them to Odoo as linkedin.lead (the strategy posted them under `people`, so
+        the SAME collector as search→save ingests them)."""
+        lead_res = await self.push.push_recruiter_leads(
+            run_id=run.id, job_id=job_id, connector_id=connector_id
+        )
+        logger.info(
+            "recruiter pipeline: recommendations for job %s → pushed %s lead(s)",
+            job_id, lead_res.get("pushed"),
+        )
+        return {"stage": "recommendations", "done": True,
+                "pushed": lead_res.get("pushed"), "leads": len(lead_res.get("leads") or [])}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
         # Requirement C: push the new project URL to hr.job.recruiter_project_url.
@@ -701,6 +719,39 @@ class RecruiterPipelineService:
         )
         return str(run.id)
 
+    async def save_recommendations(self, job_id, *, count: int = 10) -> str | None:
+        """Add the job's project RECOMMENDED matches (Automated Sourcing) to the pipeline.
+        Resolves the project from prior runs, fires ONE daemon run of the recommendations
+        workflow (target_count=count); the terminal hook pushes the added candidates as
+        linkedin.lead. Returns the run id, or None if no project/workflow."""
+        wf = settings.recruiter_recommendations_workflow_id
+        if not wf:
+            logger.warning("recruiter pipeline: recruiter_recommendations_workflow_id unset — skip")
+            return None
+        ctx = await self._gather_job_context(job_id)
+        project_url = ctx.get("project_url")
+        connector_id = ctx.get("connector_id")
+        if not project_url and ctx.get("project_id"):
+            project_url = f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
+        if not project_url:
+            logger.warning("recruiter pipeline: no project for job %s — can't save recommendations", job_id)
+            return None
+        m = _PROJECT_URL_RE.search(project_url)
+        pipeline = {
+            "job_id": str(job_id),
+            "connector_id": str(connector_id) if connector_id else None,
+            "project_id": m.group(1) if m else ctx.get("project_id"),
+            "project_url": project_url,
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=wf, event_kind=EVENT_RECOMMENDATIONS,
+            runtime_params={"project_url": project_url, "target_count": str(max(1, int(count)))},
+            pipeline=pipeline, connector_id=connector_id,
+        )
+        logger.info("recruiter pipeline: started recommendations run %s for job %s (count=%s)",
+                    run.id, job_id, count)
+        return str(run.id)
+
     # --------------------------------------------------------------- status / preview
     async def pipeline_status(self, job_id) -> dict:
         """Read-only summary of a job's pipeline: the chained runs + the boolean,
@@ -772,6 +823,9 @@ class RecruiterPipelineService:
             "connector_id": str(connector_id) if connector_id else None,
             "event_kind": "recruiter_preview_count",  # NOT a pipeline kind → advance() skips (no save)
             "execution_target": "daemon",
+            # MUST carry execution_mode (from the snapshot) or the daemon misroutes the
+            # run to the generic AI-supervised path instead of the literal recruiter steps.
+            "execution_mode": (run.workflow_snapshot or {}).get("workflow", {}).get("execution_mode"),
             "execution_options": {"use_profile": True, "snapshot": False},
             "operator_id": settings.linkedin_operator,
             "target_operator": settings.linkedin_operator,
