@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-recs-quality-verify-16";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-recs-verify-delta-17";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -1696,12 +1696,6 @@ async function saveRecommendations(page, options, orand, runtime) {
     return { found: false };
   }, { rowSel: ROW, btnSel: SAVE_BTN, reqOTW: requireOpenToWork, doneUrls: alreadyUrls }).catch(() => ({ found: false }));
 
-  // Read the canonical profile_urls currently in the project's pipeline (manage/all).
-  const readPipelineUrls = () => page.evaluate(() => {
-    const c = (href) => { const mm = (href || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
-    return Array.from(document.querySelectorAll('a[href*="/talent/profile/"]')).map((a) => c(a.getAttribute("href"))).filter(Boolean);
-  }).catch(() => []);
-
   const BUDGET_MS = 175000;
   const t0 = Date.now();
   const collected = new Map();  // canonical url -> {name, headline, profile_url, open_to_work}
@@ -1735,16 +1729,18 @@ async function saveRecommendations(page, options, orand, runtime) {
     return reason;
   };
 
-  // Cross-check the collected candidates against the live pipeline → confirmed set.
-  const verify = async () => {
+  // Read the project's ACTIVE pipeline count (locale-independent). The count DELTA vs the
+  // baseline is the reliable "how many actually landed" signal — a per-profile-url
+  // cross-check against /manage/all is unreliable here (recommendation urns don't always
+  // match the pipeline rows + the list paginates), and driving retries off it over-adds.
+  const readActive = async () => {
     await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(2000 + Math.floor(orand() * 600));
-    const active = (await readPipelineCounts(page)).active;
-    const present = new Set(await readPipelineUrls());
-    const confirmed = [...collected.keys()].filter((u) => present.has(u));
-    return { active, confirmed };
+    return (await readPipelineCounts(page)).active;
   };
+  const addedSince = (before, after, fallback) =>
+    (before != null && after != null) ? Math.max(0, after - before) : fallback;
 
   try {
     // Baseline ACTIVE count.
@@ -1754,24 +1750,28 @@ async function saveRecommendations(page, options, orand, runtime) {
     const activeBefore = (await readPipelineCounts(page)).active;
 
     let reason = await doPass(target);
-    let { active: activeAfter, confirmed } = await verify();
+    let activeAfter = await readActive();
+    let added = addedSince(activeBefore, activeAfter, collected.size);
 
-    // RETRY (one bounded extra pass): if fewer than `target` are confirmed in the pipeline
-    // (a click didn't persist), re-run over the recommendations for the shortfall — failed
-    // candidates are still in the list (saved ones leave it), so this re-attempts them.
-    if (confirmed.length < target && reason !== "no_recommendations" && Date.now() - t0 < BUDGET_MS - 30000) {
-      reason = await doPass(target - confirmed.length);
-      ({ active: activeAfter, confirmed } = await verify());
+    // RETRY (one bounded extra pass) ONLY if the pipeline grew by fewer than `target`
+    // (some clicks didn't persist) — failed candidates are still in the recommendations
+    // list, so this re-attempts them. Triggered off the reliable count delta, not the
+    // fragile url match, so it can't over-add.
+    if (added < target && reason !== "no_recommendations" && Date.now() - t0 < BUDGET_MS - 30000) {
+      reason = await doPass(target - added);
+      activeAfter = await readActive();
+      added = addedSince(activeBefore, activeAfter, collected.size);
     }
 
     const people = [...collected.values()];
-    const ok = confirmed.length > 0;
-    if (!reason && confirmed.length < people.length) reason = "some_unconfirmed";
+    const confirmed = added;  // candidates actually added to the pipeline (count delta)
+    const ok = confirmed > 0 || people.length > 0;
+    if (!reason && confirmed < people.length) reason = "some_clicks_unconfirmed";
     return {
       ok,
       requested: target,
       saved: people.length,            // clicks that appeared to succeed
-      confirmed: confirmed.length,     // actually present in the pipeline (clicked ≠ persisted)
+      confirmed,                       // candidates actually added (pipeline count delta)
       require_open_to_work: requireOpenToWork,
       active_before: activeBefore,
       active_after: activeAfter,
