@@ -33,8 +33,41 @@ Daemon session ops and restart gotchas: **`docs/recruiter-daemon-ops.md`**.
 | Read | Read a project's counts (read-only) | DONE ✓ | read-project-counts.json / `b5e3d433` |
 | Msg-compose | Templated bulk InMail ({firstName} chip, gated send) | DONE ✓ (live-verified, real send) | message-compose.json / `c46c296f` |
 | Archive-proj | Archive a whole PROJECT (testing) | DONE ✓ (live-verified) | archive-project.json / `752753a9` |
+| Recommendations | Add a project's RECOMMENDED matches (Automated Sourcing) → pipeline + Odoo leads | DONE ✓ (live-verified) | save-recommendations.json / `77bc4e98` |
 | 6 | Single message | CAPTURED | (build-only) |
 | 9 | Public `/in/` profile bridge | DONE ✓ | via save-to-project |
+
+### THIRD flow — add a project's RECOMMENDED matches (2026-06-15)
+
+Besides the auto-pipeline (job publish) and the manual boolean search, a third flow adds a
+project's LinkedIn **Recommended matches** (Automated Sourcing) to the pipeline + pushes them
+to Odoo as `linkedin.lead`. Trigger: **`POST /v1/recruiter/jobs/{id}/save-recommendations?count=N&open_to_work=true`**
+(or the akcr hr.job button **"Agregar recomendados"**, akodoo `feat/recruiter-search-link`).
+The recommendations surface is **`/talent/hire/<id>/discover/automatedSourcing/review`** (NOT
+`/recommendedMatches`, which redirects); per-row hover-gated **`[data-test-save-to-first-stage]`**
+adds to the pipeline. Strategy `recruiter_save_recommendations` captures name+headline+open_to_work,
+verifies via the ACTIVE-count delta (NOT a per-url match — that under-counts and over-adds),
+and one bounded retry on shortfall. `recruiter_recommendations` event_kind → `_after_recommendations`
+reuses `push_recruiter_leads`. See [[project_recruiter_demo_e2e]].
+
+### Source of truth, tooling & ops (2026-06-12 → 06-15)
+
+- **Workflows are versioned in `recruiter-workflows/`** (not just the AWS DB). `registry.json`
+  maps spec↔workflow_id↔env-var; `scripts/export_recruiter_workflows.py` (DB→spec, `--check`
+  fails on drift) + `scripts/deploy_recruiter_workflows.py` (spec→DB via PUT /steps). Edit a
+  spec → deploy → export to confirm. RUN `--check` after any out-of-band workflow edit.
+- **Demo orchestrator is `scripts/demo_e2e.py`** (demo_e2e.sh is a shim) — loops archive-all
+  to empty, refuses to send unless active==1. `scripts/recruiter_cleanup.py` (--free-slot /
+  --archive-projects). `demo_odoo_reset_add_andrey.py` hard-deletes via `akcr_removal_confirmed`.
+- **New backend endpoints:** `GET /v1/recruiter/jobs/{id}/pipeline` (chained-run summary +
+  boolean + counts), `POST …/preview-count?tightness=N` (cheap count-only search),
+  `POST …/save-recommendations`. AI now decides boolean strictness (`recommended_tightness`,
+  floor = `RECRUITER_SEARCH_START_TIGHTNESS`=4 on box). Daemon claims by `origin.priority`
+  (pipeline/msg +10, deferred-removal −10) then FIFO; a step `checkpoint:true` HARD-FAILS the
+  run (loud, vs silent soft-miss) — set on the search facet-open steps. Locale-proof: prefer
+  `data-test-*`, never ES/EN words (the seat language flips). [[project_recruiter_search_locale_regression]]
+- **Host scheduled task `recruiter-snapshot-prune`** keeps only the newest 15 snapshot run-dirs
+  (every 10 min). [[project_fernanda_host_ops]]
 
 ### Recruiter ↔ Odoo integration — E2E VERIFIED ✅ (2026-06-09)
 

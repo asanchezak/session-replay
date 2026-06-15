@@ -93,6 +93,15 @@ La sesión SSH **no hereda PATH de Node** → usar ruta completa
 ssh linkedin-bot@100.107.206.110 "powershell -NoProfile -Command \"Enable-ScheduledTask -TaskName 'linkedin-bot-daemon'; Start-ScheduledTask -TaskName 'linkedin-bot-daemon'\""
 ```
 
+- Task: **`recruiter-snapshot-prune`** (2026-06-15) — corre
+  `C:\Users\Public\extension\prune-recruiter-snapshots.ps1` (repo:
+  `scripts/prune-recruiter-snapshots.ps1`) **cada 10 min** (S4U), dejando solo los **15
+  run-dirs más nuevos** bajo `recruiter-snapshots\` y borrando el resto (se acumulaban; se
+  encontraron 206). Independiente del daemon — no requiere reinicio. Forzar/ver:
+```bash
+ssh linkedin-bot@100.107.206.110 "powershell -NoProfile -Command \"Start-ScheduledTask -TaskName 'recruiter-snapshot-prune'; (Get-ScheduledTaskInfo -TaskName 'recruiter-snapshot-prune').LastTaskResult\""
+```
+
 ---
 
 ## 4. Operaciones comunes
