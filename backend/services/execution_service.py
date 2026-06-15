@@ -121,6 +121,9 @@ class ExecutionService:
                     "value": s.value,
                     "methods": s.methods,
                     "success_condition": s.success_condition,
+                    # Critical-step flag: the daemon HARD-FAILS the run if a checkpoint
+                    # step doesn't act / its success_condition fails (vs soft-miss).
+                    "checkpoint": s.checkpoint,
                     "dom_context": s.dom_context,
                     # Phase 5: selector stability from EMA learning (None = no history yet)
                     "selector_stability_score": s.selector_stability_score,

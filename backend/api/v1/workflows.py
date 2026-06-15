@@ -62,6 +62,7 @@ class AddStepRequest(BaseModel):
     value: str | None = None
     methods: list[dict[str, Any]] | None = None
     success_condition: dict[str, Any] | None = None
+    checkpoint: bool = False
     dom_context: dict[str, Any] | None = None
 
 
@@ -763,6 +764,7 @@ async def add_step(
         value=req.value,
         methods=methods_data,
         success_condition=req.success_condition,
+        checkpoint=req.checkpoint,
         dom_context=req.dom_context,
     )
     return {
