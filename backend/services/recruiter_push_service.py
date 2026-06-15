@@ -258,6 +258,45 @@ class RecruiterPushService:
             logger.exception("outreach push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
 
+    async def push_inbox_replies(self, *, connector_id, replied: list[dict] | list[str],
+                                 run_id=None) -> dict:
+        """Inbox-reply scan: a candidate REPLIED to our outreach → log an INBOUND
+        linkedin.lead.message (status=responded) so Odoo flips the lead to
+        outreach_status='responded' (via _sync_lead_status). No job_id needed — the
+        inbox scan sees a conversation, not a position; akcr matches by profile_url
+        (or name among messaged leads). Idempotent on the akcr side.
+
+        `replied` is a list of /talent/profile/ URLs, or dicts {profile_url?, name?}.
+        """
+        if not replied:
+            return {"pushed": 0, "skipped": "no_replied"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        replies = []
+        for m in replied:
+            if isinstance(m, str):
+                replies.append({"profile_url": _canonical_url(m)})
+            elif isinstance(m, dict):
+                url = m.get("profile_url") or m.get("url")
+                entry = {**m}
+                if url:
+                    entry["profile_url"] = _canonical_url(url)
+                # keep name-only entries — akcr falls back to name matching
+                if entry.get("profile_url") or entry.get("name"):
+                    replies.append(entry)
+        if not replies:
+            return {"pushed": 0, "skipped": "no_valid_replies"}
+        payload = {"source_run_id": str(run_id) if run_id else None, "replies": replies}
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/lead_replied", payload)
+            logger.info("inbox-reply push: sent %d replies odoo=%s", len(replies), res)
+            return {"pushed": len(replies), **res}
+        except Exception:
+            logger.exception("inbox-reply push: POST failed")
+            return {"pushed": 0, "error": True}
+
     # ------------------------------------------------------- boolean search read/push
     async def read_search_result(self, run_id) -> dict:
         """Read a search run's extraction → {url, total_count, leads}. total_count is

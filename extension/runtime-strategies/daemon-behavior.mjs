@@ -19,7 +19,81 @@
 // polls + heartbeats + logs loudly — until a good module is synced. So a broken
 // `scp` safely pauses work instead of running stale/degraded.
 
-export const BEHAVIOR_VERSION = "2026-06-15-behavior-1";
+export const BEHAVIOR_VERSION = "2026-06-15-behavior-4-reply-scan";
+
+// ── Reply-scanner ──────────────────────────────────────────────────────────
+// Passive, read-only scan of the Recruiter messaging inbox: collect the candidates
+// who REPLIED (conversations carrying an UNREAD badge = a new inbound message) and
+// POST them to the backend, which flips the matching Odoo linkedin.lead to
+// outreach_status='responded'. Runs inside keepAliveTick on its own slow cadence,
+// reusing the ONE warm tab. NEVER opens a thread (that would mark it read and erase
+// the human recruiter's unread cues). Matched by participant NAME — the inbox cards
+// expose no /talent/profile/ link — so akcr matches name among 'messaged' leads.
+const INBOX_URL = "https://www.linkedin.com/talent/inbox";
+// The seat has multiple contracts → /talent/inbox lands on a contract-chooser. Pick
+// the Recruiter contract (NOT the "Job Posting" one). Matched locale-proof by the
+// account-specific contract name in data-live-test-contract-select.
+const CONTRACT_MATCH = "Morsoft";
+// Scan cadence (tunable by scp — module-level, resets on hot-reload so re-syncing
+// this file forces an immediate scan on the next warm tick).
+const REPLY_SCAN_MS = 45 * 60_000;
+let lastReplyScanAt = 0;
+
+// Navigate the warm tab to the Recruiter inbox, clicking through the contract-chooser
+// if it appears. Returns true if we believe we reached the inbox.
+async function gotoInbox(page, h) {
+  await page.goto(INBOX_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+  await h.sleep(2500);
+  if (/contract-chooser/i.test(page.url())) {
+    const sel = `button[data-test-contract-select][data-live-test-contract-select*="${CONTRACT_MATCH}" i]`;
+    const target = h.resolveLocatorWithWait
+      ? await h.resolveLocatorWithWait(page, [{ css: sel }], { timeoutMs: 8000 }).catch(() => null)
+      : null;
+    if (target && h.clickResolved) {
+      await h.clickResolved(page, target, { moveMouseAlongBezier: h.moveMouseAlongBezier, orand: Math.random });
+    } else {
+      await page.click(sel, { timeout: 8000 }).catch(() => {});
+    }
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await h.sleep(3000);
+    console.log(`[inbox] picked '${CONTRACT_MATCH}' contract → ${page.url()}`);
+  }
+  return !/contract-chooser/i.test(page.url());
+}
+
+// Read-only scan: collect participants of UNREAD conversations (a new inbound msg =
+// they replied) and POST to the backend. Returns the count reported.
+async function scanInboxReplies(page, api) {
+  const h = api.helpers;
+  const reached = await gotoInbox(page, h);
+  if (!reached) { console.log("[reply-scan] could not reach inbox (contract chooser?)"); return 0; }
+  const replies = await page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const out = []; const seen = new Set();
+    for (const card of Array.from(document.querySelectorAll("[data-test-conversation-card-container]"))) {
+      // Only UNREAD conversations = a new inbound message from the candidate.
+      if (!card.querySelector("[data-test-unread-badge]")) continue;
+      const name = clean(card.querySelector("[data-test-participant-name]")?.textContent);
+      const urn = card.getAttribute("data-test-conversation-urn") || "";
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push({ name, conversation_urn: urn });
+    }
+    return out;
+  }).catch(() => []);
+  if (!replies.length) { console.log("[reply-scan] no unread replies"); return 0; }
+  try {
+    const res = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/inbox-replies`, {
+      method: "POST",
+      body: JSON.stringify({ replies }),
+    });
+    console.log(`[reply-scan] reported ${replies.length} unread reply(ies) → ${JSON.stringify(res).slice(0, 220)}`);
+  } catch (e) {
+    console.log(`[reply-scan] POST failed: ${(e && e.message) || e}`);
+  }
+  return replies.length;
+}
 
 // ── pickPendingRun ───────────────────────────────────────────────────────────
 // Decide which queued/running/recovering run THIS daemon should claim next. The
@@ -133,6 +207,7 @@ export async function keepAliveTick(api) {
   const h = api.helpers;
   const cfg = api.config;
   let warm = null;
+  let repliesPosted = 0;
   try {
     const ctx = await api.state.getProfileContext();
     let warmPage = api.state.getWarmPage();
@@ -152,11 +227,21 @@ export async function keepAliveTick(api) {
     const walled = h.isBlockerUrl(url) || /\/uas\/login|login-cap/i.test(url);
     warm = !walled;
     if (walled) {
-      console.log(`[keepalive] /talent WALLED — Recruiter seat lapsed; needs a fresh login (login-talent.bat). Browser stays OPEN.`);
+      const title = await warmPage.title().catch(() => "");
+      const kind = /checkpoint|challenge|verif/i.test(url) ? "CHECKPOINT/CHALLENGE"
+        : /login|uas/i.test(url) ? "LOGIN" : "OTHER";
+      console.log(`[keepalive] /talent WALLED [${kind}] url=${url} title="${title}" — Recruiter seat lapsed. Browser stays OPEN.`);
     } else {
       await h.moveMouseAlongBezier(warmPage, { x: 400 + Math.random() * 400, y: 250 + Math.random() * 200 }, Math.random).catch(() => {});
       await h.humanScrollSeeded(warmPage, 1 + Math.floor(Math.random() * 2), Math.random).catch(() => {});
       console.log(`[keepalive] /talent OK — Recruiter seat warm (browser kept open)`);
+      // Reply-scan on its own slow cadence (reuses the warm tab; read-only). The next
+      // ping re-navigates to /talent/home, so leaving the tab on the inbox is fine.
+      if (Date.now() - lastReplyScanAt >= REPLY_SCAN_MS) {
+        lastReplyScanAt = Date.now();
+        try { repliesPosted = await scanInboxReplies(warmPage, api); }
+        catch (e) { console.log(`[reply-scan] error: ${(e && e.message) || e}`); }
+      }
     }
   } catch (e) {
     console.log(`[keepalive] ping error: ${(e && e.message) || e}`);
@@ -168,5 +253,5 @@ export async function keepAliveTick(api) {
   const nextDueMs = warm === false
     ? Date.now() + jit(cfg.RECRUITER_PING_WALLED_BACKOFF_MS, 60_000)
     : Date.now() + jit((cfg.RECRUITER_PING_MIN_MS + cfg.RECRUITER_PING_MAX_MS) / 2, (cfg.RECRUITER_PING_MAX_MS - cfg.RECRUITER_PING_MIN_MS) / 2);
-  return { warm, nextDueMs };
+  return { warm, nextDueMs, repliesPosted };
 }

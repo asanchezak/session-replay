@@ -24,6 +24,15 @@ class SendMessagesRequest(BaseModel):
     send: bool = False
 
 
+class InboxReply(BaseModel):
+    profile_url: str | None = None
+    name: str | None = None
+
+
+class InboxRepliesRequest(BaseModel):
+    replies: list[InboxReply] = []
+
+
 class RemoveCandidateRequest(BaseModel):
     job_id: str
     profile_url: str | None = None
@@ -91,6 +100,21 @@ async def send_messages(
             "reason": "no project or no saved candidates for this job",
         }
     return {"status": "queued", "job_id": job_id, "run_id": run_id}
+
+
+@router.post("/inbox-replies")
+async def inbox_replies(
+    req: InboxRepliesRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Passive reply-scan ingress: the daemon's keepAliveTick scrapes the Recruiter
+    inbox (read-only) and POSTs the candidates who replied to our outreach. For each,
+    push an inbound-message marker to Odoo so the linkedin.lead flips to
+    outreach_status='responded'. No run is created; idempotent on the Odoo side."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.record_inbox_replies([r.model_dump() for r in req.replies])
+    await db.commit()
+    return res
 
 
 @router.post("/jobs/{job_id}/save-recommendations")

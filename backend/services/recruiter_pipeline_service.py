@@ -594,6 +594,42 @@ class RecruiterPipelineService:
                     ctx["saved"].append({"profile_url": url})
         return ctx
 
+    async def _latest_recruiter_connector(self) -> str | None:
+        """The recruiter connector to push to when there's no run/job context (the
+        passive inbox-reply scan): the connector_id of the most recent pipeline run.
+        In practice there is exactly one recruiter connector."""
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") not in PIPELINE_EVENT_KINDS:
+                continue
+            p = o.get("pipeline") or {}
+            cid = p.get("connector_id") or o.get("connector_id")
+            if cid:
+                return str(cid)
+        return None
+
+    async def record_inbox_replies(self, replies: list[dict]) -> dict:
+        """Passive inbox-reply scan ingress: the daemon's keepAliveTick scrapes the
+        Recruiter inbox and POSTs candidates who replied to our outreach. Resolve the
+        recruiter connector and push an INBOUND-message marker to Odoo (→
+        outreach_status='responded' via _sync_lead_status). No ExecutionRun is created
+        (passive); akcr is idempotent so repeated scans are safe."""
+        replies = [
+            r for r in (replies or [])
+            if isinstance(r, dict) and (r.get("profile_url") or r.get("name"))
+        ]
+        if not replies:
+            return {"status": "skipped", "reason": "no_replies", "pushed": 0}
+        connector_id = await self._latest_recruiter_connector()
+        if not connector_id:
+            return {"status": "skipped", "reason": "no_recruiter_connector", "pushed": 0}
+        res = await self.push.push_inbox_replies(connector_id=connector_id, replied=replies)
+        logger.info("recruiter inbox-replies: %d candidates → %s", len(replies), res)
+        return {"status": "ok", "received": len(replies), **res}
+
     async def send_messages(self, job_id, subject: str | None = None,
                             body: str | None = None, send: bool = False) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
