@@ -241,7 +241,19 @@ See [[project_recruiter_archive_candidate]].
 - **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
 - **Anti-bot always on:** daemon runs (`execution_target=daemon`, `use_profile`) are UNCONDITIONALLY protected. No toggle. NEVER run via the raw extension.
 - **Strategy hot-reload** (no restart): edit `extension/runtime-strategies/recruiter.mjs` → `scp` to `linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/recruiter.mjs'`
-- **Daemon restart kills the `/talent` seat** and requires human re-login. Batch daemon-code changes; hot-reload strategy-only changes instead.
+- **Daemon BEHAVIOR hot-reload** (no restart, since 2026-06-15): run-claim/priority, the
+  generic click/type step + checkpoint hard-fail, and the keepalive ping now live in
+  hot-loaded `extension/runtime-strategies/daemon-behavior.mjs` (loaded by mtime each tick).
+  Change daemon behavior — incl. the future reply-scanner — by `scp`-ing JUST that file; the
+  host (`driver-daemon.mjs`) stays frozen. Strict fail-safe: a broken/missing/export-drifted
+  module makes the daemon poll+heartbeat only (`[behavior] module unavailable — NOT claiming`)
+  until a good file is synced. See [[project_daemon_hot_behavior]].
+- **Daemon restart kills the `/talent` seat** and requires human re-login (now RARELY needed —
+  only for `driver-daemon.mjs`/`src/` host changes, NOT behavior tweaks). Batch host changes.
+  After a restart: kill any **orphaned chrome** still holding the profile lock
+  (`...where CommandLine -like '*linkedin-profile*' | Stop-Process -Force`) or the new daemon
+  hits `Failed to create a ProcessSingleton`. Re-login by logging into the daemon's OWN open
+  Chrome window at the host (don't run `login-talent.bat` → 2nd Chrome re-hits the lock).
 - **Booleans from Odoo JDs only** — `scripts/boolean_from_odoo.py <id>` → never hand-craft.
 - **Creating a TEST position to drive the pipeline (qaodoo XML-RPC):** auth as
   `support@akurey.com` / `Akurey1234*` (uid=2, db `qaodoo`). The `hr.job` needs
@@ -290,14 +302,17 @@ Per change:
 - **Extension (`extension/`)** → rebuild pointed at AWS, then reload on each browser host:
   `VITE_API_BASE_URL=https://52-5-45-84.sslip.io/v1 VITE_API_KEY=<gateway-key> npm run build`
   → copy `dist/` to the host → reload unpacked.
-- **Daemon runtime strategy (`extension/runtime-strategies/recruiter.mjs`)** → sync only that file to
-  Fernanda's host and run the next `recruiter_*` workflow; the daemon hot-loads it by file mtime, so
-  no restart/re-login is needed:
-  `scp extension/runtime-strategies/recruiter.mjs linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/recruiter.mjs'`.
-- **Daemon bootstrap/shared code (`extension/driver-daemon.mjs` + `src/`)** → re-sync `extension/` to
+- **Daemon runtime strategy / behavior (`extension/runtime-strategies/{recruiter,daemon-behavior}.mjs`)**
+  → sync only that file to Fernanda's host; the daemon hot-loads it by file mtime, so no
+  restart/re-login is needed. `recruiter.mjs` = per-strategy steps; `daemon-behavior.mjs` =
+  run-claim/priority + generic click/type step + checkpoint hard-fail + keepalive (and the
+  future reply-scanner). `scp extension/runtime-strategies/<file>.mjs linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/<file>.mjs'`.
+- **Daemon bootstrap/HOST code (`extension/driver-daemon.mjs` + `src/`)** → re-sync `extension/` to
   Fernanda's host (`C:\Users\Public\extension`, see windows runbook) + restart `linkedin-bot-daemon`.
-  This kills the `/talent` seat and requires the human login flow. It already points at AWS via
-  `daemon-task.ps1` (`BACKEND`/`API_KEY`).
+  This kills the `/talent` seat and requires the human login flow — now RARELY needed since
+  volatile logic lives in the hot `daemon-behavior.mjs`. After restart, kill orphaned chrome on
+  the profile (ProcessSingleton) + re-login in the daemon's own Chrome window. It already points
+  at AWS via `daemon-task.ps1` (`BACKEND`/`API_KEY`).
 - **Frontend (`frontend/`)** → `frontend/.env` points at AWS; rebuild/serve.
 
 **NEVER `docker compose down -v`** on the box: the Postgres volume holds the only
