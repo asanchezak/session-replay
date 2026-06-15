@@ -97,13 +97,16 @@ async def send_messages(
 async def save_recommendations(
     job_id: str,
     count: int = 10,
+    open_to_work: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """Add the job's project RECOMMENDED matches (LinkedIn Automated Sourcing → Recommended
-    matches) to the pipeline — top `count` (default 10). Fires a daemon run; the terminal
-    hook pushes the added candidates to Odoo as linkedin.lead. Skips if the job has no project."""
+    matches) to the pipeline — top `count` (default 10). `open_to_work=true` only adds
+    candidates with the Open-to-work spotlight (quality filter; LinkedIn already ranks the
+    rest by match). Fires a daemon run; the terminal hook pushes the added candidates to Odoo
+    as linkedin.lead (with headline). Skips if the job has no project."""
     svc = RecruiterPipelineService(db)
-    run_id = await svc.save_recommendations(job_id, count=count)
+    run_id = await svc.save_recommendations(job_id, count=count, require_open_to_work=open_to_work)
     await db.commit()
     if not run_id:
         return {"status": "skipped", "job_id": job_id,

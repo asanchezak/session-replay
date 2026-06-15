@@ -23,7 +23,8 @@
         {
           "kind": "recruiter_save_recommendations",
           "project_url": "{{project_url}}",
-          "target_count": "{{target_count}}"
+          "target_count": "{{target_count}}",
+          "require_open_to_work": "{{require_open_to_work}}"
         }
       ]
     }

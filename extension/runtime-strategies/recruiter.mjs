@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-save-recommendations-15";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-recs-quality-verify-16";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -109,6 +109,7 @@ function readSaveRecommendationsOptions(step) {
   return {
     projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
     targetCount: readPositiveInt(method.target_count ?? method.count, 10),
+    requireOpenToWork: String(method.require_open_to_work ?? "").toLowerCase() === "true" || method.require_open_to_work === true,
   };
 }
 
@@ -248,7 +249,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       // `people` at the extraction top level lets the backend push these as linkedin.lead
       // via the SAME path as search→save (RecruiterPushService._collect_recruiter_leads).
       extraction: { save_recommendations_result: r, people: r.people || [] },
-      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved}/${r.requested} active ${r.active_before}->${r.active_after} reason="${r.reason || ""}"`,
+      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved} confirmed=${r.confirmed}/${r.requested} active ${r.active_before}->${r.active_after} reqOTW=${r.require_open_to_work} reason="${r.reason || ""}"`,
     };
   }
 
@@ -1621,12 +1622,16 @@ async function archiveAllInProject(page, options, orand, runtime) {
 // Add a project's RECOMMENDED candidates (LinkedIn "Automated Sourcing" → Recommended
 // matches, at /discover/automatedSourcing/review) to the pipeline. Each recommendation row
 // carries a hover-gated "Save to first stage" button (data-test-save-to-first-stage, inside
-// .profile-item-actions) that moves the candidate into the pipeline. Mirrors the proven
-// archive-all per-row pattern: pick the first UNprocessed row, collect its name+profile_url,
-// hover to reveal the action, click it, mark the row done, repeat up to target_count. Verify
-// by the project's ACTIVE pipeline count rising (read locale-independently). Returns
-// { ok, requested, saved, active_before/after, review_url, people:[{name,profile_url}] } —
-// `people` lets the backend push them as linkedin.lead (same path as search→save).
+// .profile-item-actions) that moves the candidate into the pipeline. Per-row pattern (like
+// archive-all): pick the first UNprocessed row, capture name+headline+profile_url+open_to_work,
+// hover to reveal the action, click it, mark the row done, repeat until `target` SAVED.
+// Quality: LinkedIn already ranks recommendations (top = best); `requireOpenToWork` (opt)
+// additionally skips candidates without the Open-to-work spotlight. Verification (clicked ≠
+// persisted): after saving, cross-check each collected profile_url against the project's
+// /manage/all candidate links → `confirmed`; one bounded RETRY pass re-attempts any shortfall.
+// Returns { ok, requested, saved, confirmed, active_before/after, require_open_to_work,
+// review_url, people:[{name,headline,profile_url,open_to_work}], reason } — `people` lets the
+// backend push them as linkedin.lead (same path as search→save).
 async function saveRecommendations(page, options, orand, runtime) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
@@ -1638,8 +1643,10 @@ async function saveRecommendations(page, options, orand, runtime) {
   const reviewUrl = `https://www.linkedin.com/talent/hire/${projectId}/discover/automatedSourcing/review`;
   const manageUrl = `https://www.linkedin.com/talent/hire/${projectId}/manage/all`;
   const target = Math.max(1, readPositiveInt(options.targetCount, 10));
+  const requireOpenToWork = !!options.requireOpenToWork;
   const ROW = "[data-test-paginated-profile-list-item-container], [data-test-profile-list-view-list-row]";
   const SAVE_BTN = "[data-test-save-to-first-stage], [data-live-test-save-to-first-stage]";
+  const canon = (u) => { const mm = (u || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
 
   const clickSel = async (sel) => {
     const pt = await page.evaluate((s) => {
@@ -1656,51 +1663,59 @@ async function saveRecommendations(page, options, orand, runtime) {
     return true;
   };
 
-  // Tag the FIRST not-yet-processed recommendation row + its Save button, and capture the
-  // candidate identity in the same pass (the row may change after saving). Marks the row
-  // done so the next call advances. Buttons are display:none until hover, so we don't filter
-  // by visibility here (the caller hovers the tagged row).
-  const tagNext = () => page.evaluate(({ rowSel, btnSel }) => {
+  // Tag the FIRST not-yet-processed recommendation row (skipping ones already collected by
+  // profile_url across passes, and — when requireOTW — ones without the Open-to-work
+  // spotlight). Captures name + headline (.artdeco-entity-lockup__subtitle) + profile_url +
+  // open_to_work in the same pass (the row changes after saving). Marks the row done.
+  const tagNext = (alreadyUrls) => page.evaluate(({ rowSel, btnSel, reqOTW, doneUrls }) => {
     document.querySelectorAll("[data-sr-rec-t]").forEach((e) => e.removeAttribute("data-sr-rec-t"));
     document.querySelectorAll("[data-sr-rec-r]").forEach((e) => e.removeAttribute("data-sr-rec-r"));
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const canon = (href) => { const mm = (href || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+    const canonJs = (href) => { const mm = (href || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+    // best-effort, bilingual spotlight (no stable data-test for it)
+    const isOpenToWork = (r) => /open to work|abierto a trabajar|disponible para trabajar/i.test(r.innerText || "");
+    const done = new Set(doneUrls || []);
     const rows = Array.from(document.querySelectorAll(rowSel))
       .filter((r) => !r.hasAttribute("data-sr-rec-done") && r.querySelector(btnSel) && r.querySelector('a[href*="/talent/profile/"]'));
-    if (!rows.length) return { found: false, remaining: 0 };
-    const row = rows[0];
-    const btn = row.querySelector(btnSel);
-    const link = row.querySelector("a[data-test-link-to-profile-link], a[data-live-test-link-to-profile-link], a[href*='/talent/profile/']");
-    row.setAttribute("data-sr-rec-r", "1");
-    row.setAttribute("data-sr-rec-done", "1");  // commit: processed once
-    btn.setAttribute("data-sr-rec-t", "1");
-    row.scrollIntoView({ block: "center" });
-    return { found: true, remaining: rows.length,
-             name: clean(link && (link.innerText || link.textContent)),
-             profile_url: canon(link && link.getAttribute("href")) };
-  }, { rowSel: ROW, btnSel: SAVE_BTN }).catch(() => ({ found: false }));
+    for (const row of rows) {
+      const link = row.querySelector("a[data-test-link-to-profile-link], a[data-live-test-link-to-profile-link], a[href*='/talent/profile/']");
+      const url = canonJs(link && link.getAttribute("href"));
+      if (done.has(url)) { row.setAttribute("data-sr-rec-done", "1"); continue; }  // collected on a prior pass
+      const otw = isOpenToWork(row);
+      if (reqOTW && !otw) { row.setAttribute("data-sr-rec-done", "1"); continue; }  // quality filter
+      const btn = row.querySelector(btnSel);
+      const sub = row.querySelector(".artdeco-entity-lockup__subtitle");
+      row.setAttribute("data-sr-rec-r", "1");
+      row.setAttribute("data-sr-rec-done", "1");
+      btn.setAttribute("data-sr-rec-t", "1");
+      row.scrollIntoView({ block: "center" });
+      return { found: true, name: clean(link && (link.innerText || link.textContent)),
+               headline: clean(sub && (sub.innerText || sub.textContent)),
+               profile_url: url, open_to_work: otw };
+    }
+    return { found: false };
+  }, { rowSel: ROW, btnSel: SAVE_BTN, reqOTW: requireOpenToWork, doneUrls: alreadyUrls }).catch(() => ({ found: false }));
+
+  // Read the canonical profile_urls currently in the project's pipeline (manage/all).
+  const readPipelineUrls = () => page.evaluate(() => {
+    const c = (href) => { const mm = (href || "").match(/\/talent\/profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+    return Array.from(document.querySelectorAll('a[href*="/talent/profile/"]')).map((a) => c(a.getAttribute("href"))).filter(Boolean);
+  }).catch(() => []);
 
   const BUDGET_MS = 175000;
   const t0 = Date.now();
-  try {
-    // Baseline ACTIVE pipeline count (locale-independent).
-    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
-    await sleep(1800 + Math.floor(orand() * 500));
-    const activeBefore = (await readPipelineCounts(page)).active;
+  const collected = new Map();  // canonical url -> {name, headline, profile_url, open_to_work}
 
-    // Recommended-matches review surface.
+  // One pass over the recommendations: save up to `need` candidates not yet collected.
+  const doPass = async (need) => {
     await page.goto(reviewUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForSelector(`[data-live-test-candidates-container], ${ROW}`, { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(2500 + Math.floor(orand() * 800));
-
-    const people = [];
-    let reason = null;
-    for (let i = 0; i < target && Date.now() - t0 < BUDGET_MS - 15000; i++) {
-      const next = await tagNext();
-      if (!next.found) { reason = i === 0 ? "no_recommendations" : "exhausted"; break; }
-      // Hover the row to reveal the Save action, then click it.
+    let saved = 0, reason = null;
+    while (saved < need && Date.now() - t0 < BUDGET_MS - 15000) {
+      const next = await tagNext([...collected.keys()]);
+      if (!next.found) { reason = collected.size === 0 ? "no_recommendations" : "exhausted"; break; }
       await page.hover("[data-sr-rec-r]").catch(() => {});
       await sleep(380 + Math.floor(orand() * 260));
       let clicked = false;
@@ -1710,27 +1725,59 @@ async function saveRecommendations(page, options, orand, runtime) {
       }
       if (!clicked) clicked = await clickSel("[data-sr-rec-t]");
       await sleep(1400 + Math.floor(orand() * 600));  // save applies (moves to pipeline)
-      if (clicked && next.profile_url) people.push({ name: next.name, profile_url: next.profile_url });
-      // Scroll a touch to keep lazy rows loading as we consume the list.
+      if (clicked && next.profile_url) {
+        collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, profile_url: next.profile_url, open_to_work: next.open_to_work });
+        saved++;
+      }
       await page.mouse.wheel(0, 200 + Math.floor(orand() * 200)).catch(() => {});
       await sleep(250 + Math.floor(orand() * 250));
     }
+    return reason;
+  };
 
-    // Verify by the project's ACTIVE pipeline count rising.
+  // Cross-check the collected candidates against the live pipeline → confirmed set.
+  const verify = async () => {
     await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(2000 + Math.floor(orand() * 600));
-    const activeAfter = (await readPipelineCounts(page)).active;
-    const ok = people.length > 0 && (activeBefore == null || activeAfter == null || activeAfter >= activeBefore);
+    const active = (await readPipelineCounts(page)).active;
+    const present = new Set(await readPipelineUrls());
+    const confirmed = [...collected.keys()].filter((u) => present.has(u));
+    return { active, confirmed };
+  };
+
+  try {
+    // Baseline ACTIVE count.
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 500));
+    const activeBefore = (await readPipelineCounts(page)).active;
+
+    let reason = await doPass(target);
+    let { active: activeAfter, confirmed } = await verify();
+
+    // RETRY (one bounded extra pass): if fewer than `target` are confirmed in the pipeline
+    // (a click didn't persist), re-run over the recommendations for the shortfall — failed
+    // candidates are still in the list (saved ones leave it), so this re-attempts them.
+    if (confirmed.length < target && reason !== "no_recommendations" && Date.now() - t0 < BUDGET_MS - 30000) {
+      reason = await doPass(target - confirmed.length);
+      ({ active: activeAfter, confirmed } = await verify());
+    }
+
+    const people = [...collected.values()];
+    const ok = confirmed.length > 0;
+    if (!reason && confirmed.length < people.length) reason = "some_unconfirmed";
     return {
       ok,
       requested: target,
-      saved: people.length,
+      saved: people.length,            // clicks that appeared to succeed
+      confirmed: confirmed.length,     // actually present in the pipeline (clicked ≠ persisted)
+      require_open_to_work: requireOpenToWork,
       active_before: activeBefore,
       active_after: activeAfter,
       review_url: reviewUrl,
       manage_url: manageUrl,
-      people,  // {name, profile_url} — backend pushes these as linkedin.lead
+      people,  // {name, headline, profile_url, open_to_work} — backend pushes as linkedin.lead
       ...(reason ? { reason } : {}),
     };
   } catch (e) {

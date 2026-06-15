@@ -719,7 +719,8 @@ class RecruiterPipelineService:
         )
         return str(run.id)
 
-    async def save_recommendations(self, job_id, *, count: int = 10) -> str | None:
+    async def save_recommendations(self, job_id, *, count: int = 10,
+                                   require_open_to_work: bool = False) -> str | None:
         """Add the job's project RECOMMENDED matches (Automated Sourcing) to the pipeline.
         Resolves the project from prior runs, fires ONE daemon run of the recommendations
         workflow (target_count=count); the terminal hook pushes the added candidates as
@@ -745,7 +746,8 @@ class RecruiterPipelineService:
         }
         run = await self._create_pipeline_run(
             workflow_id=wf, event_kind=EVENT_RECOMMENDATIONS,
-            runtime_params={"project_url": project_url, "target_count": str(max(1, int(count)))},
+            runtime_params={"project_url": project_url, "target_count": str(max(1, int(count))),
+                            "require_open_to_work": "true" if require_open_to_work else "false"},
             pipeline=pipeline, connector_id=connector_id,
         )
         logger.info("recruiter pipeline: started recommendations run %s for job %s (count=%s)",
