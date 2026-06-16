@@ -244,7 +244,8 @@ class RecruiterPipelineService:
         push them to Odoo as linkedin.lead (the strategy posted them under `people`, so
         the SAME collector as search→save ingests them)."""
         lead_res = await self.push.push_recruiter_leads(
-            run_id=run.id, job_id=job_id, connector_id=connector_id
+            run_id=run.id, job_id=job_id, connector_id=connector_id,
+            source="recommendation",
         )
         logger.info(
             "recruiter pipeline: recommendations for job %s → pushed %s lead(s)",
@@ -652,7 +653,8 @@ class RecruiterPipelineService:
             )
         # Requirement A: candidates → linkedin.lead.
         lead_res = await self.push.push_recruiter_leads(
-            run_id=run.id, job_id=job_id, connector_id=connector_id
+            run_id=run.id, job_id=job_id, connector_id=connector_id,
+            source="boolean_search",
         )
         candidates = lead_res.get("leads") or []
 

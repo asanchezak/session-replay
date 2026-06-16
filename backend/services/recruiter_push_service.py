@@ -181,12 +181,16 @@ class RecruiterPushService:
             return {"pushed": 0, "error": True}
 
     async def push_recruiter_leads(self, *, run_id, job_id, connector_id,
-                                   mode: str = "live") -> dict:
+                                   mode: str = "live", source: str = "") -> dict:
         """Requirement A: create linkedin.lead rows from the search run's candidates.
 
         Always returns the collected candidates under "leads" (even when the Odoo
         POST is skipped), so the orchestrator can still fan out save-to-project
         runs off them.
+
+        `source` tags how the candidates were sourced ("boolean_search" vs
+        "recommendation") — it's uniform per run, so it rides at the payload top level
+        and Odoo applies it to every lead in the batch.
         """
         leads = await self._collect_recruiter_leads(run_id)
         if not leads:
@@ -203,6 +207,7 @@ class RecruiterPushService:
             "job_id": job_id,
             "source_run_id": str(run_id),
             "mode": mode,
+            "source": source,
             "leads": leads,
         }
         try:
