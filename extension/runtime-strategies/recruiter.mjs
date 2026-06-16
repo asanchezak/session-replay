@@ -1530,6 +1530,10 @@ async function archiveAllInProject(page, options, orand, runtime) {
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
   const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
   const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  // QA visibility: this whole archive loop is ONE daemon step → without intermediate
+  // shots only the final state is captured. Push a screenshot when the list loads and
+  // after each candidate is archived (no-op default until the host exposes it).
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, archived_before: null, archived_after: null, reason: "missing_project_id" };
   const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
@@ -1581,6 +1585,7 @@ async function archiveAllInProject(page, options, orand, runtime) {
     const c0 = await readCounts();
     const archivedBefore = c0.archived;
     const activeStart = c0.total;
+    await shot(`archivar: lista cargada (${activeStart ?? "?"} activos)`).catch(() => {});
 
     // Archive one candidate per iteration → allow plenty (the 175s budget is the real
     // limiter). Floor at 40 so a small workflow max_rounds doesn't stop us early.
@@ -1622,6 +1627,7 @@ async function archiveAllInProject(page, options, orand, runtime) {
         archivedCount += (c2.archived - prevArchived);
         prevArchived = c2.archived;
         stale = 0;
+        await shot(`archivar: ${archivedCount} archivado(s), quedan ${c2.total ?? "?"} activos`).catch(() => {});
       } else {
         stale++;
         if (stale >= 2) { reason = "no_progress"; break; }
