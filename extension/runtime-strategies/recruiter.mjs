@@ -1176,6 +1176,10 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   const typeHumanLike = runtimeValue(runtime, "typeHumanLike", null);
   const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
   const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  // QA visibility: select→compose→send is ONE daemon step → capture the composer once
+  // open (with the recipients) and the message ready before send/preview (no-op default
+  // until the host exposes it).
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const body = String(options.body || "");
   const subject = String(options.subject || "").trim();
   const send = !!options.send;
@@ -1290,6 +1294,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
     }
     await page.waitForSelector(EDITOR, { timeout: 15000 }).catch(() => {});
     await sleep(1800 + Math.floor(orand() * 700));
+    await shot(`mensaje: composer abierto (${recipients.length} destinatario(s))`).catch(() => {});
 
     // Clear the AI-drafted body so only the template remains.
     await clickSel(EDITOR);
@@ -1327,6 +1332,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       }
     }
     await sleep(1200);
+    await shot(`mensaje: cuerpo+asunto listos (var_chip=${variableInserted})`).catch(() => {});
 
     if (!send) {
       await sleep(1500);  // settle for the per-step snapshot (gated preview)
@@ -1835,6 +1841,9 @@ async function saveRecommendations(page, options, orand, runtime) {
 async function saveRecruiterResultsToProject(page, options, orand, runtime) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  // QA visibility: the page-by-page select+save loop is ONE daemon step → capture each
+  // page saved + the final project verify (no-op default until the host exposes it).
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const projectName = String(options.projectName || "").trim();
   if (!projectName) return { ok: false, reason: "missing_project_name" };
   const limit = Math.max(1, options.targetCount || 1);
@@ -1862,6 +1871,7 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
     pageResults.push({ page: pg, selected: selected.length, ...dlg });
     if (!dlg.ok) break;  // dialog failed — stop, report what we saved so far
     savedAll.push(...selected);
+    await shot(`guardar: página ${pg + 1}, +${selected.length} (total ${savedAll.length})`).catch(() => {});
     if (savedAll.length >= limit) break;
     const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
     if (!wentNext) break;
@@ -1891,6 +1901,7 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
         if (verifiedInProject && verifiedInProject > 0) break;
       }
       await sleep(1500);  // settle before the per-step snapshot captures the page
+      await shot(`guardar: verificación proyecto (${verifiedInProject ?? "?"} candidatos)`).catch(() => {});
     } catch { /* verification nav is best-effort */ }
   }
 
