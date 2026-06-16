@@ -737,6 +737,11 @@ async function runRuntimeStrategy(strategy, { page, step, orand }) {
       typeHumanLike,
       viewportWidth: VIEWPORT_WIDTH,
       viewportHeight: VIEWPORT_HEIGHT,
+      // QA visibility: lets a hot-loaded strategy push intermediate per-step
+      // screenshots (e.g. "recommendations list open", "added candidate N") to
+      // the dashboard mid-loop, instead of only the daemon's one shot at the end.
+      // Bound to the live page + drivingRunId; no-op when STEP_SHOTS is off.
+      uploadStepShot: (label) => uploadStepShot(page, label),
     },
   });
 }

@@ -1637,6 +1637,11 @@ async function saveRecommendations(page, options, orand, runtime) {
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
   const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
   const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  // QA visibility: push intermediate screenshots to the dashboard so a human can SEE
+  // the recommendations list open + each candidate being added (the loop is one daemon
+  // step → otherwise only one shot at the end). No-op default when the host doesn't
+  // expose it (older driver) — safe to ship hot ahead of the host edit.
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, reason: "missing_project_id" };
   const projectId = m[1];
@@ -1706,6 +1711,7 @@ async function saveRecommendations(page, options, orand, runtime) {
     await page.waitForSelector(`[data-live-test-candidates-container], ${ROW}`, { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(2500 + Math.floor(orand() * 800));
+    await shot("recomendados: lista abierta").catch(() => {});  // visual: the review list is up
     let saved = 0, reason = null;
     while (saved < need && Date.now() - t0 < BUDGET_MS - 15000) {
       const next = await tagNext([...collected.keys()]);
@@ -1722,6 +1728,8 @@ async function saveRecommendations(page, options, orand, runtime) {
       if (clicked && next.profile_url) {
         collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, profile_url: next.profile_url, open_to_work: next.open_to_work });
         saved++;
+        // visual: who was just added (label carries the running count + the name)
+        await shot(`recomendados: +${collected.size} ${(next.name || "").slice(0, 40)}`).catch(() => {});
       }
       await page.mouse.wheel(0, 200 + Math.floor(orand() * 200)).catch(() => {});
       await sleep(250 + Math.floor(orand() * 250));
