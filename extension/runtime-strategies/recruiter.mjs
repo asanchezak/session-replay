@@ -1333,10 +1333,43 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       return { ok: true, sent: false, gated: true, recipient_count: recipientCount, recipients, variable_inserted: variableInserted, subject_set: subjectSet, var_diag: lastVarDiag, manage_url: manageUrl };
     }
 
-    // send=true → click the real Send.
-    const sent = await clickSel(SEND_BTN);
+    // send=true → VERIFY Send is actually enabled before clicking. LinkedIn DISABLES
+    // (greys out) the Send button when the recipient can't be contacted — most commonly
+    // the rate limit "cannot be contacted more than once within 24 hours … will not
+    // receive this message", or 0 InMail credits. A blind click on a disabled button is
+    // a NO-OP, so reporting sent=true there is a false positive (and wrongly marks Odoo
+    // messaged). Detect the disabled button + the warning banner and report the reason.
+    const block = await page.evaluate((sel) => {
+      const btn = document.querySelector(sel);
+      const cs = btn ? getComputedStyle(btn) : null;
+      const disabled = !btn || btn.disabled
+        || btn.matches("[disabled], [aria-disabled='true']")
+        || (cs && cs.pointerEvents === "none");
+      const t = (document.body.innerText || "").toLowerCase();
+      const rate = /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje|dentro de (las pr[óo]ximas )?24 horas/.test(t);
+      const noCred = /\b0\s*\/\s*\d+\s*inmail/i.test(document.body.innerText || "");
+      return { disabled: !!disabled, rate, noCred };
+    }, SEND_BTN).catch(() => ({ disabled: false, rate: false, noCred: false }));
+    if (block.rate || block.disabled) {
+      const reason = block.rate ? "rate_limited_24h"
+        : (block.noCred ? "no_inmail_credits" : "send_button_disabled");
+      return { ok: false, sent: false, blocked: true, reason,
+               recipient_count: recipientCount, recipients,
+               variable_inserted: variableInserted, subject_set: subjectSet, manage_url: manageUrl };
+    }
+
+    const clicked = await clickSel(SEND_BTN);
     await sleep(2500 + Math.floor(orand() * 1000));
-    return { ok: sent, sent, recipient_count: recipientCount, recipients, variable_inserted: variableInserted, subject_set: subjectSet };
+    // Post-send guard: if the rate-limit / "will not receive" banner is showing now, the
+    // click did NOT deliver — don't report a false send.
+    const postRate = await page.evaluate(() =>
+      /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje/
+        .test((document.body.innerText || "").toLowerCase())
+    ).catch(() => false);
+    const sent = clicked && !postRate;
+    return { ok: sent, sent, recipient_count: recipientCount, recipients,
+             variable_inserted: variableInserted, subject_set: subjectSet,
+             ...(sent ? {} : { blocked: true, reason: "rate_limited_24h" }) };
   } catch (e) {
     return { ok: false, sent: false, reason: `error:${(e && e.message) || e}` };
   }
