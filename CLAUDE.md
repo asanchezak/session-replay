@@ -83,6 +83,31 @@ immediate scan since the timer is module-level) — so it ships by `scp`, NO res
   tick and scans immediately when it's newer than its last scan (latency ~2-3 min). Button ships
   via PR **#1822** → qaodoo (`-u akcr`). Live-verified (backend+daemon).
 
+### Odoo "Demo" button + structured-JD search (2026-06-16)
+
+- **akcr hr.job button "Demo"** (`action_run_demo`, PR **#1823** → qaodoo, needs `-u akcr`):
+  one click = full demo. (1) resets the job's `linkedin.lead` rows to ONLY Andrey IN Odoo
+  (hard-delete via `akcr_removal_confirmed` + create the Andrey lead with the AEMAA
+  `/talent/profile/` URL so it matches the message-compose recipient), then (2) POSTs
+  **`POST /v1/recruiter/jobs/{id}/demo {send:true}`**. Confirm-gated; visible once
+  `recruiter_project_url` exists. ⚠️ real InMail (Andrey only).
+- **Backend `start_demo`** chains via the terminal hook (no polling): archive-all LOOPED until
+  empty (`recruiter_demo_archive`, re-enqueued on `more_remaining`, cap `recruiter_demo_archive_rounds`=6)
+  → add the demo profile (`recruiter_demo_add`) → `send_messages(send=true)` → existing
+  `_after_message` marks Odoo. Config (defaulted, no box env change): `recruiter_archive_all_workflow_id`
+  (`511ceaab`), `recruiter_add_profile_workflow_id` (`f003f090`), `recruiter_demo_profile_url`
+  (`/in/crandrey/`). Effect-idempotent (always ends with only Andrey messaged).
+- **Search now uses the FULL structured JD + the real location.** The AI boolean corpus already
+  consumed `description + job_requirements + nice_to_have_requirements + non_negotiable +
+  role_responsibilities` (so FILL those Odoo sections — "What you will be doing / looking for / a
+  plus"). NEW: the location facet derives from `hr.job.job_location` via `RECRUITER_LOCATION_MAP`
+  (`cr`→"Costa Rica", `latam`→"Latin America", `global`→skip facet; empty/unknown→
+  `RECRUITER_DEFAULT_LOCATION`). For `global` the backend PRUNES the location facet block from
+  the search run snapshot (`_strip_location_facet_steps`, anchored on `data-test-facet-geo-locations`
+  → `save-advanced-button`) → clean boolean-only search. Project description composed from all 3
+  sections. Demo job = **329** / project **1508074569**. All backend (deployed) + akcr (PR #1823).
+  See [[project_recruiter_demo_e2e]].
+
 ### Source of truth, tooling & ops (2026-06-12 → 06-15)
 
 - **Workflows are versioned in `recruiter-workflows/`** (not just the AWS DB). `registry.json`
