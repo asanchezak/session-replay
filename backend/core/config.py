@@ -51,6 +51,21 @@ class Settings(BaseSettings):
     # Triggered via POST /v1/recruiter/jobs/{id}/save-recommendations; the terminal hook
     # pushes the added candidates as linkedin.lead. Env: RECRUITER_RECOMMENDATIONS_WORKFLOW_ID.
     recruiter_recommendations_workflow_id: str = ""
+    # DEMO button (Odoo "Demo" on hr.job): reset the LinkedIn project to ONLY the demo
+    # profile (archive ALL → add the profile), then optionally send the templated InMail.
+    # Reuses the standalone archive-all / add-profile sub-workflows; defaulted to their
+    # deployed IDs so the demo works after a plain backend redeploy (no box env change).
+    # Env: RECRUITER_ARCHIVE_ALL_WORKFLOW_ID / RECRUITER_ADD_PROFILE_WORKFLOW_ID.
+    recruiter_archive_all_workflow_id: str = "511ceaab-34c2-4d8b-9241-725a61e1cc32"
+    recruiter_add_profile_workflow_id: str = "f003f090-d74a-41bc-90a9-67f5fd603a5d"
+    # The single profile the demo keeps (public /in/ URL; bridges to the Recruiter
+    # profile in a logged-in seat). Default = Andrey (your own profile) so the demo
+    # never messages a real candidate. Env: RECRUITER_DEMO_PROFILE_URL/_NAME.
+    recruiter_demo_profile_url: str = "https://www.linkedin.com/in/crandrey/"
+    recruiter_demo_profile_name: str = "Andrey Sanchez"
+    # Safety cap on the demo archive-all loop (each pass clears ~15-25 within its 175s
+    # budget; the loop re-enqueues while the project still has active candidates).
+    recruiter_demo_archive_rounds: int = 6
     # Location facet for the advanced search. The focused boolean+location search
     # workflow needs a location to commit reliably (the location facet + explicit
     # "Run search" click is what actually executes the query; boolean-only Enter-

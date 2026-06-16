@@ -352,6 +352,17 @@ class RecruiterPushService:
                 out = ar
         return out
 
+    async def read_archive_all_result(self, run_id) -> dict:
+        """Read an archive-ALL run's result. The recruiter_archive_all_in_project
+        strategy posts {archive_all_result: {...}} → {archived_count, active_after,
+        more_remaining, archived_before/after, reason}. Last non-empty wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            ar = rec.get("archive_all_result")
+            if isinstance(ar, dict):
+                out = ar
+        return out
+
     async def read_message_compose_result(self, run_id) -> dict:
         """Read a recruiter_message_compose run's result → {sent, recipients, ...}.
         recipients are the project's active candidates the strategy messaged

@@ -142,6 +142,33 @@ async def inbox_replies(
     return res
 
 
+@router.post("/jobs/{job_id}/demo")
+async def run_demo(
+    job_id: str,
+    req: SendMessagesRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Demo orchestration for the Odoo "Demo" button: reset the job's LinkedIn project
+    to ONLY the demo profile (archive ALL → add the profile), then — if req.send —
+    send the templated InMail to it. Chains via the terminal hook (archive-all looped
+    until empty → add-profile → message). The Odoo lead reset to that profile is done
+    in Odoo by the button itself before this call. Returns the first run id (queued),
+    or skips if the job has no project."""
+    svc = RecruiterPipelineService(db)
+    run_id = await svc.start_demo(
+        job_id,
+        send=(req.send if req else False),
+        subject=(req.subject if req else None),
+        body=(req.body if req else None),
+    )
+    await db.commit()
+    if not run_id:
+        return {"status": "skipped", "job_id": job_id,
+                "reason": "no project for this job or demo workflows unset"}
+    return {"status": "queued", "job_id": job_id, "run_id": run_id,
+            "send": (req.send if req else False)}
+
+
 @router.post("/jobs/{job_id}/save-recommendations")
 async def save_recommendations(
     job_id: str,

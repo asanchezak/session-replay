@@ -42,9 +42,13 @@ EVENT_SAVE = "recruiter_save"
 EVENT_MESSAGE = "recruiter_message"
 EVENT_ARCHIVE = "recruiter_archive"
 EVENT_RECOMMENDATIONS = "recruiter_recommendations"
+# DEMO button chain (Odoo "Demo"): reset the project to ONLY the demo profile, then
+# optionally message it. archive-all (looped) → add-profile → (send → recruiter_message).
+EVENT_DEMO_ARCHIVE = "recruiter_demo_archive"
+EVENT_DEMO_ADD = "recruiter_demo_add"
 PIPELINE_EVENT_KINDS = {
     EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
-    EVENT_RECOMMENDATIONS,
+    EVENT_RECOMMENDATIONS, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
 }
 
 _NON_TERMINAL = (
@@ -229,6 +233,10 @@ class RecruiterPipelineService:
             return await self._after_archive(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_RECOMMENDATIONS:
             return await self._after_recommendations(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_DEMO_ARCHIVE:
+            return await self._after_demo_archive(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_DEMO_ADD:
+            return await self._after_demo_add(run, pipeline, connector_id, job_id)
         return {"skipped": "unknown_event_kind", "event_kind": event_kind}
 
     async def _after_recommendations(self, run, pipeline, connector_id, job_id) -> dict:
@@ -244,6 +252,109 @@ class RecruiterPipelineService:
         )
         return {"stage": "recommendations", "done": True,
                 "pushed": lead_res.get("pushed"), "leads": len(lead_res.get("leads") or [])}
+
+    # ----------------------------------------------------------------- demo button
+    async def start_demo(self, job_id, *, send: bool = False,
+                         subject: str | None = None, body: str | None = None) -> str | None:
+        """Odoo "Demo" button orchestration: reset the job's LinkedIn project to ONLY
+        the demo profile, then optionally send the templated InMail. Chains entirely via
+        the terminal hook (no in-process polling): archive-all (LOOPED until the project
+        is empty) → add the demo profile → (send ? recruiter_message : stop). The Odoo
+        linkedin.lead reset to that profile is done IN Odoo by the akcr button BEFORE
+        this call, so no Odoo write-back happens here. Returns the first run id (or None
+        if the job has no project / the demo workflows are unset)."""
+        arch_wf = settings.recruiter_archive_all_workflow_id
+        add_wf = settings.recruiter_add_profile_workflow_id
+        if not arch_wf or not add_wf:
+            logger.warning("recruiter demo: archive-all/add-profile workflow id unset — skip")
+            return None
+        ctx = await self._gather_job_context(job_id)
+        project_id = ctx.get("project_id")
+        if not project_id:
+            logger.warning("recruiter demo: no project for job %s — skip", job_id)
+            return None
+        project_url = f"https://www.linkedin.com/talent/hire/{project_id}/manage/all"
+        pipeline = {
+            "job_id": str(job_id),
+            "connector_id": ctx.get("connector_id"),
+            "project_id": project_id,
+            "project_url": project_url,
+            "project_name": ctx.get("project_name"),
+            "profile_url": settings.recruiter_demo_profile_url,
+            "profile_name": settings.recruiter_demo_profile_name,
+            "send": bool(send),
+            "subject": (subject or DEFAULT_MESSAGE_SUBJECT).strip(),
+            "body": (body or DEFAULT_MESSAGE_BODY).strip(),
+            "archive_rounds": 0,
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=arch_wf, event_kind=EVENT_DEMO_ARCHIVE,
+            runtime_params={"project_url": project_url},
+            pipeline=pipeline, connector_id=ctx.get("connector_id"),
+        )
+        logger.info(
+            "recruiter demo: started archive-all run %s for job %s (send=%s)",
+            run.id, job_id, send,
+        )
+        return str(run.id)
+
+    async def _after_demo_archive(self, run, pipeline, connector_id, job_id) -> dict:
+        """Demo: an archive-all pass completed. Re-enqueue another pass while the
+        project still has ACTIVE candidates and we're under the round cap (archive-all
+        clears ~15-25 per 175s run); once empty (or capped), add the demo profile."""
+        res = await self.push.read_archive_all_result(run.id)
+        more = bool(res.get("more_remaining"))
+        active_after = res.get("active_after")
+        rounds = int(pipeline.get("archive_rounds") or 0) + 1
+        cap = settings.recruiter_demo_archive_rounds
+        if more and rounds < cap and (active_after is None or active_after > 0):
+            nxt = dict(pipeline)
+            nxt["archive_rounds"] = rounds
+            r = await self._create_pipeline_run(
+                workflow_id=settings.recruiter_archive_all_workflow_id,
+                event_kind=EVENT_DEMO_ARCHIVE,
+                runtime_params={"project_url": pipeline["project_url"]},
+                pipeline=nxt, connector_id=connector_id,
+            )
+            logger.info(
+                "recruiter demo: archive round %d (active_after=%s, more=%s) → another pass %s",
+                rounds, active_after, more, r.id,
+            )
+            return {"stage": "demo_archive", "round": rounds,
+                    "active_after": active_after, "next_run": str(r.id)}
+        add_run = await self._create_pipeline_run(
+            workflow_id=settings.recruiter_add_profile_workflow_id,
+            event_kind=EVENT_DEMO_ADD,
+            runtime_params={
+                "candidate_url": pipeline["profile_url"],
+                "project_name": pipeline.get("project_name") or "",
+                "project_url": pipeline["project_url"],
+            },
+            pipeline=pipeline, connector_id=connector_id,
+        )
+        logger.info(
+            "recruiter demo: project cleared (active_after=%s, rounds=%d) → add %s → run %s",
+            active_after, rounds, pipeline["profile_url"], add_run.id,
+        )
+        return {"stage": "demo_archive", "cleared": True, "rounds": rounds,
+                "next_run": str(add_run.id)}
+
+    async def _after_demo_add(self, run, pipeline, connector_id, job_id) -> dict:
+        """Demo: the demo profile was added to the (now empty) project. If send was
+        requested, fire the templated message run (send=true) — the existing
+        _after_message marks the Odoo lead messaged. Otherwise stop (preview-less)."""
+        if not pipeline.get("send"):
+            logger.info(
+                "recruiter demo: profile added for job %s — no send requested (done)", job_id
+            )
+            return {"stage": "demo_add", "done": True, "sent": False}
+        msg_run = await self.send_messages(
+            job_id, subject=pipeline.get("subject"), body=pipeline.get("body"), send=True,
+        )
+        logger.info(
+            "recruiter demo: profile added → message-send run %s (job %s)", msg_run, job_id
+        )
+        return {"stage": "demo_add", "next_run": msg_run, "sent": bool(msg_run)}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
         # Requirement C: push the new project URL to hr.job.recruiter_project_url.
