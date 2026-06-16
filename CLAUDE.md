@@ -77,6 +77,11 @@ immediate scan since the timer is module-level) — so it ships by `scp`, NO res
   → `_sync_lead_status` flips to `responded`. Idempotent (skips a lead with an existing inbound msg).
   No model change (`'responded'` already exists). akcr route ships via akodoo
   `feat/recruiter-search-link` PR **#1821** → qaodoo (needs `-u akcr`). See [[project_daemon_hot_behavior]].
+- **On-demand trigger (besides the 45m cadence):** akcr hr.job button **"Escanear respuestas"**
+  (`action_scan_linkedin_replies`) → `POST /v1/recruiter/request-inbox-scan` (sets an in-memory
+  flag); the daemon's `keepAliveTick` polls `GET /v1/recruiter/inbox-scan-requested` each warm
+  tick and scans immediately when it's newer than its last scan (latency ~2-3 min). Button ships
+  via PR **#1822** → qaodoo (`-u akcr`). Live-verified (backend+daemon).
 
 ### Source of truth, tooling & ops (2026-06-12 → 06-15)
 
