@@ -252,9 +252,18 @@ export async function keepAliveTick(api) {
       await h.moveMouseAlongBezier(warmPage, { x: 400 + Math.random() * 400, y: 250 + Math.random() * 200 }, Math.random).catch(() => {});
       await h.humanScrollSeeded(warmPage, 1 + Math.floor(Math.random() * 2), Math.random).catch(() => {});
       console.log(`[keepalive] /talent OK — Recruiter seat warm (browser kept open)`);
-      // Reply-scan on its own slow cadence (reuses the warm tab; read-only). The next
-      // ping re-navigates to /talent/home, so leaving the tab on the inbox is fine.
-      if (Date.now() - lastReplyScanAt >= REPLY_SCAN_MS) {
+      // Reply-scan: on its own slow cadence (REPLY_SCAN_MS) OR on-demand when the Odoo
+      // "Escanear respuestas" button requested one (newer than our last scan). Reuses
+      // the warm tab; the next ping re-navigates to /talent/home.
+      let manualReqMs = 0;
+      try {
+        const r = await api.io.fetchJson(`${cfg.BACKEND}/v1/recruiter/inbox-scan-requested`);
+        manualReqMs = Math.round((r && r.requested_at ? r.requested_at : 0) * 1000);
+      } catch { /* backend unreachable — fall back to cadence only */ }
+      const cadenceDue = Date.now() - lastReplyScanAt >= REPLY_SCAN_MS;
+      const manualDue = manualReqMs > lastReplyScanAt;
+      if (cadenceDue || manualDue) {
+        if (manualDue) console.log(`[reply-scan] manual trigger (Odoo button)`);
         lastReplyScanAt = Date.now();
         try { repliesPosted = await scanInboxReplies(warmPage, api); }
         catch (e) { console.log(`[reply-scan] error: ${(e && e.message) || e}`); }

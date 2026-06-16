@@ -6,6 +6,8 @@ trigger for requirement B: bulk-message a job's saved Recruiter candidates; on t
 run's completion the transition terminal hook records outreach_status=messaged in
 Odoo (via /akcr/api/lead_outreach_update).
 """
+import time
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +16,12 @@ from core.database import get_db
 from services.recruiter_pipeline_service import RecruiterPipelineService
 
 router = APIRouter(prefix="/recruiter", tags=["recruiter"])
+
+# Manual reply-scan trigger: the Odoo "Escanear respuestas" button sets this; the
+# daemon's keepAliveTick polls it and runs an inbox scan on its next warm tick (so a
+# reply can be picked up on-demand instead of waiting for the 45m autonomous cadence).
+# In-memory (single backend process); a stale request after a restart is harmless.
+_inbox_scan_requested_at: float = 0.0
 
 
 class SendMessagesRequest(BaseModel):
@@ -100,6 +108,23 @@ async def send_messages(
             "reason": "no project or no saved candidates for this job",
         }
     return {"status": "queued", "job_id": job_id, "run_id": run_id}
+
+
+@router.post("/request-inbox-scan")
+async def request_inbox_scan():
+    """Ask the daemon to run an inbox reply-scan on its next warm tick (the Odoo
+    'Escanear respuestas' button). Returns the request timestamp; the daemon compares
+    it to its last scan and scans if newer — no waiting for the 45m autonomous cadence."""
+    global _inbox_scan_requested_at
+    _inbox_scan_requested_at = time.time()
+    return {"ok": True, "requested_at": _inbox_scan_requested_at}
+
+
+@router.get("/inbox-scan-requested")
+async def inbox_scan_requested():
+    """Polled by the daemon's keepAliveTick: the epoch-seconds of the last manual scan
+    request (0 = none). The daemon scans when this is newer than its last scan."""
+    return {"requested_at": _inbox_scan_requested_at}
 
 
 @router.post("/inbox-replies")
