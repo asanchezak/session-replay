@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     # The single profile the demo keeps (public /in/ URL; bridges to the Recruiter
     # profile in a logged-in seat). Default = Andrey (your own profile) so the demo
     # never messages a real candidate. Env: RECRUITER_DEMO_PROFILE_URL/_NAME.
-    recruiter_demo_profile_url: str = "https://www.linkedin.com/in/crandrey/"
-    recruiter_demo_profile_name: str = "Andrey Sanchez"
+    recruiter_demo_profile_url: str = "https://www.linkedin.com/in/franz-sivaja-s%C3%A1nchez-869354277/"
+    recruiter_demo_profile_name: str = "Franz Sivaja Sánchez"
     # Safety cap on the demo archive-all loop (each pass clears ~15-25 within its 175s
     # budget; the loop re-enqueues while the project still has active candidates).
     recruiter_demo_archive_rounds: int = 6
