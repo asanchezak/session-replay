@@ -4,7 +4,7 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
-import { useRuns, pipelineLabel, pipelineJobId, type RunSummary } from "../hooks/useRuns";
+import { useRuns, pipelineLabel, pipelineJobId, pipelineProjectName, type RunSummary } from "../hooks/useRuns";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
 import { Play, Square, Trash2 } from "lucide-react";
@@ -132,6 +132,12 @@ export default function RunsPage() {
                   )}
                 </span>
               );
+            }},
+            { key: "project", label: "Project", render: (r: RunSummary) => {
+              const name = pipelineProjectName(r.origin);
+              return name
+                ? <span className="text-text-secondary text-xs whitespace-nowrap">{name}</span>
+                : <span className="text-text-tertiary text-xs">—</span>;
             }},
             { key: "status", label: "Status", render: (r: RunSummary) => (
               <StatusBadge status={r.status as any} size="sm" />

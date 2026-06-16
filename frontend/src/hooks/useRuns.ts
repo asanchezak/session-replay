@@ -47,6 +47,11 @@ export function pipelineJobId(origin?: RunOrigin | null): string | null {
   return origin?.pipeline?.job_id ? String(origin.pipeline.job_id) : null;
 }
 
+/** The LinkedIn project a pipeline run targets (the "-EZ <position>" name), or null. */
+export function pipelineProjectName(origin?: RunOrigin | null): string | null {
+  return origin?.pipeline?.project_name?.trim() || null;
+}
+
 export function useRuns(workflowId?: string) {
   const { data, loading, error, fetchData } = useApiData<RunSummary[]>();
   const { request } = useApi();
