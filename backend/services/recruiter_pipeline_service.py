@@ -171,10 +171,15 @@ class RecruiterPipelineService:
             candidate_count = int(job_payload.get("candidate_count") or 0) or None
         except (TypeError, ValueError):
             candidate_count = None
-        # The Odoo job description → the LinkedIn project's "Descripción del proyecto"
-        # textarea. job_payload.job_description is already HTML-stripped (fetch_jobs).
-        # Cap it so we don't overflow the textarea on very long JDs.
-        job_description = str(job_payload.get("job_description") or "").strip()
+        # The Odoo job sections → the LinkedIn project's "Descripción del proyecto"
+        # textarea. Compose all structured sections (What you will be doing +
+        # Requirements + Nice-to-have) so the project mirrors the full JD; fall back to
+        # the webhook's plain job_description if the Odoo fetch fails. Capped so we
+        # don't overflow the textarea on very long JDs.
+        job_description = await self._compose_project_description(
+            job_id, connector_id,
+            fallback=str(job_payload.get("job_description") or "").strip(),
+        )
         if len(job_description) > _PROJECT_DESC_MAX:
             job_description = job_description[:_PROJECT_DESC_MAX].rsplit(" ", 1)[0].rstrip() + "…"
         pipeline = {
@@ -256,7 +261,7 @@ class RecruiterPipelineService:
         adv_wf = settings.recruiter_advanced_search_workflow_id
         if adv_wf:
             from services.boolean_query_builder import BooleanQueryBuilder
-            corpus, title = await self._fetch_job_corpus(job_id, connector_id)
+            corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
             built = await BooleanQueryBuilder().build(
                 corpus, fallback_title=title or pipeline.get("position", ""),
                 start_tightness=settings.recruiter_search_start_tightness,
@@ -270,13 +275,34 @@ class RecruiterPipelineService:
                 job_id, built["tightness"], built["query"],
             )
             search_params = {"boolean_query": built["query"]}
-            if settings.recruiter_default_location:
-                search_params["location"] = settings.recruiter_default_location
+            # Location facet from the Odoo job_location (cr→Costa Rica, latam→Latin
+            # America, global→skip). Only thread it when non-empty: a blank location is
+            # OMITTED so the search workflow's skip_if_blank:location steps are pruned
+            # (a global/worldwide boolean-only search) — never typed as a literal.
+            location = self._resolve_search_location(job_location)
+            if location:
+                search_params["location"] = location
+            logger.info(
+                "recruiter pipeline: job %s job_location=%r → search location=%r",
+                job_id, job_location, location or "(skip facet)",
+            )
             search_run = await self._create_pipeline_run(
                 workflow_id=adv_wf, event_kind=EVENT_SEARCH,
                 runtime_params=search_params,
                 pipeline=pipeline, connector_id=connector_id,
             )
+            # Global/worldwide (no location): drop the location facet steps so the run
+            # does a boolean-only search instead of typing a literal "{{location}}".
+            if not location:
+                removed = self._strip_location_facet_steps(search_run.workflow_snapshot)
+                if removed:
+                    flag_modified(search_run, "workflow_snapshot")
+                    search_run.total_steps = len(search_run.workflow_snapshot["steps"])
+                    await self.session.flush()
+                    logger.info(
+                        "recruiter pipeline: job %s no location → pruned %d location facet step(s)",
+                        job_id, removed,
+                    )
             return {"stage": "create_project", "project_link": link_res,
                     "next_run": str(search_run.id), "boolean": built["query"]}
 
@@ -299,16 +325,18 @@ class RecruiterPipelineService:
             "next_run": str(search_run.id),
         }
 
-    async def _fetch_job_corpus(self, job_id, connector_id) -> tuple[str, str]:
+    async def _fetch_job_corpus(self, job_id, connector_id) -> tuple[str, str, str]:
         """Assemble the JD corpus (title + description + requirements) from Odoo for
-        the AI boolean builder. Best-effort → returns (corpus, title)."""
+        the AI boolean builder, and read the job_location (cr/latam/global) used to
+        pick the search location facet. Best-effort → returns (corpus, title,
+        job_location)."""
         from adapters.odoo.adapter import OdooAdapter
         from services.connector_forum_service import ConnectorForumService
 
         def strip(v):
             return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(v or ""))).strip()
 
-        title, parts = "", []
+        title, parts, job_location = "", [], ""
         try:
             connector = await ConnectorForumService(self.session).resolve_connector(
                 str(connector_id)
@@ -319,10 +347,11 @@ class RecruiterPipelineService:
                 jobs = await adapter.list("job", filters={"id": int(job_id)}, limit=1, fields=[
                     "name", "description", "job_requirements", "non_negotiable_requirements",
                     "nice_to_have_requirements", "role_responsibilities",
-                    "seniority_level", "experience_years",
+                    "seniority_level", "experience_years", "job_location",
                 ])
                 j = jobs[0] if jobs else {}
                 title = j.get("name") or ""
+                job_location = str(j.get("job_location") or "").strip()
                 if title:
                     parts.append(title)
                 for f in ("description", "job_requirements", "non_negotiable_requirements",
@@ -346,7 +375,99 @@ class RecruiterPipelineService:
                 await adapter.dispose()
         except Exception:
             logger.exception("recruiter pipeline: corpus fetch failed for job %s", job_id)
-        return "\n".join(p for p in parts if p), title
+        return "\n".join(p for p in parts if p), title, job_location
+
+    async def _compose_project_description(self, job_id, connector_id, fallback: str = "") -> str:
+        """Build the LinkedIn project description from the Odoo job's structured
+        sections — "What you will be doing" (description) + "What we're looking for"
+        (job_requirements) + "What would be a plus" (nice_to_have_requirements) — so
+        the project mirrors the full JD, not just the first section. HTML-stripped,
+        section-headed. Best-effort: returns `fallback` (the webhook's plain
+        job_description) if the fetch fails or yields nothing."""
+        from adapters.odoo.adapter import OdooAdapter
+        from services.connector_forum_service import ConnectorForumService
+
+        def strip(v):
+            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(v or ""))).strip()
+
+        sections = []
+        try:
+            connector = await ConnectorForumService(self.session).resolve_connector(
+                str(connector_id)
+            )
+            adapter = OdooAdapter()
+            await adapter.initialize(connector.config)
+            try:
+                jobs = await adapter.list("job", filters={"id": int(job_id)}, limit=1, fields=[
+                    "description", "job_requirements", "nice_to_have_requirements",
+                ])
+                j = jobs[0] if jobs else {}
+                for header, field in (
+                    ("", "description"),
+                    ("Requisitos:", "job_requirements"),
+                    ("Deseable:", "nice_to_have_requirements"),
+                ):
+                    v = strip(j.get(field))
+                    if v:
+                        sections.append(f"{header}\n{v}".strip() if header else v)
+            finally:
+                await adapter.dispose()
+        except Exception:
+            logger.exception(
+                "recruiter pipeline: project-description fetch failed for job %s", job_id
+            )
+        composed = "\n\n".join(sections).strip()
+        return composed or (fallback or "")
+
+    def _resolve_search_location(self, job_location: str) -> str:
+        """Map the Odoo job_location (cr/latam/global) to a LinkedIn location facet
+        string. A KNOWN mapping wins (incl. "" = skip the facet, e.g. global); an
+        unknown/empty job_location falls back to recruiter_default_location."""
+        loc_map = settings.recruiter_location_map or {}
+        key = (job_location or "").strip().lower()
+        if key in loc_map:
+            return (loc_map[key] or "").strip()
+        return (settings.recruiter_default_location or "").strip()
+
+    @staticmethod
+    def _strip_location_facet_steps(snapshot: dict | None) -> int:
+        """Remove the location-facet step block from a search run's snapshot so a
+        location-less (global/worldwide) position runs a boolean-only search — never
+        typing a literal "{{location}}" into the typeahead. Anchored on STABLE,
+        locale-proof data-test selectors (the block's interleaved scroll/delay steps
+        carry no selector or intent, so an intent/text match would miss them): from
+        the FIRST step whose selector opens the location facet (data-test-facet-
+        geo-locations / facet-locations) up to — but excluding — the "Run search"
+        button (data-test-save-advanced-button). No-op when those anchors aren't
+        present (e.g. a workflow without a location facet). Reindexes step_index so
+        the remaining steps stay contiguous. Returns the number of steps removed."""
+        steps = (snapshot or {}).get("steps") or []
+
+        def sel_has(step, *tokens) -> bool:
+            for s in (step.get("selector_chain") or []):
+                v = str(s.get("value") or "")
+                if any(tok in v for tok in tokens):
+                    return True
+            return False
+
+        start = next(
+            (i for i, s in enumerate(steps)
+             if sel_has(s, "facet-geo-locations", "facet-locations")),
+            None,
+        )
+        if start is None:
+            return 0
+        end = next(
+            (i for i in range(start + 1, len(steps))
+             if sel_has(steps[i], "save-advanced-button")),
+            None,
+        )
+        if end is None:
+            return 0
+        del steps[start:end]
+        for i, s in enumerate(steps):
+            s["step_index"] = i
+        return end - start
 
     async def _after_search(self, run, pipeline, connector_id, job_id) -> dict:
         # Read the search result (url + total_count). total_count is None until the
@@ -839,16 +960,22 @@ class RecruiterPipelineService:
             return {"error": "recruiter_advanced_search_workflow_id unset"}
         ctx = await self._gather_job_context(job_id)
         connector_id = ctx.get("connector_id")
-        corpus, title = await self._fetch_job_corpus(job_id, connector_id)
+        corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
         from services.boolean_query_builder import BooleanQueryBuilder
         b = BooleanQueryBuilder()
         spec = await b.extract_spec(corpus, fallback_title=title)
         t = max(0, min(int(tightness), b.max_tightness(spec)))
         query = b.assemble(spec, t)
         params = {"boolean_query": query}
-        if settings.recruiter_default_location:
-            params["location"] = settings.recruiter_default_location
+        location = self._resolve_search_location(job_location)
+        if location:
+            params["location"] = location
         run = await self.exec_svc.create_run(workflow_id=adv_wf, runtime_params=params)
+        # No location (global) → prune the location facet block (boolean-only count).
+        if not location:
+            removed = self._strip_location_facet_steps(run.workflow_snapshot)
+            if removed:
+                run.total_steps = len(run.workflow_snapshot["steps"])
         # Patch the extract method → count-only (one page, no pagination/collection).
         snap = run.workflow_snapshot or {}
         for st in snap.get("steps", []):

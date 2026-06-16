@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     # commit can leave the page on "Búsqueda vacía"). Threaded as {{location}}.
     # Env: RECRUITER_DEFAULT_LOCATION.
     recruiter_default_location: str = ""
+    # Maps the Odoo hr.job.job_location selection (cr/latam/global) to the LinkedIn
+    # location facet string typed into the search. A value of "" means "skip the
+    # location facet entirely" (worldwide) — the search workflow's location block is
+    # marked skip_if_blank:location so it's pruned when no location is threaded. An
+    # unknown/empty job_location falls back to recruiter_default_location. Pydantic
+    # parses the env value as JSON. Env: RECRUITER_LOCATION_MAP.
+    recruiter_location_map: dict[str, str] = {
+        "cr": "Costa Rica",
+        "latam": "Latin America",
+        "global": "",
+    }
     # How many skills the INITIAL boolean AND's (musts first, then optionals) on top
     # of the (title OR …) clause — i.e. how STRICT the first search is. The builder's
     # default is 2 (title + 2 skills); raise it for a tighter first pass on rich JDs.
