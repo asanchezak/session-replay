@@ -124,7 +124,11 @@ class ReconcileSupervisor:
 
         jobs = await self.forum.fetch_jobs(
             connector,
-            filters={"linkedin_sync": True, "is_published": True},
+            # The LinkedIn candidate-SOURCING pipeline is gated by the dedicated
+            # hr.job.recruiter_search_candidates flag (NOT linkedin_sync, which only
+            # syncs the posting to LinkedIn, and NOT publication) — so a position can be
+            # sourced regardless of where (or whether) it's published.
+            filters={"recruiter_search_candidates": True},
             limit=RECONCILE_JOB_FETCH_LIMIT,
         )
 
