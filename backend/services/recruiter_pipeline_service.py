@@ -940,7 +940,7 @@ class RecruiterPipelineService:
             select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
         )
         ctx = {"connector_id": None, "project_id": None, "project_url": None,
-               "project_name": None, "saved": []}
+               "project_name": None, "position": None, "saved": []}
         seen = set()
         for r in result.scalars().all():
             o = r.origin or {}
@@ -953,6 +953,7 @@ class RecruiterPipelineService:
             ctx["project_id"] = ctx["project_id"] or p.get("project_id")
             ctx["project_url"] = ctx["project_url"] or p.get("project_url")
             ctx["project_name"] = ctx["project_name"] or p.get("project_name")
+            ctx["position"] = ctx["position"] or p.get("position")
             if o.get("event_kind") == EVENT_SAVE and r.status == RunStatus.COMPLETED.value:
                 url = p.get("candidate_url")
                 if url and url not in seen:
@@ -1026,6 +1027,8 @@ class RecruiterPipelineService:
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
             "project_id": ctx.get("project_id"),
+            "position": ctx.get("position"),
+            "project_name": ctx.get("project_name"),
             "subject": subject,
             "send": bool(send),
         }
@@ -1102,6 +1105,8 @@ class RecruiterPipelineService:
             "connector_id": str(connector_id) if connector_id else None,
             "project_id": project_id,
             "project_url": project_url,
+            "position": (ctx or {}).get("position"),
+            "project_name": (ctx or {}).get("project_name"),
             "profile_url": profile_url,
             "candidate_name": name,
             "lead_id": lead_id,
@@ -1156,6 +1161,8 @@ class RecruiterPipelineService:
             "connector_id": str(connector_id) if connector_id else None,
             "project_id": m.group(1) if m else ctx.get("project_id"),
             "project_url": project_url,
+            "position": ctx.get("position"),
+            "project_name": ctx.get("project_name"),
         }
         run = await self._create_pipeline_run(
             workflow_id=wf, event_kind=EVENT_RECOMMENDATIONS,
