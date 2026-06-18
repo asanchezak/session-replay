@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-17-stage-verdict-18";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-18-stage-verdict-19-url";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -195,6 +195,10 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       handled: true,
       seenProfileUrls: people.map((p) => p.profile_url).filter(Boolean),
       extraction: {
+        // `url` is needed by stageVerdict (create-project success = landed on
+        // /talent/hire/<id>); the daemon also merges page.url() into the POSTED
+        // extraction, but stageVerdict receives THIS object, so include it here.
+        url: page.url(),
         people,
         total_count: totalCount,
         collected_count: collectedCount,
