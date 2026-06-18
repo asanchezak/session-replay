@@ -164,6 +164,28 @@ async def delete_all_runs(db: AsyncSession = Depends(get_db)):
     return {"deleted": counts}
 
 
+async def _build_odoo_job_url(db: AsyncSession, origin: dict | None) -> str | None:
+    """Clickable link to the originating Odoo position (hr.job) for a run:
+    `{connector.config.url}/web#id=<job_id>&model=hr.job&view_type=form`. Returns None
+    when the run isn't tied to an Odoo job/connector (so the UI just omits the link)."""
+    if not origin:
+        return None
+    pipeline = origin.get("pipeline") or {}
+    job_id = pipeline.get("job_id") or (origin.get("job_payload") or {}).get("job_id")
+    connector_id = pipeline.get("connector_id") or origin.get("connector_id")
+    if not job_id or not connector_id:
+        return None
+    try:
+        from services.connector_forum_service import ConnectorForumService
+        connector = await ConnectorForumService(db).resolve_connector(str(connector_id))
+    except Exception:
+        connector = None
+    base = (((connector.config or {}).get("url") if connector else "") or "").rstrip("/")
+    if not base:
+        return None
+    return f"{base}/web#id={job_id}&model=hr.job&view_type=form"
+
+
 @router.get("/{run_id}")
 async def get_run(
     run_id: str,
@@ -176,6 +198,8 @@ async def get_run(
     except NotFoundError:
         logger.warning("Run not found run_id=%s", run_id)
         return _error("NOT_FOUND", "Run not found")
+
+    odoo_job_url = await _build_odoo_job_url(db, run.origin or None)
 
     return {
         "id": str(run.id),
@@ -199,6 +223,9 @@ async def get_run(
         # preamble (Phase C). Additive — existing consumers ignore extra fields.
         "workflow_snapshot": {"steps": (run.workflow_snapshot or {}).get("steps", [])},
         "origin": run.origin or None,
+        # Clickable link to the originating Odoo position (hr.job) so the run detail can
+        # jump straight to the position that triggered the flow. None when not applicable.
+        "odoo_job_url": odoo_job_url,
         "linkedin_applicants": run.linkedin_applicants or [],
     }
 

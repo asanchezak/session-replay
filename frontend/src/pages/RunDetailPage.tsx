@@ -204,6 +204,8 @@ interface RunDetail {
     } | null;
     triggered_by?: string | null;
   } | null;
+  /** Clickable link to the originating Odoo position (hr.job), computed by the backend. */
+  odoo_job_url?: string | null;
   linkedin_applicants?: LinkedInApplicant[];
 }
 
@@ -756,6 +758,17 @@ export default function RunDetailPage() {
             {run.ended_at && <span>Ended {formatTime(run.ended_at)}</span>}
             {!run.ended_at && run.started_at && (
               <span>Duration {formatDuration(run.started_at)}</span>
+            )}
+            {run.odoo_job_url && (
+              <a
+                href={run.odoo_job_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent hover:underline font-medium"
+                title="Abrir en Odoo la posición que disparó este flujo"
+              >
+                ↗ Posición en Odoo
+              </a>
             )}
           </div>
           {run.error_summary && (
