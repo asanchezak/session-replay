@@ -31,6 +31,7 @@ def _make_svc(db_session, monkeypatch, *, count, pipeline_extra=None):
         read_search_result=AsyncMock(return_value={"total_count": count, "url": "https://x/search?start=0"}),
         push_search_link=AsyncMock(return_value={"pushed": 1}),
         push_recruiter_leads=AsyncMock(return_value={"leads": []}),
+        push_flow_status=AsyncMock(return_value={"pushed": 1}),
     )
     svc._create_pipeline_run = AsyncMock(return_value=SimpleNamespace(id="rerun-run-id"))
     # Deterministic config + a builder we control.
@@ -44,12 +45,18 @@ def _make_svc(db_session, monkeypatch, *, count, pipeline_extra=None):
     monkeypatch.setattr(
         "services.boolean_query_builder.BooleanQueryBuilder", _FakeBuilder
     )
+    # The zero-results branch flags run.origin via flag_modified (an ORM helper); the
+    # test run is a plain SimpleNamespace, so give it an origin dict and no-op
+    # flag_modified.
+    monkeypatch.setattr(
+        "services.recruiter_pipeline_service.flag_modified", lambda *a, **k: None
+    )
     pipeline = {
         "job_id": "1", "search_spec": {"core": ["x"]}, "search_tightness": 2,
         "search_reruns": 0, "search_query": "QUERY@t2",
     }
     pipeline.update(pipeline_extra or {})
-    run = SimpleNamespace(id="search-run-id")
+    run = SimpleNamespace(id="search-run-id", origin={})
     return svc, run, pipeline
 
 
@@ -106,7 +113,7 @@ async def test_bulk_save_fires_one_run(db_session: AsyncSession, monkeypatch):
     results-page save run (search_url + target_count), not N per-candidate runs."""
     svc, run, pipeline = _make_svc(
         db_session, monkeypatch, count=120,
-        pipeline_extra={"project_name": "-EZ Role", "candidate_count": 3},
+        pipeline_extra={"project_name": "EasyRecruit - Role", "candidate_count": 3},
     )
     svc.push.push_recruiter_leads = AsyncMock(return_value={"leads": [
         {"profile_url": "https://x/talent/profile/a"},
@@ -122,7 +129,7 @@ async def test_bulk_save_fires_one_run(db_session: AsyncSession, monkeypatch):
     assert kwargs["workflow_id"] == "bulk-wf"
     assert kwargs["runtime_params"]["search_url"] == "https://x/search?start=0"
     assert kwargs["runtime_params"]["target_count"] == 2
-    assert kwargs["runtime_params"]["project_name"] == "-EZ Role"
+    assert kwargs["runtime_params"]["project_name"] == "EasyRecruit - Role"
 
 
 @pytest.mark.asyncio
@@ -130,7 +137,7 @@ async def test_per_candidate_fallback_when_no_bulk_wf(db_session: AsyncSession, 
     """No bulk wf but a per-profile save wf → one save run PER candidate."""
     svc, run, pipeline = _make_svc(
         db_session, monkeypatch, count=120,
-        pipeline_extra={"project_name": "-EZ Role", "candidate_count": 2},
+        pipeline_extra={"project_name": "EasyRecruit - Role", "candidate_count": 2},
     )
     svc.push.push_recruiter_leads = AsyncMock(return_value={"leads": [
         {"profile_url": "https://x/talent/profile/a"},

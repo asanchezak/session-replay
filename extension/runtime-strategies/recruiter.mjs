@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-15-recs-verify-delta-17";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-17-stage-verdict-18";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -290,6 +290,72 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
   }
 
   return { handled: false };
+}
+
+// Per-stage SUCCESS VERIFICATION. The daemon calls this after a recruiter strategy step
+// (passing the run's origin.event_kind) to decide whether the stage actually achieved its
+// real-world goal — not merely "all steps ran". A NOT-ok verdict makes the daemon FAIL the
+// run, which: halts the chained pipeline (advance() runs only on COMPLETED), surfaces on the
+// Odoo position (recruiter_flow_status=failed + chatter + to-do), and stays relaunchable.
+// Pure function of (strategy, eventKind, extraction) → unit-testable with no seat. Criteria
+// live here (hot-reloaded) so tuning is `scp`-only; the daemon call site is generic.
+export function stageVerdict({ strategy, eventKind, extraction } = {}) {
+  const ex = extraction || {};
+  const ok = () => ({ ok: true, reason: "" });
+  const fail = (reason) => ({ ok: false, reason: reason || "unverified" });
+
+  switch (strategy) {
+    case "recruiter_search_people": {
+      // The SAME strategy serves the create-project final extract AND the search stage —
+      // disambiguate by the run's event_kind.
+      if (eventKind === "recruiter_create_project") {
+        // Created ⇔ LinkedIn redirected to the project workspace /talent/hire/<id> (it
+        // only lands there on a successful create). Do NOT gate on people.length — an
+        // empty brand-new project page is expected.
+        return /\/talent\/hire\/\d+/.test(String(ex.url || "")) ? ok() : fail("project_not_created");
+      }
+      if (eventKind === "recruiter_search") {
+        // Results UI rendered: a count was read (even 0 matches) OR cards were collected.
+        // A walled/failed load yields null count AND no people → fail. Calibration
+        // re-runs reuse event_kind=recruiter_search, so they hit this same rule.
+        const rendered = ex.total_count !== null && ex.total_count !== undefined;
+        const people = Array.isArray(ex.people) ? ex.people.length : 0;
+        return rendered || people > 0 ? ok() : fail("search_results_did_not_render");
+      }
+      return ok(); // other contexts (e.g. recruiter_preview_count) — don't gate
+    }
+    case "recruiter_save_results_to_project": {
+      const r = ex.save_result || {};
+      if (!(Number(r.saved_count) > 0)) return fail("save_selected_none");
+      // verified_in_project: null/undefined = verification nav flaked or was skipped →
+      // trust the save (PASS, no false-negative). Only an AFFIRMATIVE 0 means the
+      // candidates demonstrably are NOT in the project.
+      if (r.verified_in_project === 0) return fail("save_unverified_zero");
+      return ok();
+    }
+    case "recruiter_archive_candidate":
+      return ex.archive_result && ex.archive_result.ok ? ok() : fail("archive_not_verified");
+    case "recruiter_archive_all_in_project":
+      // `ok` already accounts for partial progress; `more_remaining` is orthogonal.
+      return ex.archive_all_result && ex.archive_all_result.ok ? ok() : fail("archive_all_no_progress");
+    case "recruiter_save_recommendations":
+      return ex.save_recommendations_result && ex.save_recommendations_result.ok ? ok() : fail("recommendations_none");
+    case "recruiter_add_profile":
+      return ex.add_profile_result && ex.add_profile_result.ok ? ok() : fail("add_profile_failed");
+    case "recruiter_message_compose": {
+      // gated preview & real send → ok:true; blocked/rate_limited_24h/no_credits/structural
+      // errors → ok:false (a real send that didn't deliver IS a failure with a to-do).
+      const r = ex.message_compose_result || {};
+      return r.ok ? ok() : fail(r.reason || "message_not_sent");
+    }
+    case "recruiter_archive_project":
+      return ex.archive_project_result && ex.archive_project_result.ok ? ok() : fail("archive_project_failed");
+    // read-only / probe / unknown strategies → never gate
+    case "recruiter_read_project":
+    case "recruiter_hot_reload_probe":
+    default:
+      return ok();
+  }
 }
 
 async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
@@ -669,9 +735,10 @@ async function clickRecruiterBulkSave(page, orand, runtime) {
 
 // One dialog cycle: open the bulk "save to project" dialog for the CURRENTLY
 // selected candidates, pick the existing project by name, and confirm.
-async function saveSelectionToProject(page, projectName, orand, runtime) {
+async function saveSelectionToProject(page, projectName, orand, runtime, projectId = "") {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const pid = projectId ? String(projectId) : "";
   const opened = await clickRecruiterBulkSave(page, orand, runtime);
   if (!opened) return { ok: false, reason: "bulk_save_button_not_found" };
   await page.waitForSelector('#save-to-projects-typeahead, label[for="choose-existing-projects"], [role="dialog"]', { timeout: 10000 }).catch(() => {});
@@ -683,26 +750,79 @@ async function saveSelectionToProject(page, projectName, orand, runtime) {
     { type: "css", value: "#save-to-projects-typeahead" },
   ], projectName, orand, 10000, runtime);
   await sleep(1600 + Math.floor(orand() * 900));
-  // Pick the typeahead option whose text matches the EXACT project name. The
-  // typeahead lists ALL projects (it does not filter by the typed text), and the old
-  // fuzzy text-click selected the WRONG project (candidates landed elsewhere) — so we
-  // click the specific <li.artdeco-typeahead__result> that contains this exact name.
-  const pickTarget = await page.evaluate((name) => {
+
+  // Pick the project option ROBUSTLY (the old exact-substring `includes` match was
+  // brittle: it missed on dash variants / em-dashes / casing, on a virtualized list
+  // where our option wasn't rendered, and when the typeahead filtered the typed text to
+  // nothing). Priority: (1) by project-id href, (2) normalized name (exact then
+  // contains), (3) sole rendered option — with a scroll-and-rescan loop, plus one
+  // simplified-query retype if no options render at all.
+  const findTarget = () => page.evaluate(({ name, pid }) => {
+    const norm = (s) => (s || "").replace(/[‐-―−]/g, "-").replace(/\s+/g, " ").trim().toLowerCase();
+    const target = norm(name);
     const opts = Array.from(document.querySelectorAll(
       'li.artdeco-typeahead__result[role="option"], ul[role="listbox"] li[role="option"], [role="option"]',
     ));
-    for (const li of opts) {
-      const txt = (li.textContent || "").replace(/\s+/g, " ");
-      if (txt.includes(name)) {
-        li.scrollIntoView({ block: "center" });
-        const r = li.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-          return { x: r.left + Math.min(140, r.width * 0.4), y: r.top + r.height / 2 };
+    const vis = (li) => { const r = li.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const center = (li) => {
+      li.scrollIntoView({ block: "center" });
+      const r = li.getBoundingClientRect();
+      return { x: r.left + Math.min(140, r.width * 0.4), y: r.top + r.height / 2 };
+    };
+    const visible = opts.filter(vis);
+    // 1) by project id (href / data attr / raw markup)
+    if (pid) {
+      for (const li of visible) {
+        if (li.querySelector(`a[href*="/talent/hire/${pid}"], [href*="/talent/hire/${pid}"], [data-test-project-id="${pid}"]`)
+            || (li.outerHTML || "").includes(`/talent/hire/${pid}`)) {
+          return { ...center(li), by: "id" };
         }
       }
     }
+    // 2) normalized name — exact, then contains
+    let contains = null;
+    for (const li of visible) {
+      const t = norm(li.textContent);
+      if (t && t === target) return { ...center(li), by: "name_exact" };
+      if (!contains && t && target && (t.includes(target) || (target.includes(t) && t.length > 5))) contains = li;
+    }
+    if (contains) return { ...center(contains), by: "name_contains" };
+    // 3) sole rendered option
+    if (visible.length === 1) return { ...center(visible[0]), by: "single" };
     return null;
-  }, projectName).catch(() => null);
+  }, { name: projectName, pid }).catch(() => null);
+
+  let pickTarget = null;
+  let retypedSimple = false;
+  for (let attempt = 0; attempt < 5 && !pickTarget; attempt++) {
+    pickTarget = await findTarget();
+    if (pickTarget) break;
+    const optCount = await page.evaluate(() => document.querySelectorAll(
+      'li.artdeco-typeahead__result[role="option"], ul[role="listbox"] li[role="option"], [role="option"]',
+    ).length).catch(() => 0);
+    if (!optCount && !retypedSimple) {
+      // Typeahead returned nothing for the full name (special chars may have filtered it
+      // out) → clear and retype a simplified alphanumeric prefix.
+      retypedSimple = true;
+      const simple = projectName.replace(/[^\p{L}\p{N} ]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30);
+      const el = await page.$("#save-to-projects-typeahead");
+      if (el) {
+        await el.click({ clickCount: 3 }).catch(() => {});
+        await page.keyboard.press("Backspace").catch(() => {});
+        await page.keyboard.type(simple, { delay: 45 }).catch(() => {});
+        await sleep(1500 + Math.floor(orand() * 700));
+      }
+      continue;
+    }
+    // Scroll the listbox to load more virtualized options, then rescan.
+    await page.evaluate(() => {
+      const box = document.querySelector('ul[role="listbox"], .artdeco-typeahead__results-list, [role="listbox"]');
+      if (box) box.scrollTop = Math.min(box.scrollHeight, box.scrollTop + 400);
+      else window.scrollBy(0, 300);
+    }).catch(() => {});
+    await sleep(500 + Math.floor(orand() * 300));
+  }
+
   let pickedProject = false;
   if (pickTarget) {
     await moveMouseAlongBezier(page, pickTarget, orand).catch(() => {});
@@ -712,13 +832,19 @@ async function saveSelectionToProject(page, projectName, orand, runtime) {
   }
   await sleep(900 + Math.floor(orand() * 600));
   // GUARD: only save if the selected project chip actually matches our target — never
-  // save into the wrong project.
-  const selectedRight = await page.evaluate((name) => {
+  // save into the wrong project. Normalized + id-aware (same robustness as the pick).
+  const selectedRight = await page.evaluate(({ name, pid }) => {
+    const norm = (s) => (s || "").replace(/[‐-―−]/g, "-").replace(/\s+/g, " ").trim().toLowerCase();
+    const target = norm(name);
     const chips = Array.from(document.querySelectorAll(
       '[class*="chip"], [class*="pill"], [class*="selected"], [data-test*="selected"]',
     ));
-    return chips.some((e) => (e.textContent || "").replace(/\s+/g, " ").includes(name));
-  }, projectName).catch(() => false);
+    return chips.some((e) => {
+      const t = norm(e.textContent);
+      if (t && target && (t.includes(target) || (target.includes(t) && t.length > 5))) return true;
+      return Boolean(pid && (e.outerHTML || "").includes(`/talent/hire/${pid}`));
+    });
+  }, { name: projectName, pid }).catch(() => false);
   let clickedSave = false;
   if (selectedRight) {
     clickedSave = await clickSelectorChain(page, [
@@ -1846,6 +1972,10 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
   const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const projectName = String(options.projectName || "").trim();
   if (!projectName) return { ok: false, reason: "missing_project_name" };
+  // Project id (from the /talent/hire/<id> URL) lets the save dialog pick the project by
+  // id when the name match is ambiguous/brittle.
+  const pidMatch = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  const projectId = pidMatch ? pidMatch[1] : "";
   const limit = Math.max(1, options.targetCount || 1);
   const maxPages = Math.max(1, Math.ceil(limit / 12) + 2);
 
@@ -1867,7 +1997,7 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
       }
       break;
     }
-    const dlg = await saveSelectionToProject(page, projectName, orand, runtime);
+    const dlg = await saveSelectionToProject(page, projectName, orand, runtime, projectId);
     pageResults.push({ page: pg, selected: selected.length, ...dlg });
     if (!dlg.ok) break;  // dialog failed — stop, report what we saved so far
     savedAll.push(...selected);

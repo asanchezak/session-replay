@@ -407,3 +407,39 @@ class RecruiterPushService:
         except Exception:
             logger.exception("lead removed push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
+
+    async def push_flow_status(self, *, connector_id, job_id, status: str,
+                               stage: str = "", error_kind: str = "",
+                               error_summary: str = "", run_id=None) -> dict:
+        """Surface the recruiter automation lifecycle on the Odoo hr.job position via
+        POST /akcr/api/recruiter_flow_status. `status` is running|done|failed; on
+        'failed' akcr also posts a chatter note + schedules a to-do for the recruiter.
+        Best-effort — a push failure must never block run termination."""
+        if not job_id:
+            return {"pushed": 0, "skipped": "no_job_id"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "job_id": job_id,
+            "status": status,
+            "stage": stage or "",
+            "error_kind": error_kind or "",
+            "error_summary": (error_summary or "")[:2000],
+            "source_run_id": str(run_id) if run_id else "",
+        }
+        try:
+            res = await self._post(
+                base_url, api_key, "/akcr/api/recruiter_flow_status", payload
+            )
+            logger.info(
+                "flow status push: job=%s status=%s stage=%s odoo=%s",
+                job_id, status, stage, res,
+            )
+            return {"pushed": 1, **res}
+        except Exception:
+            logger.exception(
+                "flow status push: POST failed (job=%s status=%s)", job_id, status
+            )
+            return {"pushed": 0, "error": True}

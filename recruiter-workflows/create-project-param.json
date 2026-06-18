@@ -1,6 +1,6 @@
 {
-  "name": "Recruiter: Create project (-EZ, parameterized)",
-  "description": "PARAMETERIZED create-project for the Odoo→Recruiter pipeline. Step 5 name = '-EZ {{position}}' (backend create_run substitutes runtime_params.position). Final extract step captures the new project URL (/talent/hire/<id>) into extracted_data so the job_project_link push can set hr.job.recruiter_project_url (req C). recruiter_search_people is graceful on the project landing page (waitForSelector .catch → returns [] but still posts {url}). Param: position.",
+  "name": "Recruiter: Create project (EasyRecruit, parameterized)",
+  "description": "PARAMETERIZED create-project for the Odoo→Recruiter pipeline. Step 5 name = 'EasyRecruit - {{position}}' (backend create_run substitutes runtime_params.position). Final extract step captures the new project URL (/talent/hire/<id>) into extracted_data so the job_project_link push can set hr.job.recruiter_project_url (req C). recruiter_search_people is graceful on the project landing page (waitForSelector .catch → returns [] but still posts {url}). Param: position.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
     {
@@ -23,14 +23,14 @@
     },
     {
       "action_type": "type",
-      "intent": "Project name (= -EZ + position)",
+      "intent": "Project name (= EasyRecruit - + position)",
       "selector_chain": [
         {
           "type": "css",
           "value": "input[data-test-project-name-input]"
         }
       ],
-      "value": "-EZ {{position}}"
+      "value": "EasyRecruit - {{position}}"
     },
     {
       "action_type": "type",

@@ -1657,6 +1657,35 @@ async function driveRun(run, behavior) {
                 url: page.url(),
                 ...(runtimeResult.extraction || {}),
               });
+              // Per-stage SUCCESS VERIFICATION. A recruiter stage that ran all its steps
+              // but did NOT achieve its goal (project not created, results didn't load,
+              // candidates not saved/verified, archive unconfirmed, message not sent) must
+              // FAIL the run — not silently complete. Failing here (before the
+              // auto-completing reportStepResult) halts the chained pipeline (advance() runs
+              // only on COMPLETED), surfaces on the Odoo position (recruiter_flow_status=
+              // failed + to-do), and stays relaunchable. Criteria live in recruiter.mjs
+              // (hot); this call site is generic so tuning needs no daemon restart.
+              if (String(strategy).startsWith("recruiter_")) {
+                try {
+                  const vmod = await loadRuntimeStrategyModule("recruiter");
+                  if (vmod && typeof vmod.stageVerdict === "function") {
+                    const verdict = vmod.stageVerdict({
+                      strategy,
+                      eventKind: _ek,
+                      extraction: runtimeResult.extraction || {},
+                    }) || { ok: true };
+                    if (!verdict.ok) {
+                      console.error(`  step ${idx}: ${strategy} stage gate FAILED — ${verdict.reason}`);
+                      await captureDebug(page, runId, idx, `recruiter stage gate failed: ${verdict.reason}`, consoleBuf).catch(() => {});
+                      await failRun(runId, `${strategy} stage failed: ${verdict.reason}`);
+                      blocked = true;
+                      break;
+                    }
+                  }
+                } catch (vErr) {
+                  console.error(`  step ${idx}: stageVerdict error (ignored, completing) — ${(vErr && vErr.message || vErr)?.toString().slice(0, 140)}`);
+                }
+              }
               await reportStepResult(runId, idx, "extract");
             } else {
               // Budget gate: pause-and-resume rather than drop candidates.

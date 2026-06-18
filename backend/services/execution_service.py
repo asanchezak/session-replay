@@ -730,6 +730,31 @@ class ExecutionService:
                         run_id, event_kind,
                     )
 
+            # Recruiter automation FAILED → surface it on the Odoo hr.job (status +
+            # chatter note + a to-do for the recruiter) so a stalled flow is visible
+            # instead of silently failing. Same commit-before-await discipline as the
+            # hooks above; the notify runs in a fresh session.
+            if new_status == RunStatus.FAILED and (event_kind or "").startswith(
+                "recruiter_"
+            ):
+                try:
+                    await self.session.commit()
+                except Exception:
+                    logger.exception(
+                        "Pre-failure-notify commit failed for run %s", run_id
+                    )
+                try:
+                    notified = await self._notify_recruiter_failure(run)
+                    logger.info(
+                        "Recruiter failure notify for run %s (%s): %s",
+                        run_id, event_kind, notified,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Recruiter failure notify failed for run %s (%s)",
+                        run_id, event_kind,
+                    )
+
         return run
 
     async def _advance_recruiter_pipeline_after_completion(self, run: ExecutionRun) -> dict:
@@ -749,6 +774,23 @@ class ExecutionService:
             svc = RecruiterPipelineService(adv_session)
             result = await svc.advance(adv_run if adv_run is not None else run)
             await adv_session.commit()
+            return result
+
+    async def _notify_recruiter_failure(self, run: ExecutionRun) -> dict:
+        """Surface a FAILED recruiter_* run on the Odoo position, in a fresh session.
+
+        Sibling of the advance/push hooks: when a recruiter run FAILS (walled seat,
+        step timeout, checkpoint, pipeline stage error), notify Odoo so the hr.job
+        shows the failure (status + chatter + recruiter to-do). Best-effort."""
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        async with async_session_factory() as fail_session:
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            fail_run = (await fail_session.execute(stmt)).scalar_one_or_none()
+            svc = RecruiterPipelineService(fail_session)
+            result = await svc.notify_failure(fail_run if fail_run is not None else run)
+            await fail_session.commit()
             return result
 
     async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:
