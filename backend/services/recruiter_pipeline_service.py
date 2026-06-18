@@ -55,14 +55,15 @@ PIPELINE_EVENT_KINDS = {
 # the demo chain (a deliberate test tool) and the cheap count-only preview probe.
 SILENT_FLOW_EVENT_KINDS = {EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD, "recruiter_preview_count"}
 
-# Human-readable Spanish stage labels for the Odoo chatter note / status field.
+# Human-readable stage labels for the Odoo chatter note / status field (English, to
+# match the recruiter UI).
 _FLOW_STAGE_LABELS = {
-    EVENT_CREATE_PROJECT: "crear proyecto",
-    EVENT_SEARCH: "búsqueda de candidatos",
-    EVENT_SAVE: "guardar candidatos en el proyecto",
-    EVENT_MESSAGE: "envío de mensaje",
-    EVENT_ARCHIVE: "archivar candidato",
-    EVENT_RECOMMENDATIONS: "agregar recomendados",
+    EVENT_CREATE_PROJECT: "create project",
+    EVENT_SEARCH: "candidate search",
+    EVENT_SAVE: "save candidates",
+    EVENT_MESSAGE: "message",
+    EVENT_ARCHIVE: "archive candidate",
+    EVENT_RECOMMENDATIONS: "add recommended",
 }
 
 _NON_TERMINAL = (
@@ -180,16 +181,18 @@ class RecruiterPipelineService:
 
     async def _push_flow_status(self, *, job_id, connector_id, status: str,
                                 event_kind: str = "", error_summary: str = "",
-                                run_id=None) -> dict:
+                                message: str = "", run_id=None) -> dict:
         """Best-effort: surface a lifecycle status (running/done/failed) on the Odoo
-        position. No-op (logged) when job_id/connector are missing."""
+        position. `message` is a human, descriptive note (e.g. "Searching for
+        candidates…") posted to the chatter for running/done. No-op (logged) when
+        job_id/connector are missing."""
         if not job_id or not connector_id:
             return {"skipped": "no_job_or_connector"}
         return await self.push.push_flow_status(
             connector_id=connector_id, job_id=job_id, status=status,
             stage=self._flow_stage_label(event_kind),
             error_kind=self._classify_flow_error(error_summary) if status == "failed" else "",
-            error_summary=error_summary or "", run_id=run_id,
+            error_summary=error_summary or "", message=message or "", run_id=run_id,
         )
 
     async def notify_failure(self, run: ExecutionRun) -> dict:
@@ -268,6 +271,7 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="running",
             event_kind=EVENT_CREATE_PROJECT, run_id=run.id,
+            message="🛠️ Creating the LinkedIn Recruiter project for this position…",
         )
         return str(run.id)
 
@@ -285,10 +289,17 @@ class RecruiterPipelineService:
         if event_kind == EVENT_SEARCH:
             return await self._after_search(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_SAVE:
-            # Terminal: candidate is in the project. Message-send is manual/gated.
+            # Terminal success of the sourcing chain: candidates are verified in the
+            # project (the per-stage gate fails this run otherwise). Message-send is
+            # manual/gated. Mark the position DONE with a wrap-up note.
             logger.info(
                 "recruiter pipeline: save complete for job %s candidate %s",
                 job_id, pipeline.get("candidate_url"),
+            )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_SAVE, run_id=run.id,
+                message="✅ Sourcing complete — candidates saved to the LinkedIn project.",
             )
             return {"stage": "save", "done": True}
         if event_kind == EVENT_MESSAGE:
@@ -315,12 +326,14 @@ class RecruiterPipelineService:
             "recruiter pipeline: recommendations for job %s → pushed %s lead(s)",
             job_id, lead_res.get("pushed"),
         )
+        n_added = len(lead_res.get("leads") or [])
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
+            message=f"✨ Added {n_added} recommended candidate(s) to the project.",
         )
         return {"stage": "recommendations", "done": True,
-                "pushed": lead_res.get("pushed"), "leads": len(lead_res.get("leads") or [])}
+                "pushed": lead_res.get("pushed"), "leads": n_added}
 
     # ----------------------------------------------------------------- demo button
     async def start_demo(self, job_id, *, send: bool = False,
@@ -483,6 +496,11 @@ class RecruiterPipelineService:
                         "recruiter pipeline: job %s no location → pruned %d location facet step(s)",
                         job_id, removed,
                     )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_SEARCH, run_id=search_run.id,
+                message="🔍 Project created — searching for candidates on LinkedIn…",
+            )
             return {"stage": "create_project", "project_link": link_res,
                     "next_run": str(search_run.id), "boolean": built["query"]}
 
@@ -498,6 +516,11 @@ class RecruiterPipelineService:
             runtime_params={"position": pipeline.get("position", "")},
             pipeline=pipeline,
             connector_id=connector_id,
+        )
+        await self._push_flow_status(
+            job_id=job_id, connector_id=connector_id, status="running",
+            event_kind=EVENT_SEARCH, run_id=search_run.id,
+            message="🔍 Project created — searching for candidates on LinkedIn…",
         )
         return {
             "stage": "create_project",
@@ -743,13 +766,12 @@ class RecruiterPipelineService:
             flag_modified(run, "origin")
             await self.session.flush()
 
-        # Sourcing produced its candidates (leads are in Odoo) → mark the position's
-        # flow status OK. The per-candidate save runs that follow keep their own status;
-        # if one fails, the FAILED hook flips the position back to 'failed' (live cycle).
-        await self._push_flow_status(
-            job_id=job_id, connector_id=connector_id, status="done",
-            event_kind=EVENT_SEARCH, run_id=run.id,
-        )
+        # Chatter narration: the search finished. The terminal "done" comes from the SAVE
+        # stage (candidates verified in the project) or the FAILED hook; here we narrate
+        # "found N; saving M…" when a save is enqueued, or a terminal "search complete"
+        # note when there's nothing to save.
+        n_cands = len(candidates)
+        found_str = f"found {count} result(s); " if count is not None else ""
 
         # Save EVERY extracted candidate to the project: the count saved == the count
         # the search extracted (the extraction is itself bounded by the search
@@ -790,6 +812,11 @@ class RecruiterPipelineService:
                 "recruiter pipeline: bulk save run %s for job %s (target=%s, project=%r)",
                 save_run.id, job_id, target_count, project_name,
             )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_SEARCH, run_id=run.id,
+                message=f"🔎 Candidate search done — {found_str}saving {target_count} candidate(s) to the project…",
+            )
             return {"stage": "search", "leads": lead_res, "save_runs": save_runs,
                     "bulk_save": True}
 
@@ -821,6 +848,20 @@ class RecruiterPipelineService:
                 "recruiter pipeline: no save workflow configured — leads pushed, "
                 "candidates NOT auto-saved to the project"
             )
+        if save_runs:
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_SEARCH, run_id=run.id,
+                message=f"🔎 Candidate search done — {found_str}saving {len(save_runs)} candidate(s) to the project…",
+            )
+        else:
+            # Nothing to save (0 candidates or no save workflow) → terminal "done".
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_SEARCH, run_id=run.id,
+                message=(f"🔎 Candidate search complete — {n_cands} candidate(s) found."
+                         if n_cands else "🔎 Candidate search complete — no candidates matched."),
+            )
         return {"stage": "search", "leads": lead_res, "save_runs": save_runs}
 
     async def _after_message(self, run, pipeline, connector_id, job_id) -> dict:
@@ -835,6 +876,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
+                message="✉️ Message preview ready (not sent).",
             )
             return {"stage": "message", "sent": False, "preview": True}
         # Req B: mark the candidates we actually messaged (the project's active
@@ -854,6 +896,7 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_MESSAGE, run_id=run.id,
+            message=f"✉️ Message sent to {len(recipients)} candidate(s).",
         )
         return {"stage": "message", "sent": True, "outreach": res}
 
@@ -886,6 +929,7 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_ARCHIVE, run_id=run.id,
+            message=f"🗄️ Candidate {name or ''} archived and removed from the project.".replace("  ", " "),
         )
         return {"stage": "archive", "removed": True, "archive": archive, "odoo": res}
 
@@ -1004,6 +1048,8 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
             event_kind=EVENT_MESSAGE, run_id=run.id,
+            message=("✉️ Sending the outreach message to the project's candidates…"
+                     if send else "✉️ Preparing the outreach message (preview)…"),
         )
         return str(run.id)
 
@@ -1082,6 +1128,7 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=str(job_id), connector_id=connector_id, status="running",
             event_kind=EVENT_ARCHIVE, run_id=run.id,
+            message=f"🗄️ Archiving candidate {name} from the project…",
         )
         return str(run.id)
 
@@ -1121,6 +1168,7 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=str(job_id), connector_id=connector_id, status="running",
             event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
+            message=f"✨ Adding up to {max(1, int(count))} recommended candidate(s) from LinkedIn…",
         )
         return str(run.id)
 

@@ -7,6 +7,7 @@ import Banner from "../components/Banner";
 import StepScreenshots from "../components/StepScreenshots";
 import FlowManifest from "../components/FlowManifest";
 import { useApi } from "../hooks/useApi";
+import { pipelineLabel } from "../hooks/useRuns";
 import { logger } from "../lib/logger";
 import { formatTime, formatTimeShort } from "../lib/formatTime";
 import { formatDuration, formatEventSummary, getStepStatus, truncatePayload } from "./viewmodels/runDetailViewModel";
@@ -195,6 +196,7 @@ interface RunDetail {
     event_kind?: string;
     execution_target?: string;
     trigger_id?: string;
+    pipeline?: { job_id?: string; position?: string; project_name?: string };
     job_payload?: { job_id?: number; candidate_count?: number };
     execution_options?: {
       mode?: string;
@@ -750,6 +752,11 @@ export default function RunDetailPage() {
               </span>
             )}
           </div>
+          {pipelineLabel(run.origin) && (
+            <div className="text-sm text-text-secondary mb-1">
+              {pipelineLabel(run.origin)}
+            </div>
+          )}
           <div className="flex items-center gap-4 text-xs text-text-secondary">
             {workflow && <span className="font-mono text-text-gray">#{run.id.slice(0, 8)}</span>}
             <span>Step {run.current_step_index + 1} of {run.total_steps}</span>

@@ -396,10 +396,12 @@ class RecruiterPushService:
 
     async def push_flow_status(self, *, connector_id, job_id, status: str,
                                stage: str = "", error_kind: str = "",
-                               error_summary: str = "", run_id=None) -> dict:
+                               error_summary: str = "", message: str = "",
+                               run_id=None) -> dict:
         """Surface the recruiter automation lifecycle on the Odoo hr.job position via
-        POST /akcr/api/recruiter_flow_status. `status` is running|done|failed; on
-        'failed' akcr also posts a chatter note + schedules a to-do for the recruiter.
+        POST /akcr/api/recruiter_flow_status. `status` is running|done|failed; `message`
+        is a descriptive chatter note (e.g. "Searching for candidates…") for running/done.
+        On 'failed' akcr composes its own note + schedules a to-do for the recruiter.
         Best-effort — a push failure must never block run termination."""
         if not job_id:
             return {"pushed": 0, "skipped": "no_job_id"}
@@ -413,6 +415,7 @@ class RecruiterPushService:
             "stage": stage or "",
             "error_kind": error_kind or "",
             "error_summary": (error_summary or "")[:2000],
+            "message": (message or "")[:2000],
             "source_run_id": str(run_id) if run_id else "",
         }
         try:

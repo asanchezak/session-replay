@@ -5,6 +5,7 @@ import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
 import { useRuns, pipelineLabel, pipelineJobId, pipelineProjectName, type RunSummary } from "../hooks/useRuns";
+import { useWorkflows } from "../hooks/useWorkflows";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
 import { Play, Square, Trash2 } from "lucide-react";
@@ -13,6 +14,8 @@ const CANCELABLE_STATUSES = ["running", "queued", "waiting_for_user", "recoverin
 
 export default function RunsPage() {
   const { runs, loading, error, refetch, cancelRun, deleteAllRuns } = useRuns();
+  const { workflows } = useWorkflows();
+  const workflowName = new Map(workflows.map((w) => [w.id, w.name]));
   const navigate = useNavigate();
   const [canceling, setCanceling] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
@@ -118,7 +121,12 @@ export default function RunsPage() {
                 #{r.id.slice(0, 8)}
               </span>
             )},
-            { key: "pipeline", label: "Pipeline", render: (r: RunSummary) => {
+            { key: "workflow", label: "Workflow", render: (r: RunSummary) => (
+              <span className="text-text-secondary text-xs whitespace-nowrap" title={r.workflow_id}>
+                {workflowName.get(r.workflow_id) || `#${r.workflow_id.slice(0, 8)}`}
+              </span>
+            )},
+            { key: "pipeline", label: "Position", render: (r: RunSummary) => {
               const label = pipelineLabel(r.origin);
               const jobId = pipelineJobId(r.origin);
               if (!label) return <span className="text-text-tertiary text-xs">—</span>;
