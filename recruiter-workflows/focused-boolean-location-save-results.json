@@ -1,0 +1,29 @@
+{
+  "name": "Recruiter: FOCUSED boolean + location search -> save results to project",
+  "description": "Saves candidates directly from the Recruiter results page using the daemon-only recruiter_save_results_to_project action. Run only after capture-results-save-dialog confirms the results-page dialog selectors. Params: boolean_query, location, project_name, target_count.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Advanced search","value":"https://www.linkedin.com/talent/search/advanced"},
+    {"action_type":"scroll","intent":"load 1"},
+    {"action_type":"scroll","intent":"load 2"},
+    {"action_type":"click","intent":"Open keyword/boolean facet","selector_chain":[{"type":"css","value":"button[aria-label=\"Añadir Palabras clave del perfil u operadores booleanos\"]"}]},
+    {"action_type":"scroll","intent":"delay keyword textarea 1"},
+    {"action_type":"scroll","intent":"delay keyword textarea 2"},
+    {"action_type":"type","intent":"Boolean keywords + Enter to commit","value":"{{boolean_query}}\n","selector_chain":[{"type":"css","value":"textarea[data-test-free-text-single-value-facet-textarea]"}]},
+    {"action_type":"scroll","intent":"settle keyword commit"},
+    {"action_type":"click","intent":"Open location facet","selector_chain":[{"type":"css","value":"button[aria-label=\"Añadir ubicación del candidato\"]"}]},
+    {"action_type":"scroll","intent":"delay location input 1"},
+    {"action_type":"scroll","intent":"delay location input 2"},
+    {"action_type":"type","intent":"Type location into typeahead","value":"{{location}}","selector_chain":[{"type":"css","value":"[data-test-facet-locations] input.ts-common-typeahead__input"},{"type":"css","value":"input[placeholder^=\"Introducir una ubicación\"]"}]},
+    {"action_type":"scroll","intent":"delay suggestions dropdown 1"},
+    {"action_type":"scroll","intent":"delay suggestions dropdown 2"},
+    {"action_type":"click","intent":"Select top location suggestion","selector_chain":[{"type":"css","value":"li[data-live-test-result=\"0\"]"},{"type":"css","value":"[data-test-typeahead-results] li[role=\"option\"]"}]},
+    {"action_type":"scroll","intent":"settle location applied 1"},
+    {"action_type":"scroll","intent":"settle location applied 2"},
+    {"action_type":"click","intent":"Run the advanced search","selector_chain":[{"type":"css","value":"button[data-test-save-advanced-button]"},{"type":"css","value":"button.advanced-search__header--actions-primary"}]},
+    {"action_type":"scroll","intent":"results load 1"},
+    {"action_type":"scroll","intent":"results load 2"},
+    {"action_type":"extract","intent":"Select result cards and save them to project","methods":[{"kind":"extract_strategy","strategy":"recruiter_save_results_to_project"},{"kind":"recruiter_save_results_to_project","mode":"bulk","project_name":"{{project_name}}","target_count":"{{target_count}}","max_scroll_passes":12}]}
+  ]
+}

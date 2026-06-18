@@ -1,0 +1,84 @@
+{
+  "name": "Recruiter: Save candidate to project (parameterized)",
+  "description": "PARAMETERIZED save-to-project for the Odoo→Recruiter pipeline. Step 2 navigates {{candidate_url}} (a /talent/profile/ URL from the search), step 5 types {{project_name}} into the typeahead, step 8 clicks the option by exact text {{project_name}}. backend create_run substitutes runtime_params.{candidate_url,project_name}. The orchestrator fires one of these per candidate (project_name = '-EZ <position>'). Selectors locked offline 2026-06-08. Params: candidate_url, project_name.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Open candidate profile",
+      "value": "{{candidate_url}}"
+    },
+    {
+      "action_type": "click",
+      "intent": "Open Save-to-project panel",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "[data-test-action='save-to-project']"
+        }
+      ]
+    },
+    {
+      "action_type": "click",
+      "intent": "Switch to existing-project mode",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "label[for='choose-existing-projects']"
+        },
+        {
+          "type": "css",
+          "value": "#choose-existing-projects"
+        }
+      ]
+    },
+    {
+      "action_type": "type",
+      "intent": "Type project name to filter",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "#save-to-projects-typeahead"
+        }
+      ],
+      "value": "{{project_name}}"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "delay: let typeahead load (1)"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "delay: let typeahead load (2)"
+    },
+    {
+      "action_type": "click",
+      "intent": "Pick the project by exact name",
+      "selector_chain": [
+        {
+          "type": "text",
+          "value": "{{project_name}}"
+        }
+      ]
+    },
+    {
+      "action_type": "scroll",
+      "intent": "delay: let Save enable"
+    },
+    {
+      "action_type": "click",
+      "intent": "Save to project",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "button[data-test-action='save']"
+        }
+      ]
+    }
+  ]
+}

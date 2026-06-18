@@ -20,6 +20,103 @@ class Settings(BaseSettings):
     # (the host that holds the LinkedIn session). Other runs go to the requesting
     # operator's daemon (origin.target_operator). Env: LINKEDIN_OPERATOR.
     linkedin_operator: str = "fernanda"
+    # Recruiter (/talent) automation pipeline: the parameterized sub-workflows the
+    # RecruiterPipelineService chains on a new Odoo position (create project →
+    # search → save candidates). Set these to the IDs of the parameterized
+    # workflows once created. Env: RECRUITER_{CREATE_PROJECT,SEARCH,SAVE}_WORKFLOW_ID.
+    recruiter_create_project_workflow_id: str = ""
+    recruiter_search_workflow_id: str = ""
+    recruiter_save_workflow_id: str = ""
+    recruiter_message_workflow_id: str = ""
+    recruiter_advanced_search_workflow_id: str = ""
+    # Bulk results-page save: ONE daemon run selects N candidates on the search
+    # results page and bulk-saves them to the project (zero profile visits → much
+    # lighter anti-bot footprint than the per-candidate recruiter_save_workflow_id
+    # loop). When set, _after_search fires this instead of N per-profile save runs.
+    # Workflow params: search_url, project_name, target_count.
+    # Env: RECRUITER_SAVE_RESULTS_WORKFLOW_ID.
+    recruiter_save_results_workflow_id: str = ""
+    # Remove (= ARCHIVE; Recruiter has no hard-delete from a project) a single
+    # candidate from a project. Fired by POST /v1/recruiter/leads/remove when an
+    # Odoo linkedin.lead is deleted: one daemon archive run locates the candidate
+    # by NAME on the project pipeline, archives them, and VERIFIES they're gone;
+    # on confirmed removal the terminal hook deletes the Odoo lead
+    # (/akcr/api/lead_removed). Workflow params: project_url, candidate_name.
+    # Env: RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID.
+    recruiter_archive_candidate_workflow_id: str = ""
+    # Archive a whole project (testing tool). Triggered on-demand (run-with-params),
+    # not by the autonomous pipeline. Env: RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID.
+    recruiter_archive_project_workflow_id: str = ""
+    # Add a project's RECOMMENDED matches (LinkedIn Automated Sourcing) to the pipeline.
+    # Triggered via POST /v1/recruiter/jobs/{id}/save-recommendations; the terminal hook
+    # pushes the added candidates as linkedin.lead. Env: RECRUITER_RECOMMENDATIONS_WORKFLOW_ID.
+    recruiter_recommendations_workflow_id: str = ""
+    # DEMO button (Odoo "Demo" on hr.job): reset the LinkedIn project to ONLY the demo
+    # profile (archive ALL → add the profile), then optionally send the templated InMail.
+    # Reuses the standalone archive-all / add-profile sub-workflows; defaulted to their
+    # deployed IDs so the demo works after a plain backend redeploy (no box env change).
+    # Env: RECRUITER_ARCHIVE_ALL_WORKFLOW_ID / RECRUITER_ADD_PROFILE_WORKFLOW_ID.
+    recruiter_archive_all_workflow_id: str = "511ceaab-34c2-4d8b-9241-725a61e1cc32"
+    recruiter_add_profile_workflow_id: str = "f003f090-d74a-41bc-90a9-67f5fd603a5d"
+    # The single profile the demo keeps (public /in/ URL; bridges to the Recruiter
+    # profile in a logged-in seat). Default = Andrey (your own profile) so the demo
+    # never messages a real candidate. Env: RECRUITER_DEMO_PROFILE_URL/_NAME.
+    recruiter_demo_profile_url: str = "https://www.linkedin.com/in/franz-sivaja-s%C3%A1nchez-869354277/"
+    recruiter_demo_profile_name: str = "Franz Sivaja Sánchez"
+    # Safety cap on the demo archive-all loop (each pass clears ~15-25 within its 175s
+    # budget; the loop re-enqueues while the project still has active candidates).
+    recruiter_demo_archive_rounds: int = 6
+    # Location facet for the advanced search. The focused boolean+location search
+    # workflow needs a location to commit reliably (the location facet + explicit
+    # "Run search" click is what actually executes the query; boolean-only Enter-
+    # commit can leave the page on "Búsqueda vacía"). Threaded as {{location}}.
+    # Env: RECRUITER_DEFAULT_LOCATION.
+    recruiter_default_location: str = ""
+    # Maps the Odoo hr.job.job_location selection (cr/latam/global) to the LinkedIn
+    # location facet string typed into the search. A value of "" means "skip the
+    # location facet entirely" (worldwide) — the search workflow's location block is
+    # marked skip_if_blank:location so it's pruned when no location is threaded. An
+    # unknown/empty job_location falls back to recruiter_default_location. Pydantic
+    # parses the env value as JSON. Env: RECRUITER_LOCATION_MAP.
+    recruiter_location_map: dict[str, str] = {
+        "cr": "Costa Rica",
+        "latam": "Latin America",
+        "global": "",
+    }
+    # How many skills the INITIAL boolean AND's (musts first, then optionals) on top
+    # of the (title OR …) clause — i.e. how STRICT the first search is. The builder's
+    # default is 2 (title + 2 skills); raise it for a tighter first pass on rich JDs.
+    # Bounded per-position by max_tightness(spec) = title + all skills. The calibration
+    # below still broadens (-1) if the tightened query returns too few. Env:
+    # RECRUITER_SEARCH_START_TIGHTNESS.
+    recruiter_search_start_tightness: int = 2
+    # Boolean-search count calibration: target ~15; re-tune (tighten/broaden the
+    # boolean) when the result count falls outside [min,max], capped at N re-runs.
+    recruiter_target_count: int = 15
+    recruiter_count_band_min: int = 10
+    recruiter_count_band_max: int = 25
+    # At most ONE calibration → ≤2 searches per position. We extract ~30 and save a
+    # handful downstream regardless of the raw count, so the search count barely
+    # affects the OUTPUT — chasing a tighter count costs extra searches on the
+    # sensitive account for little gain. Live data: a full-stack+CR search goes
+    # 670→507→206 across tightness steps and never dips under 150 in 2 reruns, so
+    # max_reruns=2 always exhausted; 1 rerun gives the calibration benefit (one
+    # tighten) without the 3rd search. Env: RECRUITER_MAX_SEARCH_RERUNS.
+    recruiter_max_search_reruns: int = 1
+    # Calibration STOP thresholds — the early-exit guards (used when max_reruns > 1):
+    # finalize once the count is at/below the acceptable ceiling, or once tightening
+    # stops reducing it by at least min_convergence (diminishing returns), instead of
+    # mechanically burning reruns. A location-faceted tech search realistically
+    # returns 50-500 even tightened; we only extract ~30 + save a handful, so a count
+    # at/below the ceiling is "good enough". Env: RECRUITER_COUNT_ACCEPTABLE_MAX /
+    # RECRUITER_COUNT_MIN_CONVERGENCE.
+    recruiter_count_acceptable_max: int = 150
+    recruiter_count_min_convergence: float = 0.35
+    # Optional ABSOLUTE ceiling on how many of the extracted candidates get saved
+    # to the project. 0 (default) = NO cap → save EVERY extracted candidate (the
+    # count saved == the count the search extracted, itself bounded by the search
+    # workflow target_count). Env: RECRUITER_MAX_SAVES_PER_POSITION.
+    recruiter_max_saves_per_position: int = 0
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True

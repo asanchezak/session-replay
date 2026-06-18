@@ -1,0 +1,27 @@
+{
+  "name": "Recruiter: Bulk-message a project (parameterized, SENDS InMail)",
+  "description": "PARAMETERIZED bulk InMail to a project's candidates for the Odoo→Recruiter loop (req B). ⚠️ Actually sends + burns InMail credits. Fired ONLY by RecruiterPipelineService.send_messages(job_id) (a deliberate/manual trigger), which stamps origin.event_kind=recruiter_message + the messaged candidates; on completion the terminal hook pushes outreach_status=messaged to Odoo. SUBJECT-REVEAL QUIRK: the subject input is hidden until a Send attempt validates it → type body → Send#1 (blocked, reveals subject) → type subject → Send#2. Params: pipeline_url (step 1), body (step 11), subject (step 16). backend create_run substitutes runtime_params.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Project pipeline","value":"{{pipeline_url}}"},
+    {"action_type":"scroll","intent":"settle"},
+    {"action_type":"scroll","intent":"settle (human pause)"},
+    {"action_type":"click","intent":"Select all active candidates","selector_chain":[{"type":"css","value":"input.small-input"}]},
+    {"action_type":"scroll","intent":"bulk-action bar"},
+    {"action_type":"click","intent":"Open bulk InMail composer","selector_chain":[{"type":"css","value":"button[data-test-action='send-message']"}]},
+    {"action_type":"scroll","intent":"composer load 1"},
+    {"action_type":"scroll","intent":"composer load 2"},
+    {"action_type":"scroll","intent":"composer load 3"},
+    {"action_type":"type","intent":"Body","value":"{{body}}","selector_chain":[{"type":"accessibility","value":"Compose a message or draft with AI"},{"type":"css","value":"div.ql-editor[contenteditable='true']"}]},
+    {"action_type":"scroll","intent":"settle after body"},
+    {"action_type":"click","intent":"Send #1 — validates + REVEALS the subject field (blocked, no send)","selector_chain":[{"type":"accessibility","value":"Send this message"},{"type":"accessibility","value":"Enviar este mensaje"},{"type":"text","value":"Send"}]},
+    {"action_type":"scroll","intent":"subject field appears 1"},
+    {"action_type":"click","intent":"Focus the now-visible subject field","selector_chain":[{"type":"css","value":"input[data-test-compose-subject-input]"},{"type":"accessibility","value":"Message subject"}]},
+    {"action_type":"type","intent":"Subject","value":"{{subject}}","selector_chain":[{"type":"css","value":"input[data-test-compose-subject-input]"},{"type":"accessibility","value":"Message subject"},{"type":"css","value":"input.compose-subject__input"}]},
+    {"action_type":"scroll","intent":"settle after subject"},
+    {"action_type":"click","intent":"Send #2 — actually sends","selector_chain":[{"type":"accessibility","value":"Send this message"},{"type":"accessibility","value":"Enviar este mensaje"},{"type":"text","value":"Send"}]},
+    {"action_type":"scroll","intent":"let send complete 1"},
+    {"action_type":"scroll","intent":"let send complete 2"}
+  ]
+}

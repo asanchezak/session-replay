@@ -21,7 +21,7 @@ import { chromium } from "@playwright/test";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { defaultEmptyValue, readExtractShapes, readExtractStrategy, shapeToPrompt, shapeToSchema } from "./driver-shapes.mjs";
 import { STEALTH_INIT } from "./src/shared/stealth.mjs";
 import { OVERLAY_INIT } from "./src/shared/overlay-init.mjs";
@@ -41,13 +41,14 @@ import {
 } from "./src/behavior/profile-parsers.mjs";
 import { experienceParasCore, sectionListItemsCore, subpageTextCore } from "./src/behavior/profile-dom.mjs";
 import { prepareConnectNoteDialog, NOTE_TEXTAREA_SELECTOR } from "./src/behavior/connect-compose-core.mjs";
-import { PHASE_A_VERBS, resolveLocator, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
+import { PHASE_A_VERBS, resolveLocator, resolveLocatorWithWait, clickResolved, typeResolved } from "./src/behavior/selector-resolve.mjs";
 import { evaluateSuccessCondition, successConditionInputs } from "./src/behavior/step-interpreter.mjs";
 import { snapshotPage } from "./src/behavior/page-snapshot.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
+const RUNTIME_STRATEGIES_DIR = path.resolve(__dirname, "runtime-strategies");
 
 const BACKEND = process.env.BACKEND || "http://localhost:8081";
 const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
@@ -228,6 +229,21 @@ async function pauseRun(runId, reason, stepIndex) {
   }
 }
 
+// Mark a run FAILED (terminal). Used when a Recruiter step hits a walled /talent seat:
+// the run must visibly fail (not complete with 0 results), then be relaunched after a
+// fresh login (POST /v1/runs/{id}/relaunch re-queues it for this daemon).
+async function failRun(runId, reason) {
+  try {
+    await fetchJson(`${BACKEND}/v1/runs/${runId}/fail`, {
+      method: "POST",
+      body: JSON.stringify({ error: reason }),
+    });
+    console.log(`[daemon] FAILED run ${runId}: ${reason}`);
+  } catch (err) {
+    console.error(`[daemon] failRun ${runId} failed:`, err.message?.slice(0, 200));
+  }
+}
+
 // Atomically claim a QUEUED run (QUEUED→RUNNING) before driving it. The backend
 // takes SELECT … FOR UPDATE on the row, so a lost race (run already claimed)
 // comes back 409 — return false and let the next poll pick a different run.
@@ -255,39 +271,14 @@ async function claimRun(runId) {
 // supervisor recovery can legitimately leave the backend in RUNNING while no
 // browser is actively driving. In that case the daemon must re-attach and
 // continue from current_step_index instead of waiting forever.
-async function findPendingRun() {
+// I/O only: fetch the queued/running/recovering buckets and flatten them. The
+// CLAIM/PRIORITY decision lives in the hot-loaded behavior module's pickPendingRun.
+async function fetchPendingRunCandidates() {
   const statuses = ["queued", "running", "recovering"];
   const buckets = await Promise.all(
     statuses.map((status) => fetchJson(`${BACKEND}/v1/runs?limit=50&status=${status}`)),
   );
-  const items = buckets.flatMap((list) => (Array.isArray(list) ? list : list.items || []));
-  const watched = items.filter((r) => {
-    if (!r.origin) return false;
-    // Webhook/reconciler-driven LinkedIn flows (by event_kind) AND any run the
-    // extension explicitly enqueued for the daemon (execution_target=="daemon").
-    const isWatched = r.origin.event_kind === "new_job_position"
-      || r.origin.event_kind === "linkedin_lead_search"
-      || r.origin.execution_target === "daemon";
-    if (!isWatched) return false;
-    // Operator routing: only claim runs targeted at THIS daemon's operator.
-    // LinkedIn flows are pinned to the LinkedIn operator (e.g. "fernanda");
-    // dashboard runs are pinned to the requesting operator. A mismatch (incl.
-    // an untargeted run when this daemon has an OPERATOR_ID) is left for the
-    // owning daemon to claim.
-    if ((r.origin.target_operator || "") !== OPERATOR_ID) return false;
-    if (Array.isArray(r.extracted_data) && r.extracted_data.length > 0) return false;
-    if (r.status === "queued" && r.current_step_index > 0) return false;
-    return true;
-  });
-  if (watched.length === 0) return null;
-  // Oldest first (FIFO). The list endpoint orders created_at DESC, so sort
-  // ascending here and take the head.
-  watched.sort((a, b) => {
-    const ta = a.created_at ? Date.parse(a.created_at) : 0;
-    const tb = b.created_at ? Date.parse(b.created_at) : 0;
-    return ta - tb;
-  });
-  return watched[0];
+  return buckets.flatMap((list) => (Array.isArray(list) ? list : list.items || []));
 }
 
 // ── Blocker detection (detect on EVERY navigation; pause, don't plow) ────────
@@ -326,6 +317,9 @@ async function assertNoBlocker(page, label) {
 // gated by STEP_SHOTS (default on); a screenshot must never break a live scrape.
 const STEP_SHOTS = process.env.STEP_SHOTS !== "0";
 const STEP_SHOT_SETTLE_MS = Number(process.env.STEP_SHOT_SETTLE_MS || "700");
+// Generic Phase-A click/type: wait this long for an async-rendered target (the
+// /talent SPA) to appear before resolving — replaces blind no-op delay steps.
+const STEP_RESOLVE_TIMEOUT_MS = Number(process.env.STEP_RESOLVE_TIMEOUT_MS || "12000");
 let navSeq = 0;
 function resetStepShots() { navSeq = 0; }
 async function uploadStepShot(page, label) {
@@ -638,49 +632,118 @@ async function scrapeSearchProfileUrls(page) {
 // social-proof element (and have no result avatar). So we anchor on result
 // avatars and skip anything inside social-proof — layout-agnostic and free of
 // the mutual-connection noise.
-// Recruiter /talent/search results scraper — reads the candidate cards
-// (name + /talent/profile URL + best-effort headline). NOT a profile view, so it
-// does NOT consume the profile-view budget. Card + name selectors locked offline
-// from recruiter-snapshots/search-capture/03-results-populated.html.
-async function scrapeRecruiterSearch(page) {
-  const CARD = '[data-view-name="talent-profile-list-element-search-global"]';
-  await page.waitForSelector(`${CARD}, a[href*="/talent/profile/"]`, { timeout: 20000 }).catch(() => {});
-  let prev = -1, stable = 0;
-  for (let i = 0; i < 10; i++) {
-    const n = await page.evaluate((s) => document.querySelectorAll(s).length, CARD).catch(() => 0);
-    if (n > 0 && n === prev) { if (++stable >= 2) break; } else { stable = 0; }
-    prev = n;
-    await sleep(700);
+const runtimeStrategyCache = new Map();
+
+function strategyModuleName(strategy) {
+  if (String(strategy || "").startsWith("recruiter_")) return "recruiter";
+  return null;
+}
+
+async function loadRuntimeStrategyModule(name) {
+  const filePath = path.join(RUNTIME_STRATEGIES_DIR, `${name}.mjs`);
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
   }
-  await humanScrollSeeded(page, 3 + Math.floor(Math.random() * 3), Math.random);
-  return await page.evaluate((CARD) => {
-    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const canon = (href) => {
-      const m = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
-      return m ? "https://www.linkedin.com" + m[0] : "";
-    };
-    const out = [];
-    const seen = new Set();
-    for (const card of Array.from(document.querySelectorAll(CARD))) {
-      const link = card.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');
-      if (!link) continue;
-      const name = clean(link.innerText || link.textContent);
-      const url = canon(link.getAttribute("href"));
-      if (!name || !url || seen.has(url)) continue;
-      seen.add(url);
-      // headline: first card line that isn't the name / a select label / a
-      // connection-degree badge.
-      let headline = "";
-      for (const ln of clean(card.innerText).split("\n").map(clean).filter(Boolean)) {
-        if (ln === name) continue;
-        if (/^(seleccionar|select)\b/i.test(ln)) continue;
-        if (/contacto de|grado|mutual|en común|^\d+\s*(º|°)/i.test(ln)) continue;
-        headline = ln; break;
-      }
-      out.push({ name, profile_url: url, headline });
-    }
-    return out;
-  }, CARD);
+  const href = `${pathToFileURL(filePath).href}?mtime=${encodeURIComponent(String(stat.mtimeMs))}`;
+  const cached = runtimeStrategyCache.get(name);
+  if (cached?.href === href) return cached.module;
+  const module = await import(href);
+  runtimeStrategyCache.set(name, { href, module });
+  console.log(`[daemon] hot-loaded runtime strategy "${name}" (${new Date(stat.mtimeMs).toISOString()})`);
+  return module;
+}
+
+// ── Hot-loaded daemon behavior (pickPendingRun / driveGenericStep / keepAliveTick) ──
+// The volatile decision logic lives in runtime-strategies/daemon-behavior.mjs and is
+// hot-loaded by mtime (same mechanism as recruiter.mjs) so behavior changes apply by
+// `scp`-ing that one file — NO daemon restart, NO /talent re-login.
+const BEHAVIOR_REQUIRED_EXPORTS = ["pickPendingRun", "driveGenericStep", "keepAliveTick"];
+let lastBehaviorUnavailableLog = "";
+
+// STRICT fail-safe: returns the module ONLY if it imports cleanly AND exposes every
+// required export as a function. On any failure (broken scp / missing export / export
+// drift) returns null — the host then does NOT claim/drive/keepalive this tick, only
+// polls + heartbeats + logs loudly, and self-heals when a good file is synced.
+async function loadBehaviorModule() {
+  let module;
+  try {
+    module = await loadRuntimeStrategyModule("daemon-behavior");
+  } catch (e) {
+    module = null;
+    var loadErr = (e && e.message) || String(e);
+  }
+  if (!module) {
+    const msg = `[behavior] module unavailable (${loadErr || "daemon-behavior.mjs missing"}) — NOT claiming/driving runs until fixed`;
+    if (msg !== lastBehaviorUnavailableLog) { console.error(msg); lastBehaviorUnavailableLog = msg; }
+    return null;
+  }
+  const missing = BEHAVIOR_REQUIRED_EXPORTS.filter((n) => typeof module[n] !== "function");
+  if (missing.length) {
+    const msg = `[behavior] module export drift — missing/not-a-function: ${missing.join(", ")} — NOT claiming/driving runs until fixed`;
+    if (msg !== lastBehaviorUnavailableLog) { console.error(msg); lastBehaviorUnavailableLog = msg; }
+    return null;
+  }
+  if (lastBehaviorUnavailableLog) { console.log(`[behavior] module healthy again (v${module.BEHAVIOR_VERSION || "?"})`); lastBehaviorUnavailableLog = ""; }
+  return module;
+}
+
+// The `api` bag passed to every behavior function — a GENEROUS, stable surface
+// (helpers + backend I/O + config + mutable-state accessors) so the hot module can
+// reach new endpoints / use any helper WITHOUT a host change. Keeping this frozen is
+// what makes future behavior tweaks (e.g. the reply-scanner) pure `scp` edits.
+function buildBehaviorApi() {
+  return {
+    helpers: {
+      sleep, jitter,
+      moveMouseAlongBezier, humanScrollSeeded, typeHumanLike,
+      resolveLocator, resolveLocatorWithWait, clickResolved, typeResolved,
+      checkSuccessConditionDaemon, isBlockerUrl, assertNoBlocker,
+    },
+    io: { fetchJson, reportStepResult, failRun, pauseRun, postExtraction, captureDebug },
+    config: {
+      BACKEND, OPERATOR_ID, WORKER_ID,
+      VIEWPORT_WIDTH, VIEWPORT_HEIGHT,
+      STEP_RESOLVE_TIMEOUT_MS,
+      RECRUITER_PING_MIN_MS, RECRUITER_PING_MAX_MS, RECRUITER_PING_WALLED_BACKOFF_MS,
+    },
+    state: {
+      getWarmPage: () => warmPage,
+      setWarmPage: (p) => { warmPage = p; },
+      getProfileContext,
+      getDrivingRunId: () => drivingRunId,
+    },
+  };
+}
+
+async function runRuntimeStrategy(strategy, { page, step, orand }) {
+  const moduleName = strategyModuleName(strategy);
+  if (!moduleName) return null;
+  const module = await loadRuntimeStrategyModule(moduleName);
+  if (!module || typeof module.runStrategy !== "function") return null;
+  if (typeof module.handlesStrategy === "function" && !module.handlesStrategy(strategy)) return null;
+  return module.runStrategy({
+    strategy,
+    page,
+    step,
+    orand,
+    runtime: {
+      sleep,
+      moveMouseAlongBezier,
+      resolveLocatorWithWait,
+      clickResolved,
+      typeHumanLike,
+      viewportWidth: VIEWPORT_WIDTH,
+      viewportHeight: VIEWPORT_HEIGHT,
+      // QA visibility: lets a hot-loaded strategy push intermediate per-step
+      // screenshots (e.g. "recommendations list open", "added candidate N") to
+      // the dashboard mid-loop, instead of only the daemon's one shot at the end.
+      // Bound to the live page + drivingRunId; no-op when STEP_SHOTS is off.
+      uploadStepShot: (label) => uploadStepShot(page, label),
+    },
+  });
 }
 
 async function scrapeSearchPeople(page) {
@@ -1291,10 +1354,14 @@ async function captureDebug(page, runId, stepIndex, reason, consoleBuf = []) {
   } catch (e) { dbg(`captureDebug backend POST failed: ${e.message || e}`); }
 }
 
-async function driveRun(run) {
+async function driveRun(run, behavior) {
   const runId = run.id;
   drivingRunId = runId;
   resetStepShots();
+  // Intra-run consistency: use the ONE behavior-module instance the loop loaded for
+  // this run's entire lifetime (no mid-run behavior swap). The loop only calls
+  // driveRun when the module is healthy, so `behavior` is always present here.
+  const behaviorApi = buildBehaviorApi();
   // QA execution options (default: live, no cap). max_candidates caps how many
   // profiles a test run actually scrapes so a test doesn't burn the shared
   // budget; remaining candidate steps just advance the cursor without page loads.
@@ -1562,41 +1629,90 @@ async function driveRun(run) {
             console.log(`  step ${idx}: ${urls.length} URLs (search extract)`);
             await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), profile_urls: urls });
             await reportStepResult(runId, idx, "extract");
-          } else if (strategy === "recruiter_search_people") {
-            // Recruiter /talent/search results — name + headline + /talent/profile URL.
-            // Not a profile view (no budget gate / recordProfileView).
-            lastIdx = idx; mark = `recruiter-search:${idx}`;
-            const people = await scrapeRecruiterSearch(page);
-            seenPool.push(...people.map((p) => p.profile_url));
-            dbg(`step${idx} scraped ${people.length} recruiter candidates`);
-            console.log(`  step ${idx}: ${people.length} candidates (recruiter search)`);
-            await postExtraction(runId, idx, page.url(), { page_title: await page.title(), url: page.url(), people });
-            await reportStepResult(runId, idx, "extract");
           } else {
-            // Budget gate: pause-and-resume rather than drop candidates.
-            const reason = budgetExhaustedReason();
-            if (reason) {
-              console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
-              await pauseRun(runId, reason, idx);
-              blocked = true;
-              break;
-            }
-            // Capture profile URL BEFORE scrapeProfileFull navigates through
-            // /details/<section>/ subpages, otherwise page.url() returns the
-            // last subpage instead of the canonical /in/<slug>/.
-            const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
-            const data = strategy === "generic_schema"
-              ? await scrapeGenericByShapes(page, profileUrl, shapes)
-              : await scrapeProfileFull(page, profileUrl, shapes);
-            recordProfileView();
-            if (strategy === "generic_schema") {
-              console.log(`  step ${idx}: generic_schema extract "${data.page_title || ""}" keys=[${Object.keys(data).filter((k) => k !== "page_title" && k !== "url").join(",")}]`);
+            const runtimeResult = await runRuntimeStrategy(strategy, { page, step, orand });
+            if (runtimeResult?.handled) {
+              lastIdx = idx; mark = `runtime-strategy:${strategy}:${idx}`;
+              // A lapsed /talent seat redirects the Recruiter surface to a login wall:
+              // the strategy then "succeeds" with 0 candidates and the run would
+              // COMPLETE silently (pushing 0 leads). Detect the wall and FAIL the run
+              // (visible + relaunchable) instead. assertNoBlocker throws on a warm seat
+              // only if it actually hits login/checkpoint — no false positives.
+              if (String(strategy).startsWith("recruiter_")) {
+                let walled = null;
+                try { await assertNoBlocker(page, `${strategy}:${idx}`); } catch (e) { walled = e; }
+                if (walled) {
+                  await captureDebug(page, runId, idx, `recruiter seat walled at ${mark}: ${walled.message}`, consoleBuf).catch(() => {});
+                  await failRun(runId, "Recruiter seat walled — re-login (login-talent.bat) then Relaunch the run");
+                  blocked = true;
+                  break;
+                }
+              }
+              if (Array.isArray(runtimeResult.seenProfileUrls)) seenPool.push(...runtimeResult.seenProfileUrls);
+              const log = runtimeResult.log || `${strategy} handled`;
+              dbg(`step${idx} ${log}`);
+              console.log(`  step ${idx}: ${log}`);
+              await postExtraction(runId, idx, page.url(), {
+                page_title: await page.title(),
+                url: page.url(),
+                ...(runtimeResult.extraction || {}),
+              });
+              // Per-stage SUCCESS VERIFICATION. A recruiter stage that ran all its steps
+              // but did NOT achieve its goal (project not created, results didn't load,
+              // candidates not saved/verified, archive unconfirmed, message not sent) must
+              // FAIL the run — not silently complete. Failing here (before the
+              // auto-completing reportStepResult) halts the chained pipeline (advance() runs
+              // only on COMPLETED), surfaces on the Odoo position (recruiter_flow_status=
+              // failed + to-do), and stays relaunchable. Criteria live in recruiter.mjs
+              // (hot); this call site is generic so tuning needs no daemon restart.
+              if (String(strategy).startsWith("recruiter_")) {
+                try {
+                  const vmod = await loadRuntimeStrategyModule("recruiter");
+                  if (vmod && typeof vmod.stageVerdict === "function") {
+                    const verdict = vmod.stageVerdict({
+                      strategy,
+                      eventKind: _ek,
+                      extraction: runtimeResult.extraction || {},
+                    }) || { ok: true };
+                    if (!verdict.ok) {
+                      console.error(`  step ${idx}: ${strategy} stage gate FAILED — ${verdict.reason}`);
+                      await captureDebug(page, runId, idx, `recruiter stage gate failed: ${verdict.reason}`, consoleBuf).catch(() => {});
+                      await failRun(runId, `${strategy} stage failed: ${verdict.reason}`);
+                      blocked = true;
+                      break;
+                    }
+                  }
+                } catch (vErr) {
+                  console.error(`  step ${idx}: stageVerdict error (ignored, completing) — ${(vErr && vErr.message || vErr)?.toString().slice(0, 140)}`);
+                }
+              }
+              await reportStepResult(runId, idx, "extract");
             } else {
-              console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${(data.education || []).length} skills=${(data.skills || []).length} certs=${(data.certifications || []).length}`);
+              // Budget gate: pause-and-resume rather than drop candidates.
+              const reason = budgetExhaustedReason();
+              if (reason) {
+                console.log(`  step ${idx}: budget exhausted (${reason}) — pausing run to resume next window`);
+                await pauseRun(runId, reason, idx);
+                blocked = true;
+                break;
+              }
+              // Capture profile URL BEFORE scrapeProfileFull navigates through
+              // /details/<section>/ subpages, otherwise page.url() returns the
+              // last subpage instead of the canonical /in/<slug>/.
+              const profileUrl = page.url().replace(/\/details\/.+$/, "").replace(/\/$/, "");
+              const data = strategy === "generic_schema"
+                ? await scrapeGenericByShapes(page, profileUrl, shapes)
+                : await scrapeProfileFull(page, profileUrl, shapes);
+              recordProfileView();
+              if (strategy === "generic_schema") {
+                console.log(`  step ${idx}: generic_schema extract "${data.page_title || ""}" keys=[${Object.keys(data).filter((k) => k !== "page_title" && k !== "url").join(",")}]`);
+              } else {
+                console.log(`  step ${idx}: "${data.full_name}" headline="${(data.headline || "").slice(0, 60)}" edu=${(data.education || []).length} skills=${(data.skills || []).length} certs=${(data.certifications || []).length}`);
+              }
+              await postExtraction(runId, idx, profileUrl, data);
+              await reportStepResult(runId, idx, "extract");
+              profileExtractCount += 1;
             }
-            await postExtraction(runId, idx, profileUrl, data);
-            await reportStepResult(runId, idx, "extract");
-            profileExtractCount += 1;
           }
         } else if (action === "linkedin_people_search") {
           // Humanized people-search navigation (typeahead + "People" pill click,
@@ -1656,54 +1772,29 @@ async function driveRun(run) {
           }
           await reportStepResult(runId, idx, "open_message_drafts");
         } else if (PHASE_A_VERBS.has(action)) {
-          // Generic interactive verbs (click/type) resolved from the recorded
-          // selector_chain — the daemon's first plan-driven dispatch (mirrors the
-          // extension's replay.ts executeStep: primary selector_chain, then ONE
-          // level of methods[] fallback). Anti-bot: routes through the SAME
-          // moveMouseAlongBezier (single shared cursor) + typeHumanLike the rest
-          // of the daemon uses, seeded by the run RNG `orand`; nothing about HOW a
-          // verb is timed changes. A thrown BlockerError propagates to the catch
-          // below (pause without advancing). On NO resolution we soft-miss (log +
-          // report success + advance): a step-result success:false would FAIL the
-          // whole run (the backend has no per-step retry/heal), so best-effort
-          // here matches the daemon's existing transient-error policy.
-          const attempts = [{ selector_chain: step.selector_chain, action_type: action, value }];
-          if (Array.isArray(step.methods)) {
-            for (const m of step.methods) {
-              if (m && Array.isArray(m.selector_chain) && m.selector_chain.length) {
-                attempts.push({
-                  selector_chain: m.selector_chain,
-                  action_type: m.action_type || action,
-                  value: m.value !== undefined ? String(m.value) : value,
-                });
-              }
-            }
-          }
-          let acted = false;
-          let actedTarget = null;
-          for (const a of attempts) {
-            const target = await resolveLocator(page, a.selector_chain);
-            if (!target) continue;
-            if (a.action_type === "type") {
-              acted = await typeResolved(page, target, a.value, { moveMouseAlongBezier, typeHumanLike, orand });
-            } else {
-              acted = await clickResolved(page, target, { moveMouseAlongBezier, orand });
-            }
-            if (acted) { actedTarget = target; break; }
-          }
-          if (!acted) {
-            console.log(`  step ${idx}: ${action} — no selector resolved (soft-miss, advancing)`);
-          } else if (step.success_condition) {
-            // Verify the recorded success condition via the SHARED predicate
-            // (same logic as replay.ts). Soft: log on mismatch, still advance —
-            // a step-result success:false would fail the whole run.
-            const verdict = await checkSuccessConditionDaemon(page, step, actedTarget);
-            if (!verdict.ok) console.log(`  step ${idx}: ${action} success_condition not met (${verdict.reason}) — soft, advancing`);
+          // Generic interactive verbs (click/type) — the hot path for ALL ~131
+          // workflows. Delegated to the hot-loaded behavior module so selector/
+          // checkpoint policy can be tuned by `scp` (no restart). The module resolves
+          // the recorded selector_chain (primary + ONE level of methods[] fallback)
+          // via the SAME humanized cursor/typing (seeded by the run RNG `orand`) and
+          // returns the verdict; the HOST owns the side effects (failRun / reportStepResult).
+          const { critFail } = await behavior.driveGenericStep({ step, page, idx, action, value, orand, api: behaviorApi });
+          if (critFail) {
+            console.error(`  step ${idx}: ${action} CRITICAL — ${critFail} → failing run`);
+            await captureDebug(page, runId, idx, `critical step failed: ${critFail}`, consoleBuf).catch(() => {});
+            await failRun(runId, `step ${idx} '${step.intent || action}' failed: ${critFail}`);
+            blocked = true;
+            break;
           }
           await reportStepResult(runId, idx, action);
         } else {
           await reportStepResult(runId, idx, action || "noop");
         }
+        // Dashboard screenshot for EVERY generic step (each state update) so a human
+        // watching the run sees the action's result. uploadStepShot settles
+        // (STEP_SHOT_SETTLE_MS) before capturing, and the wait-for-selector above
+        // means the page is loaded — not mid-render. No-op when STEP_SHOTS=0.
+        if (page) await uploadStepShot(page, `${idx}: ${step.intent || action || "step"}`).catch(() => {});
         // Optional per-step DOM snapshot (execution_options.snapshot): full HTML +
         // inventory + screenshot to recruiter-snapshots/<runId>/ so selectors can be
         // tuned OFFLINE, never reloading the sensitive account.
@@ -1784,39 +1875,9 @@ async function driveRun(run) {
 
 // ── Main poll loop ──────────────────────────────────────────────────────────
 
-// Read-only /talent/home ping that refreshes the Recruiter session so it doesn't
-// lapse between runs. Sequential with the run loop (one Chrome on the profile at a
-// time). Never trips the circuit breaker — a wall just flags that a login is needed.
-async function recruiterKeepAlivePing() {
-  try {
-    const ctx = await getProfileContext();
-    // Reuse (or re-establish) the parked /talent tab — NEVER open a fresh browser.
-    // Keeping this ONE tab alive between pings is what actually holds the seat: the
-    // Recruiter SPA keeps polling LinkedIn's realtime endpoints (left un-throttled by
-    // PROFILE_LAUNCH_ARGS) exactly like Fernanda's always-open browser.
-    if (!warmPage || warmPage.isClosed()) {
-      warmPage = (ctx.pages()[0] && !ctx.pages()[0].isClosed()) ? ctx.pages()[0] : await ctx.newPage();
-    }
-    // Re-assert the session in the SAME tab: a real authenticated request every couple
-    // of minutes both refreshes the seat and surfaces a wall if one appeared.
-    await warmPage.goto("https://www.linkedin.com/talent/home", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await warmPage.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-    await sleep(2500 + Math.random() * 2500);
-    const url = warmPage.url();
-    const walled = isBlockerUrl(url) || /\/uas\/login|login-cap/i.test(url);
-    recruiterSessionWarm = !walled;
-    if (walled) {
-      console.log(`[keepalive] /talent WALLED — Recruiter seat lapsed; needs a fresh login (login-talent.bat). Browser stays OPEN.`);
-    } else {
-      await moveMouseAlongBezier(warmPage, { x: 400 + Math.random() * 400, y: 250 + Math.random() * 200 }, Math.random).catch(() => {});
-      await humanScrollSeeded(warmPage, 1 + Math.floor(Math.random() * 2), Math.random).catch(() => {});
-      console.log(`[keepalive] /talent OK — Recruiter seat warm (browser kept open)`);
-    }
-  } catch (e) {
-    console.log(`[keepalive] ping error: ${(e && e.message) || e}`);
-  }
-  // NO finally close — keeping the browser open is the whole point of the fix.
-}
+// The keep-alive ping (read-only /talent/home, refresh the seat, detect a wall) now
+// lives in the hot-loaded behavior module (keepAliveTick) so its cadence + the future
+// reply-scan can be tuned by `scp`. The host applies its returned deltas below.
 
 console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
 if (RECRUITER_KEEPALIVE) console.log(`[daemon] Recruiter keep-alive ON (ping /talent every ${RECRUITER_PING_MIN_MS / 60000}-${RECRUITER_PING_MAX_MS / 60000}m while idle)`);
@@ -1848,11 +1909,18 @@ while (true) {
       ...circuitInfo(),
     });
 
+    // STRICT fail-safe: load the hot behavior module first. If it's broken/missing/
+    // export-drifted, do NOT claim/drive/keepalive this tick — only poll + heartbeat
+    // (already done above) + log loudly; self-heals when a good file is synced.
+    const behavior = await loadBehaviorModule();
+    if (!behavior) { await sleep(POLL_INTERVAL_MS); continue; }
+    const api = buildBehaviorApi();
+
     // Pick the pending run first so a user-initiated GENERIC daemon run (dashboard
     // "Run") can bypass the account-wide anti-bot gates — circuit / working-hours /
     // cooldown / budget exist to protect the shared LinkedIn account, NOT generic
     // non-LinkedIn runs the user explicitly launched.
-    const run = await findPendingRun();
+    const run = behavior.pickPendingRun(await fetchPendingRunCandidates(), api);
     const o = (run && run.origin) || {};
     const isUserGeneric = !!run
       && o.execution_target === "daemon"
@@ -1864,14 +1932,10 @@ while (true) {
       // Nothing pending. Keep the Recruiter (/talent) session warm if enabled, so a
       // logged-in seat stays usable for daemon runs (it lapses without periodic hits).
       if (RECRUITER_KEEPALIVE && drivingRunId === null && Date.now() >= recruiterPingDue) {
-        await recruiterKeepAlivePing();
-        // When warm: ping again soon to stay ahead of the short idle window. When
-        // walled: back off (pinging the login page won't help until a fresh login).
-        if (recruiterSessionWarm === false) {
-          recruiterPingDue = Date.now() + jitter(RECRUITER_PING_WALLED_BACKOFF_MS, 60_000);
-        } else {
-          recruiterPingDue = Date.now() + jitter((RECRUITER_PING_MIN_MS + RECRUITER_PING_MAX_MS) / 2, (RECRUITER_PING_MAX_MS - RECRUITER_PING_MIN_MS) / 2);
-        }
+        // The module does the ping + cadence; the host applies the returned deltas.
+        const { warm, nextDueMs } = await behavior.keepAliveTick(api);
+        recruiterSessionWarm = warm;
+        recruiterPingDue = nextDueMs;
         console.log(`[keepalive] next ping ~${new Date(recruiterPingDue).toISOString()} (warm=${recruiterSessionWarm})`);
       }
     } else if (!isUserGeneric && circuitOpen()) {
@@ -1891,7 +1955,7 @@ while (true) {
       } else {
         lastSkipLog = "";
         try {
-          await driveRun(run);
+          await driveRun(run, behavior);
         } catch (err) {
           console.error(`[daemon] driveRun ${run.id} failed:`, err.message);
         }

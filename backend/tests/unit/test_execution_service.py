@@ -213,3 +213,41 @@ async def test_audit_log_from_status_differs_from_to_status(db_session: AsyncSes
             f"from_status ({from_status}) should differ from to_status ({to_status}) "
             f"for event {event.event_type}"
         )
+
+
+@pytest.mark.asyncio
+async def test_tab_closed_suspends_interactive_daemon_run(db_session: AsyncSession):
+    """A dashboard-launched (interactive) daemon run IS watch-gated: closing the
+    run window suspends it with pause_reason='tab_closed'."""
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Test WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    run = await svc.create_run(workflow_id=str(workflow.id))
+    run.origin = {"execution_target": "daemon"}  # no autonomous event_kind
+    await svc.transition(str(run.id), RunStatus.RUNNING)
+
+    closed = await svc.tab_closed(str(run.id))
+    assert closed.status == "waiting_for_user"
+    assert closed.pause_reason == "tab_closed"
+
+
+@pytest.mark.asyncio
+async def test_tab_closed_ignored_for_autonomous_pipeline_run(db_session: AsyncSession):
+    """Autonomous (Odoo pipeline / webhook) runs have no dashboard watcher — a
+    RunDetailPage unloading must NOT pause them, or the pipeline stalls whenever
+    someone's dashboard tab navigates."""
+    svc = ExecutionService(db_session)
+    workflow = Workflow(name="Test WF", status="draft")
+    db_session.add(workflow)
+    await db_session.flush()
+
+    for event_kind in ("recruiter_search", "recruiter_create_project", "new_job_position"):
+        run = await svc.create_run(workflow_id=str(workflow.id))
+        run.origin = {"execution_target": "daemon", "event_kind": event_kind}
+        await svc.transition(str(run.id), RunStatus.RUNNING)
+
+        result = await svc.tab_closed(str(run.id))
+        assert result.status == "running", f"{event_kind} should stay running"
+        assert result.pause_reason != "tab_closed", f"{event_kind} must not be tab_closed"

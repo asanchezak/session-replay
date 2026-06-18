@@ -5,342 +5,341 @@ hard way and not obvious from reading code.
 
 ## CURRENT GOAL — decompose the Recruiter recording into reusable sub-workflows
 
-We now have access to **LinkedIn Recruiter** (the paid "Talent"/`/talent/hire/...`
-surface) on Fernanda's host. The recruiter recorded ONE long exploratory session:
-workflow **`0a8404f9-f745-4778-9429-3e06e125c146`** ("LinkedIn and Akurey Careers
-Search", 317 steps, `target_url https://www.linkedin.com/talent/home`). It is just a
-walkthrough — NOT a clean automation.
+Carve the one long exploratory recording (`0a8404f9`, 317 steps, `/talent/home`) into
+**separate, parameterized, reproducible sub-workflows** (one action each). **This LinkedIn
+account is VERY sensitive** — no casual tests; every run must be deliberate on Fernanda's host.
+This is the **Recruiter/Talent** product (`/talent/`), a DIFFERENT surface from `linkedin.com`.
 
-**Goal:** analyze that recording, identify the distinct high-level actions, and carve
-them into **separate, SIMPLE, reproducible, parameterized workflows** (one action each),
-so we can replay/compose them. Keep them minimal but actually working.
+Full build notes, selectors, and run IDs: **`docs/recruiter-subworkflows.md`**.
+Daemon session ops and restart gotchas: **`docs/recruiter-daemon-ops.md`**.
 
-**Hard rule — this LinkedIn account is VERY sensitive.** Do NOT run live tests casually.
-Every test must be deliberate and careful (mirrors the anti-bot discipline below). Build
-and reason about the sub-workflows first; only run live when explicitly cleared, on
-Fernanda's host where the Recruiter session lives.
+### Sub-workflow status
 
-**NOTE:** this is the **Recruiter/Talent** product (`/talent/`), a DIFFERENT surface from
-the `linkedin.com` people-search + applicant/lead flows already documented further down.
+| # | Action | Status | File / Workflow ID |
+|---|--------|--------|--------------------|
+| 2 | Search (saved URL re-run) | DONE ✓ | `5bdc4d51` |
+| 2b | AI Copilot parameterized search | DONE ✓ | `ecd976b1` / keyword-search.json |
+| 2c | Advanced boolean search | DONE ✓ | advanced-boolean-search.json |
+| 2d | Focused boolean + location facet | DONE ✓ | focused-boolean-location-search.json |
+| 2e/3b | Results-page extract + bulk save | DONE ✓ | save-current-search-url-results-to-project.json |
+| 3 | Save-to-project (profile page) | DONE ✓ | save-to-project.json / `4da44557` |
+| 4 | Create new project (`-EZ <pos>`) | DONE ✓ | create-project.json / `dd8fe22d` |
+| 7 | Bulk-message send | DONE ✓ | bulk-message-send.json |
+| 7-orig | Bulk-message draft (no send) | DONE ✓ | bulk-message-draft.json |
+| Archive | Archive candidate | BUILT | archive-candidate.json / `77f6095c` |
+| Remove | Remove (archive) candidate — parameterized | DONE ✓ (live-verified) | archive-candidate-param.json / `fc9bb424` |
+| Remove-all | Archive ALL candidates in a project | DONE ✓ (live-verified) | archive-all-in-project.json / `511ceaab` |
+| Add | Add a profile (public `/in/` bridge) to a project | DONE ✓ (live-verified) | add-profile-to-project.json / `f003f090` |
+| Read | Read a project's counts (read-only) | DONE ✓ | read-project-counts.json / `b5e3d433` |
+| Msg-compose | Templated bulk InMail ({firstName} chip, gated send) | DONE ✓ (live-verified, real send) | message-compose.json / `c46c296f` |
+| Archive-proj | Archive a whole PROJECT (testing) | DONE ✓ (live-verified) | archive-project.json / `752753a9` |
+| Recommendations | Add a project's RECOMMENDED matches (Automated Sourcing) → pipeline + Odoo leads | DONE ✓ (live-verified) | save-recommendations.json / `77bc4e98` |
+| 6 | Single message | CAPTURED | (build-only) |
+| 9 | Public `/in/` profile bridge | DONE ✓ | via save-to-project |
 
-### High-level actions identified in the recording (candidate sub-workflows)
-1. **Pull job requirements from Akurey careers** (steps 4–12): Google "akurey careers" →
-   `akurey.com/careers` → SEE REQUIREMENTS → `careers/requirements/?pId=<id>`. Non-LinkedIn
-   input source for the job description/requirements.
-2. **Recruiter advanced search** (steps 18–75): `/talent/search` → Advanced search → set
-   filters (spoken language = English / Must have / Full Professional; total years of
-   experience range; skill keywords) → Search → results list. *Parameterize the filters.*
-3. **Save a candidate to an existing project** (76–85, 256–265, 298–310): open profile →
-   "Save to project" → "Choose existing project" → pick project → "Save X to project".
-4. **Create a new project** (278–294): "Create new project" → name + description → "Create
-   project" (created "Easy Recruit", landed on `/talent/hire/<id>/overview`).
-5. **Connect with a candidate** (102–112): open public profile → "Connect" (connection req).
-6. **Message a single candidate** (125, 171–176): open profile → "Message X" → pick template.
-7. **Bulk-message everyone in a project/pipeline** (179–201): Pipeline → "Select all N
-   profiles" → "Message (N)" → edit subject → "Search template" → pick template → send.
-8. **Open a project pipeline & sourcing views** (117–159): project → "Pipeline"
-   (`/manage/all`), "Recommended matches" (automatedSourcing), "Apply starters".
-9. **Find a specific person** (221–255): search the pipeline by name, or global LinkedIn
-   search by name / paste a profile URL → "View in Recruiter" (bridge public profile →
-   `/talent/profile/...`).
+### THIRD flow — add a project's RECOMMENDED matches (2026-06-15)
 
-Highest-value first three to productize: **(2) search**, **(3) save-to-project**,
-**(7) bulk-message a project** — these are the "search / add to project / message the
-project" examples the user called out.
+Besides the auto-pipeline (job publish) and the manual boolean search, a third flow adds a
+project's LinkedIn **Recommended matches** (Automated Sourcing) to the pipeline + pushes them
+to Odoo as `linkedin.lead`. Trigger: **`POST /v1/recruiter/jobs/{id}/save-recommendations?count=N&open_to_work=true`**
+(or the akcr hr.job button **"Agregar recomendados"**, akodoo `feat/recruiter-search-link`).
+The recommendations surface is **`/talent/hire/<id>/discover/automatedSourcing/review`** (NOT
+`/recommendedMatches`, which redirects); per-row hover-gated **`[data-test-save-to-first-stage]`**
+adds to the pipeline. Strategy `recruiter_save_recommendations` captures name+headline+open_to_work,
+verifies via the ACTIVE-count delta (NOT a per-url match — that under-counts and over-adds),
+and one bounded retry on shortfall. `recruiter_recommendations` event_kind → `_after_recommendations`
+reuses `push_recruiter_leads`. See [[project_recruiter_demo_e2e]].
 
-### Sub-workflow build status (updated 2026-06-05)
-- **(2) Search → candidates — DONE & LIVE-VERIFIED.** Workflow `5bdc4d51-cbe8-46fb-986e-da67f9e4a3d1`
-  "Recruiter Search → candidates" (generic, 3 steps): navigate `/talent/home` → navigate
-  `/talent/search?searchHistoryId=21166179650&start=0` → extract (strategy
-  `recruiter_search_people` → `scrapeRecruiterSearch` in `driver-daemon.mjs:645`). Live run
-  `e2cbdb34` extracted **4 candidates** (name + `/talent/profile/` URL) in 31s against the
-  warm seat. Results land in the run's **`extracted_data`** field (`GET /v1/runs/{id}` →
-  `extracted_data[0].people`; there is NO `/extraction` endpoint — that 405s). Run it:
-  `POST /v1/workflows/5bdc4d51…/run-with-params` with
-  `{"execution_target":"daemon","operator_id":"fernanda","execution_options":{"use_profile":true,"snapshot":true}}`.
-  **Known gap:** `headline` comes back `""` (the title sits deeper in the card than the
-  innerText split reaches) — fix `scrapeRecruiterSearch` offline against a results snapshot,
-  then redeploy. The saved-search URL (`searchHistoryId`) is hardcoded — this `5bdc4d51` flow is
-  the "re-run a saved search" variant.
-- **(2b) Parameterized search — DONE via the AI Copilot 2026-06-08** (`recruiter-workflows/keyword-search.json`,
-  workflow `ecd976b1`, system). The recording's REAL search entry (steps 13–15) is the **AI Copilot**,
-  NOT the advanced facets or the global box (both need a finicky commit/submit that wouldn't take —
-  facets apply on blur, the global box didn't submit). Type **"Buscar candidatos para: <position>"**
-  into **`textarea.copilot-chat-input__textbox`** + Enter (`\n`) → the AI builds & runs the search →
-  results → `recruiter_search_people`. Live-verified: "Full Stack Developer" → 5 candidates, real
-  `/talent/search?searchContextId=…` page. PARAM = the position in the request (the single value an
-  Odoo trigger overrides). **Lesson: mine the recording's recorded selectors for the real entry
-  before fighting the live UI** — the human used the Copilot, not the facets.
-- **(3) Save-to-project — DONE & LIVE-VERIFIED (2026-06-08).** Spec
-  `recruiter-workflows/save-to-project.json` (workflow `4da44557…`). Live run `00eac46b`
-  saved Oscar Carmona Mora → "Easy Recruit"; his profile went to **"En 2 proyectos"** and the
-  activity feed logged "ha añadido el perfil a Easy Recruit". Built as a pure generic
-  click/type workflow (no daemon restart). Flow + locked selectors: navigate profile →
-  `[data-test-action='save-to-project']` → `label[for='choose-existing-projects']` (switch to
-  existing mode) → type project name into `#save-to-projects-typeahead` → **2 no-op `scroll`
-  steps (delay for the async typeahead to load)** → click the option by exact `text` (project
-  name) → `button[data-test-action='save']`. Params to vary: candidate URL (step 1) + project
-  name (step 4 type + step 7 option text). DON'T target a real recruiting project (use the
-  "Easy Recruit" sandbox) — they're María Fernanda's live projects.
-- **Archive a candidate — flow PROMOTED 2026-06-08** (`recruiter-workflows/archive-candidate.json`,
-  `77f6095c…`, system). Recruiter has **NO hard "remove from project"** — the way to take a
-  candidate out of the active pipeline is **Archive** (moves them to "Archived candidates").
-  Each pipeline row has `[data-test-component='archive-profiles-btn']` (also
-  `data-test-profile-item-actions="archive"`); there's one per row, so target the specific
-  person by name via accessibility/text **"Archive <Name>" / "Archivar a <Name>"** (a bare css
-  would archive whoever's on top). Archives with the AI "doesn't seem fit" reason. Params:
-  pipeline URL (step 1) + candidate name (step 4). Built from live-captured selectors but NOT
-  run-verified (to avoid archiving an active candidate); verify via the Archived-candidates
-  count, and a confirm click may be needed. The per-row "…" more-actions and "In N projects"
-  controls did NOT expose a remove (and the row "…" only reveals on hover → soft-misses).
-- **(6) Message a single candidate — composer CAPTURED 2026-06-08 (build-only).** Entry:
-  `button[aria-label='Enviar mensaje a <Name>']` on the pipeline (or the profile message icon)
-  → opens the InMail composer (same one bulk uses).
-- **(7) Bulk-message — SEND LIVE-VERIFIED 2026-06-08** (`recruiter-workflows/bulk-message-send.json`).
-  Sent 2 InMails (subject "Oportunidad en Akurey" + a short Spanish body) to the active Easy
-  Recruit candidates (Andrey + Franz; Oscar excluded — archived) on explicit user go-ahead.
-  Composer closed + "messages sent successfully" toast = success (a blocked send keeps it open).
-  **KEY QUIRK — the bulk composer's subject input is HIDDEN until a Send attempt validates it.**
-  So the working pattern is: type body → click **Send #1** (harmlessly blocked → "Subject can't
-  be empty" REVEALS the now-visible subject field) → click+type the subject → **Send #2** (sends).
-  Typing the subject before that reveal silently no-ops (field not visible → not resolvable) and
-  the send is then blocked as "incomplete" (safe — nothing goes out, no credit). Recipients =
-  whoever is ACTIVE (archived excluded); messaging a 1st-degree connection is free, 2nd-degree
-  uses an InMail credit. The single-message composer (flow 6) shows the subject directly (no reveal needed).
-- **(7-orig) Bulk-message DRAFT (no send)** = `recruiter-workflows/bulk-message-draft.json`. NEVER send without explicit OK (each send
-  burns an InMail credit — composer shows "N/590 créditos de InMail"). Flow:
-  `/talent/hire/<projectId>/manage/all` (pipeline) → select-all → "Mensaje (N)" → InMail
-  composer → Enviar. **Composer selectors captured live 2026-06-08** (the gap the recording
-  never recorded; it's the InMail composer, opens with an AI-drafted body, uses declarative
-  shadow DOM, ghost-loads ~5-10s so insert delay steps before reading/clicking it):
-  - subject: `input[placeholder='Añade un asunto']`
-  - body (rich-text, AI-prefilled): `div[role='textbox']`
-  - template search: `input[placeholder='Busca una plantilla…']`
-  - **Send: `button[aria-label='Enviar este mensaje']`**  ← the long-missing SEND selector
-  - save-as-template: text "Guardar como plantilla nueva"; preview: "Vista previa"
-  **Pipeline select-all + bulk Message — captured 2026-06-08:** select-all = first
-  `input.small-input` (header checkbox; a11y-text "Select all N profiles", count-dependent so
-  use the css); after selecting, the bulk-action bar (`data-test-profile-list-bulk-actions`)
-  shows **`button[data-test-action='send-message']`** ("Message (N)") → opens the bulk InMail
-  composer addressed to all selected. **DRAFT COMPLETE & VERIFIED** (no send): see
-  `recruiter-workflows/bulk-message-draft.json` — navigate pipeline → select-all → Message →
-  composer opens with N recipients ("To: … View all N"), template picker, empty body, "Send"
-  button present but NOT clicked. Send label is locale-dependent ("Send this message" /
-  "Enviar este mensaje"). Easy Recruit sandbox = project `2051206850` (now 3 candidates:
-  Oscar, Andrey, Franz — Franz added 2026-06-08 via the bridge below).
-- **(4) Create a new project — DONE & LIVE-VERIFIED 2026-06-08** (`recruiter-workflows/create-project.json`,
-  workflow `dd8fe22d`, promoted to system). Created **"-EZ Full Stack Developer"** live (confirmed
-  in /talent/projects). Flow: navigate **`/talent/create/get-started`** → type name into
-  **`input[data-test-project-name-input]`** → click **`button[data-test-create-button]`**
-  ("Create project"; the form then auto-navigates to the new project + "imports optimized search
-  results"). Goal: an Odoo **new job position** → create a Recruiter project named **`-EZ <position>`**
-  (the `-EZ` prefix marks our auto-created projects so we can find/clean them). The workflow
-  creates an **EMPTY standalone project** (candidates added later by search/save → composes:
-  create → search → save → message). Design notes for the eventual Odoo trigger (NOT connected
-  now, per user):
-  - **Param**: the project NAME (= `-EZ ` + position) is the single runtime input Odoo would
-    pass — keep it as one `type` step. The daemon doesn't substitute `runtime_params` into step
-    values yet → hardcode the example now; backend param-substitution (bake into the run snapshot
-    at creation) is the prerequisite for a live trigger.
-  - **Dedup** (don't create `-EZ X` twice for the same position) is **trigger/reconciler logic
-    (backend)**, not the workflow — the workflow just creates.
-  - Verified: created "-EZ Full Stack Developer" live → projects count 4→5, listed in
-    /talent/projects. (The "Create a project" link on /talent/projects targets
-    `/talent/create/get-started`; the form's only required field is the name.)
-- **Adding a public `/in/` profile to a project (the "Find a person" bridge, flow 9):** the
-  public profile has no Save-to-project; it has a **"Ver en Recruiter"** link →
-  `/talent/profile/<id>` (extract that href, navigate to it, then run save-to-project).
-  **Bridged profiles load slowly** — the first save attempt clicked through before the
-  candidate context was ready and showed "Saving…" but didn't persist; adding generous delay
-  steps after navigating the bridged profile (and before Save) fixed it. Verify saves via the
-  **project pipeline count**, not the bridged `/talent/profile` URL (which can show "Projects 0").
+### Reply-scanner — inbox replies → Odoo lead `responded` (2026-06-15)
 
-**Iteration constraint (learned 2026-06-05):** creating + running workflows uses only the
-public AWS API (no SSH needed — the daemon claims them). But any DAEMON CODE change (new
-extract strategy, the headline fix) needs a daemon restart, which on-demand only fires while
-`linkedin-bot` is interactively logged on (else it sticks "Queued") — so batch daemon-code
-changes for a moment when Fernanda is at the host, or for the next boot. Pure-workflow flows
-(navigate/click/existing-strategy) avoid this entirely.
+Closes the outreach loop: when a candidate REPLIES in the Recruiter inbox, mark the Odoo
+`linkedin.lead` `outreach_status='responded'`. It's a **passive, read-only** scan that lives
+in the daemon's hot-loaded `keepAliveTick` (`extension/runtime-strategies/daemon-behavior.mjs`,
+`scanInboxReplies`) on a slow cadence (`REPLY_SCAN_MS`=45m; re-syncing the file forces an
+immediate scan since the timer is module-level) — so it ships by `scp`, NO restart.
+- **Inbox surface (capture-verified):** `https://www.linkedin.com/talent/inbox`. The seat has
+  multiple contracts → it lands on `/talent/contract-chooser`; click the Recruiter contract
+  `button[data-test-contract-select][data-live-test-contract-select*="Morsoft" i]` (NOT the "Job
+  Posting" one) to proceed. `/talent/messages` 404s — don't use it.
+- **Reply signal — TWO (the unread-badge-only approach FAILED):** (1) cards
+  `[data-test-conversation-card-container]` with `[data-test-unread-badge]` (older unread); (2) the
+  AUTO-OPENED thread — **LinkedIn force-opens the most-recent conversation on inbox navigation**
+  (even `/talent/inbox/0/main` redirects to `/id/<thread>`), sending a read receipt → the freshest
+  reply loses its badge, so detect via the open thread's LAST `[data-test-message-list-item]` →
+  `[data-test-message-sender-name]` NOT being the seat owner (`SEAT_OWNER_MATCH="Benavides"`) =
+  inbound. Name `[data-test-participant-name]`; cards expose NO `/talent/profile/` link → match by
+  NAME. `data-test-latest-reply-status` is a state badge ("Aceptado"), not a direction flag.
+  Tradeoff: the force-open marks the most-recent thread read each scan (unavoidable).
+- **Backend:** `POST /v1/recruiter/inbox-replies {replies:[{name, profile_url?}]}` →
+  `record_inbox_replies` (resolves the recruiter connector from the latest pipeline run) →
+  `push_inbox_replies` → akcr `POST /akcr/api/lead_replied`. Passive (no ExecutionRun). akcr matches
+  by profile_url, falls back to NAME among `messaged` leads, logs an INBOUND `linkedin.lead.message`
+  → `_sync_lead_status` flips to `responded`. Idempotent (skips a lead with an existing inbound msg).
+  No model change (`'responded'` already exists). akcr route ships via akodoo
+  `feat/recruiter-search-link` PR **#1821** → qaodoo (needs `-u akcr`). See [[project_daemon_hot_behavior]].
+- **On-demand trigger (besides the 45m cadence):** akcr hr.job button **"Escanear respuestas"**
+  (`action_scan_linkedin_replies`) → `POST /v1/recruiter/request-inbox-scan` (sets an in-memory
+  flag); the daemon's `keepAliveTick` polls `GET /v1/recruiter/inbox-scan-requested` each warm
+  tick and scans immediately when it's newer than its last scan (latency ~2-3 min). Button ships
+  via PR **#1822** → qaodoo (`-u akcr`). Live-verified (backend+daemon).
 
-### Recruiter ↔ Odoo integration — DESIGNED 2026-06-08 (NOT wired; Odoo disconnected)
-Full design: **`docs/recruiter-odoo-integration-design.md`**. Loop: Odoo new job position →
-create `-EZ <position>` project (→ push its URL to a new `hr.job.recruiter_project_url`) → search
-→ save → bulk-message (→ set `linkedin.lead.outreach_status=sent`). Requirement status:
-**A** (candidate name → `linkedin.lead`) ✅ exists; **B** (already-messaged tracking) field
-`outreach_status` exists, GAP = the after-send push-back to flip it; **C** (project link →
-`hr.job`) new (capture project URL + push). The **unlock** = param substitution at run creation
-(substitute `runtime_params` into step values in the run snapshot — **backend-only → warm seat
-safe**). akodoo pieces (`hr.job.recruiter_project_url` + `/akcr/api/job_project_link` +
-`/akcr/api/lead_outreach_update` + lead `sent_at`) are **deferred** (Odoo not connected). Keying:
-join leads ↔ messaged candidates on the `/talent/profile/` URL. Build order + open decisions
-(naming, trigger scope, keep message-send manual/gated) are in the doc.
+### Odoo "Demo" button + structured-JD search (2026-06-16)
 
-### Recruiter /talent selector + build tips (learned 2026-06-08)
-- **The /talent UI is in SPANISH** ("Guardar en proyecto", "Seleccionar proyecto existente").
-  Recorded ENGLISH `text` selectors won't match. Prefer **css / `data-test-*` / stable ids**
-  (locale-independent). Recruiter is rich in stable hooks: `[data-test-action='save-to-project'|'save'|'cancel']`,
-  `#choose-existing-projects` / `#create-new-project` (radios), `#save-to-projects-typeahead`
-  (project combobox), `li[role=option]` + `[data-test-project-typeahead-result-title]` (project
-  options — click by exact project `text`). The recording's `nth-of-type`/absolute-xpath chains
-  are fragile; its `anchor` selectors carry dict values that 422 the create-step API (lift
-  text/css/xpath only).
-- **Build flows capture-first**, never blind-replay the recording: run a snapshot-only workflow
-  that opens the UI (clicks to reveal a panel/dialog), `scp` the per-step snapshots, read the
-  PNG + `dom.json` + grep the HTML, lock selectors offline. Reusable builder:
-  **`scripts/create_recruiter_workflow.py spec.json`** (POSTs /v1/workflows + /steps + activates;
-  pure AWS API, no daemon restart → warm seat preserved). Specs live in `recruiter-workflows/`.
-- **Async-rendered elements (typeaheads/dropdowns):** the daemon's Phase-A verbs are only
-  `{click,type}` and resolve selectors ONCE (no wait/retry); `delay_before_ms` isn't settable
-  via the step API. To wait for an async list before clicking it, insert **no-op `scroll`/`hover`
-  steps** (not in PHASE_A_VERBS → they fall through to a noop that still costs ~2s each with
-  snapshot on). A real fix (wait-for-selector in clickResolved) is a good future daemon change
-  — batch it for a restart window. Verify writes by re-reading the page (a read-only nav+snapshot),
-  since the daemon reports step success even on a soft-miss.
+- **akcr hr.job button "Demo"** (`action_run_demo`, PR **#1823** → qaodoo, needs `-u akcr`):
+  one click = full demo. (1) resets the job's `linkedin.lead` rows to ONLY Andrey IN Odoo
+  (hard-delete via `akcr_removal_confirmed` + create the Andrey lead with the AEMAA
+  `/talent/profile/` URL so it matches the message-compose recipient), then (2) POSTs
+  **`POST /v1/recruiter/jobs/{id}/demo {send:true}`**. Confirm-gated; visible once
+  `recruiter_project_url` exists. ⚠️ real InMail (Andrey only).
+- **Backend `start_demo`** chains via the terminal hook (no polling): archive-all LOOPED until
+  empty (`recruiter_demo_archive`, re-enqueued on `more_remaining`, cap `recruiter_demo_archive_rounds`=6)
+  → add the demo profile (`recruiter_demo_add`) → `send_messages(send=true)` → existing
+  `_after_message` marks Odoo. Config (defaulted, no box env change): `recruiter_archive_all_workflow_id`
+  (`511ceaab`), `recruiter_add_profile_workflow_id` (`f003f090`), `recruiter_demo_profile_url`
+  (`/in/crandrey/`). Effect-idempotent (always ends with only Andrey messaged).
+- **Search now uses the FULL structured JD + the real location.** The AI boolean corpus already
+  consumed `description + job_requirements + nice_to_have_requirements + non_negotiable +
+  role_responsibilities` (so FILL those Odoo sections — "What you will be doing / looking for / a
+  plus"). NEW: the location facet derives from `hr.job.job_location` via `RECRUITER_LOCATION_MAP`
+  (`cr`→"Costa Rica", `latam`→"Latin America", `global`→skip facet; empty/unknown→
+  `RECRUITER_DEFAULT_LOCATION`). For `global` the backend PRUNES the location facet block from
+  the search run snapshot (`_strip_location_facet_steps`, anchored on `data-test-facet-geo-locations`
+  → `save-advanced-button`) → clean boolean-only search. Project description composed from all 3
+  sections. Demo job = **329** / project **1508074569**. All backend (deployed) + akcr (PR #1823).
+  See [[project_recruiter_demo_e2e]].
 
-### Recruiter session is SEPARATE from linkedin.com (blocker found 2026-06-04)
-Driving `/talent/` needs its OWN sign-in even when the daemon's regular linkedin.com
-session (`li_at`, valid to 2027-06-04) is live. Hitting `/talent/home` redirects to
-`/uas/login-cap` → **"Inicia sesión en LinkedIn Talent Solutions"** with the email
-PRE-FILLED (`fbenavides@akurey.com`) — i.e. the account is recognized but Recruiter
-wants a password to establish its seat session. The daemon never used Recruiter, so
-`.linkedin-profile` has NO Recruiter session. **Fix = a ONE-TIME interactive Talent
-Solutions sign-in at the host, into the SAME `.linkedin-profile`** (physical screen or
-Chrome Remote Desktop / AnyDesk — Win11 Home has no RDP). Do NOT automate the password
-on this sensitive account. After that, the probe below can capture the composer.
+### Source of truth, tooling & ops (2026-06-12 → 06-15)
 
-**RESOLVED 2026-06-05 — Recruiter session now LIVE in `.linkedin-profile`.** The
-one-time interactive Talent sign-in was done and verified: `recruiter-sesscheck`
-(read-only single nav to `/talent/home`) returns `LOGGED_IN`, title "LinkedIn Talent
-Solutions", no login-cap redirect. The `/talent/` sub-workflows can now run live (with
-the same anti-bot discipline — deliberate tests only).
+- **Workflows are versioned in `recruiter-workflows/`** (not just the AWS DB). `registry.json`
+  maps spec↔workflow_id↔env-var; `scripts/export_recruiter_workflows.py` (DB→spec, `--check`
+  fails on drift) + `scripts/deploy_recruiter_workflows.py` (spec→DB via PUT /steps). Edit a
+  spec → deploy → export to confirm. RUN `--check` after any out-of-band workflow edit.
+- **Demo orchestrator is `scripts/demo_e2e.py`** (demo_e2e.sh is a shim) — loops archive-all
+  to empty, refuses to send unless active==1. `scripts/recruiter_cleanup.py` (--free-slot /
+  --archive-projects). `demo_odoo_reset_add_andrey.py` hard-deletes via `akcr_removal_confirmed`.
+- **New backend endpoints:** `GET /v1/recruiter/jobs/{id}/pipeline` (chained-run summary +
+  boolean + counts), `POST …/preview-count?tightness=N` (cheap count-only search),
+  `POST …/save-recommendations`. AI now decides boolean strictness (`recommended_tightness`,
+  floor = `RECRUITER_SEARCH_START_TIGHTNESS`=4 on box). Daemon claims by `origin.priority`
+  (pipeline/msg +10, deferred-removal −10) then FIFO; a step `checkpoint:true` HARD-FAILS the
+  run (loud, vs silent soft-miss) — set on the search facet-open steps. Locale-proof: prefer
+  `data-test-*`, never ES/EN words (the seat language flips). [[project_recruiter_search_locale_regression]]
+- **Host scheduled task `recruiter-snapshot-prune`** keeps only the newest 15 snapshot run-dirs
+  (every 10 min). [[project_fernanda_host_ops]]
 
-How it was done (the easy + safe path — the cookie transplant route was a DEAD END):
-- **Cookie transplant from Fernanda's personal Chrome FAILED** — Chrome 148 uses
-  **App-Bound Encryption** on her profile; opening a VSS copy of it as `linkedin-bot`
-  decrypted **0 cookies** (ABE binds cookies to her user), and registering an S4U task
-  AS her user is "Access denied". ABE + Windows security block cross-user cookie reuse
-  by design. Don't retry the transplant.
-- **What worked:** sign in to Talent ONCE directly in `.linkedin-profile`, running
-  Chrome **as the `linkedin-bot` user** (interactive desktop: physical switch-user to
-  `linkedin-bot`, pw `admin`). Launcher `login-talent.bat` on linkedin-bot's Desktop →
-  `extension/login-talent.mjs` (visible Chrome on `.linkedin-profile`, auto-closes on
-  `/talent/`, has a guard that aborts if NOT run as linkedin-bot). `.linkedin-profile`
-  uses **classic DPAPI (no ABE)**, so cookies written as linkedin-bot are daemon-readable.
-- CRD attaches to the **console** session (María's), so the linkedin-bot switch-user must
-  be done at the physical screen, not over CRD.
-To re-verify later: register+start `recruiter-sesscheck` (host helpers:
-`register-sesscheck.ps1` / `sesscheck-task.ps1` / `wait-sesscheck.ps1`).
+### Recruiter ↔ Odoo integration — E2E VERIFIED ✅ (2026-06-09)
 
-### Driving Recruiter (/talent) with the DAEMON — proven 2026-06-05
+Full design: **`docs/recruiter-odoo-integration-design.md`**. All 4 requirements live-verified:
+- Odoo new position → create `-EZ <pos>` project (name = `-EZ <position>`, **description =
+  the Odoo job description**, typed into `textarea[data-test-project-description-input]`;
+  pipeline `start()` threads `job_payload.job_description` capped 2000 chars as
+  `{{job_description}}` → create-project wf `29ec1891` step 5; live-verified job 317) →
+  push URL back to `hr.job.recruiter_project_url`
+- AI-Copilot search → push candidates as `linkedin.lead` → save N to project
+- Message-send stays **MANUAL/gated**: `POST /v1/recruiter/jobs/{job_id}/send-messages`.
+  Triggerable from Odoo: an **akcr button "Mandar mensaje a posibles aplicantes"** on the
+  hr.job form opens a wizard (subject/body) → POSTs to that endpoint (reuses
+  `ir.config_parameter` `akcr.session_replay_base_url` + `akcr.session_replay_api_key`,
+  set on qaodoo to the AWS backend). ⚠️ sends real InMail. The job form also now shows
+  `recruiter_search_query` (the boolean text). **Both ship via akodoo branch
+  `feat/recruiter-search-link` (commit `cc89a8e6`) and need a qaodoo `-u akcr` upgrade
+  (operator step — no filesystem access to qaodoo from here).**
+- 3 parameterized wfs: create-project `29ec1891`, search `f6f99011`, save `a352e1e4` — IDs in both `.env.prod` AND `docker-compose.prod.yml`
 
-The daemon can now drive a backend workflow against `/talent` using the staged
-Recruiter profile. Live-proven: run `e24a66e1` of workflow **"Recruiter: Open Talent
-Home"** (`7246989f-a6ce-4b8a-b7f4-16a49d930cae`) → daemon (operator `fernanda`)
-navigated to the REAL `/talent/home` (title "LinkedIn Talent Solutions", 116 interactive
-els, 1.86 MB HTML), `completed`, no wall, no circuit trip.
+**Bulk results-page save (lighter anti-bot, gated OFF by default).** `_after_search`
+can fire ONE `recruiter_save_results_to_project` run (select N on the results page +
+bulk-save, zero profile visits) instead of N per-candidate profile saves. **To
+activate:** set `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6-0d44-4298-b047-4fadb71ba559`
+("save current search URL results to project"; params `search_url`/`project_name`/`target_count`)
+in the box's `deploy/.env.prod` + restart the backend container. Empty = legacy
+per-profile loop stays in effect. The search extractor (`recruiter_search_people`,
+`CARD` + headline-from-`.artdeco-entity-lockup__subtitle` fixes) was **re-verified live
+2026-06-09** on fernanda: run `3aa176b6`, 30/30 candidates WITH headlines, total_count=460.
+(Trigger note: extract-30 `1bc44128` needs `runtime_params.boolean_query` + `location`;
+empty params → empty search → "No hay resultados".)
 
-- **Daemon opt-in to the profile:** a generic daemon run uses an EPHEMERAL context by
-  default; pass `execution_options.use_profile: true` so it uses `.linkedin-profile`
-  (the Recruiter session). Added at `driver-daemon.mjs` (the `contextDir` line).
-- **Per-step DOM snapshots:** pass `execution_options.snapshot: true` → each step writes
-  full HTML + DOM inventory + screenshot to `extension/recruiter-snapshots/<runId>/`
-  (via `src/behavior/page-snapshot.mjs`). Pull to the repo with `scp` and analyze
-  **offline** — never reload the live account to tune selectors (see memory
-  `feedback_recruiter_offline_selector_iteration`). Offline harness:
-  `node extension/analyze-snapshot.mjs <snapshot.html> [--sel "css"] [--grep text]`.
-- **Trigger a daemon Recruiter run:**
-  ```
-  curl -s -X POST https://52-5-45-84.sslip.io/v1/workflows/<id>/run-with-params \
-    -H 'X-API-Key: <gateway-key>' -H 'Content-Type: application/json' \
-    -d '{"execution_target":"daemon","operator_id":"fernanda",
-         "execution_options":{"use_profile":true,"snapshot":true},"runtime_params":{}}'
-  ```
-  New workflows created via `POST /v1/workflows` default to `execution_mode=generic`
-  (so the daemon's generic loop drives the recorded steps). The daemon claims it because
-  `origin.target_operator == OPERATOR_ID` (`fernanda`) — its daemon must be enabled+running.
+**Search calibration capped at 1 rerun → ≤2 searches/position (LIVE-VERIFIED 2026-06-10).**
+A location-faceted tech search realistically returns 50-500 even tightened (live: 670→507→206,
+582→446), and never dips under a tight band in 2 reruns — so the old `max_reruns=2` always
+exhausted (3 full searches on the sensitive account) while we extract ~30 + save a handful
+downstream regardless of the raw count. `recruiter_max_search_reruns` is now **1** (one
+tighten → ≤2 searches, guaranteed). The early-exit guards still apply when max_reruns>1:
+finalize once count ≤ `recruiter_count_acceptable_max` (150) or once tightening stops
+reducing it by `recruiter_count_min_convergence` (0.35). **Verified live on qaodoo job 315:**
+search1=582→tighten→search2=446→finalize (2 searches, vs 3 before) → bulk-save 2 + 30 leads +
+project_url. Unit-tested in `test_recruiter_pipeline_calibration.py`.
 
-- **Session lives in `.linkedin-profile`** and persists (treat it like the regular
-  linkedin.com session). During S4U/login tasks keep the daemon Disabled so it doesn't
-  race for the profile; re-enable to run. If `/talent` ever walls to `/uas/login-cap`,
-  re-establish it with a one-time `login-talent.bat` as the `linkedin-bot` user.
+**Dashboard — related pipeline runs (2026-06-09).** The Runs list shows a "Pipeline"
+column: `<position> · <stage>` + a `job <id>` badge derived from `origin.pipeline` /
+`origin.event_kind`, so the chained create-project→search→save runs of one Odoo position
+read as one group. Helpers `pipelineLabel`/`pipelineJobId` in `frontend/src/hooks/useRuns.ts`.
 
-- **The Recruiter SEAT dies on browser CLOSE — the daemon now keeps ONE browser OPEN**
-  (fix + LIVE-VERIFIED 2026-06-05 — 5 warm pings / ~15 min sustained, browser never
-  relaunched; `driver-daemon.mjs`). The `/talent` seat is held by a session-scoped
-  cookie + the open SPA's realtime polling; both are lost when Chrome closes (the
-  persistent `li_at` survives, the seat doesn't — that's why it lapsed in ~5 min while
-  Fernanda's always-open browser lasts weeks). The daemon used to launch+close Chrome for
-  every run/ping. Now `getProfileContext()` opens `.linkedin-profile` ONCE and keeps it
-  open; the keep-alive (`RECRUITER_KEEPALIVE=1`, already in `daemon-task.ps1`) re-asserts
-  `/talent/home` in the parked tab every 2-3 min and never closes it, and every profile
-  run REUSES that context (one Chrome per profile = profile-lock forces a single shared
-  context). **Activation from a walled state (needs the sensitive password → human-only):**
-  the daemon must be DOWN during login (its open browser holds the profile lock). 1) physical
-  screen → switch-user to `linkedin-bot`; 2) `login-talent.bat`; 3) start the daemon — its
-  +30s ping grabs the warm seat and holds it. Watch `daemon.task.log` for sustained
-  `[keepalive] /talent OK … warm`; if it walls every few min DESPITE the open browser, it's
-  contention (Fernanda using Recruiter in parallel), not idle. See memory
-  `project_recruiter_seat_keepalive`.
+**Test-data cleanup (2026-06-09):** qaodoo test jobs 309/310/312 ("EZ-E2E") archived
+(active=False, unpublished, sync off) + their `linkedin.lead` rows deleted; synced jobs
+back to the 2 real ones (304/307). STILL MANUAL: the 3 leftover `-EZ Senior Full-Stack
+Engineer` test projects in LinkedIn Recruiter (sensitive account, no delete-project
+workflow) — delete by hand when convenient.
 
-- **Restarting the daemon task is finicky** (cost ~1h on 2026-06-05). `schtasks /End`
-  orphans `node`; a `taskkill /F /IM node.exe` then leaves the **session-0 `powershell.exe`
-  wrapper alive as a phantom**, and `MultipleInstancesPolicy=IgnoreNew` makes every start
-  request stick in "Queued". To restart: kill BOTH `node.exe` AND the session-0 wrapper
-  `powershell.exe`. And on-demand start of the S4U BootTrigger task only works at boot or
-  while `linkedin-bot` is interactively logged on — otherwise `schtasks /Run` /
-  `Start-ScheduledTask` just QUEUE. Reliable starts: reboot, or `run-daemon-visible.bat` in
-  the interactive linkedin-bot session (which is the activation context anyway).
+**FULL pipeline E2E live-verified on qaodoo 2026-06-09 (job 310):** reconcile →
+`recruiter_pipeline` trigger → create-project → `recruiter_project_url` pushed to qaodoo
+→ focused boolean+location search → **30 `linkedin.lead` rows in qaodoo** → bulk-save
+`add4407e` saved 2 to the `-EZ` project. Message stays gated (not sent). Current box config:
+`RECRUITER_ADVANCED_SEARCH_WORKFLOW_ID=1bc44128` (focused — the advanced-only `034f4d58`
+typed the boolean but did NOT commit the search → "Búsqueda vacía"/0 cards),
+`RECRUITER_DEFAULT_LOCATION="Costa Rica"`, `RECRUITER_SAVE_RESULTS_WORKFLOW_ID=7f11deb6` (bulk).
 
-- **Saving / restoring the session** (host scripts in `C:\Users\Public\extension\`):
-  - `backup-recruiter-session.ps1` → copies `.linkedin-profile` cookies + Local State to
-    `.linkedin-profile-backup\<stamp>\` (+ `LATEST.txt`).
-  - `restore-recruiter-session.ps1 [-Stamp <stamp>]` → restores that cookie state (daemon
-    must be Disabled / no chrome on the profile). **DPAPI caveat:** restore only works on
-    THIS host/user. If `/talent` still walls after a restore, re-run `login-talent.bat`.
+**Chained pipeline runs `tab_closed` — FIXED 2026-06-09.** Symptom (was): chained
+pipeline runs (search after create-project, calibration re-runs) paused mid-run with
+`pause_reason=tab_closed`. Root cause was NOT the daemon: the dashboard `RunDetailPage`
+POSTs `/runs/{id}/tab-closed` on `pagehide` to suspend an INTERACTIVE daemon run whose
+watcher window closes — but it was also firing for AUTONOMOUS pipeline/webhook runs (no
+human watcher) whenever any dashboard tab navigated/closed (`run_tab_closed` actor=system
+→ daemon then 409s). Fix: `ExecutionService.tab_closed()` ignores runs whose
+`origin.event_kind` is backend-orchestrated (`_AUTONOMOUS_EVENT_KINDS`); `RunDetailPage`
+skips the POST for the same kinds. **Verified: full pipeline ran autonomously end-to-end
+on qaodoo job 312** (create-project → 3 chained searches → bulk-save, 30 leads + 2 saved,
+zero tab_closed, no manual intervention). The old standalone-continuation workaround is no
+longer needed. See [[project_recruiter_pipeline_chained_run_bug]].
 
-- **To see the daemon drive Talent in a VISIBLE browser:** the S4U daemon runs in
-  session 0 (its Chrome is invisible). Run the daemon in an INTERACTIVE desktop instead —
-  `run-daemon-visible.bat` on the `linkedin-bot` Desktop (sets the same env, runs
-  `node driver-daemon.mjs` in a console). Stop/Disable the S4U task first so they don't
-  race; re-enable it after.
+**Walled `/talent` seat → search FAILS + is relaunchable (2026-06-11).** A lapsed seat
+redirects the Recruiter surface to login; `recruiter_search_people` then "succeeds" with 0
+candidates and the run used to COMPLETE silently (0 leads pushed). The daemon now runs
+`assertNoBlocker` after any `recruiter_*` strategy step and **FAILS** the run (new
+`failRun` → `POST /runs/{id}/fail`) with a re-login hint instead. To retry after a fresh
+login: `POST /v1/runs/{id}/relaunch` (or the **"Relanzar"** button on a failed daemon run)
+— `ExecutionService.relaunch` CLONES the run preserving `origin` (pipeline +
+`target_operator=fernanda`) and leaves it QUEUED so the same daemon re-claims it and
+`_after_search` still fires. (FAILED is terminal, hence the clone.) The bulk-save
+`search_url` is normalized to `start=0` (the extractor stored its last page, e.g.
+`start=25`). The dead advanced-only search `034f4d58` is renamed `[DEPRECATED — use
+1bc44128 …]`.
 
-### How to run the read-only composer probe (the right way)
-`extension/recruiter-composer-probe.mjs` — read-only, human-slow (bezier mouse, multi-s
-dwells, reuses `page-nav`/`blocker-detect`); NEVER types a body or clicks Send; aborts on
-any wall without tripping the circuit breaker. Writes screenshots + DOM inventory +
-`STATUS` to `.debug/composer-probe/`. Its job: capture the two selectors the recording
-never recorded — the message BODY field and the SEND button.
+### Remove candidate from project (Odoo lead delete → archive in LinkedIn → confirm → delete in Odoo) — LIVE-VERIFIED 2026-06-11
 
-**Must run in the daemon's logon context, NOT raw SSH.** Launched directly over SSH
-(linkedin-bot network logon) Chrome can't DPAPI-decrypt the staged cookies (Local State
-uses classic `encrypted_key`, no App-Bound) → login wall. Run it via a one-shot scheduled
-task with the SAME principal as `linkedin-bot-daemon` (UserId `linkedin-bot`, LogonType
-**S4U**, RunLevel Highest). Helper scripts (host `C:\Users\Public\extension\`):
-`probe-task.ps1` (action wrapper) + `register-probe-task.ps1` (registers+starts task
-`recruiter-probe`) + `wait-probe.ps1` (polls STATUS). Keep the daemon **Disabled** during
-the probe so it doesn't race for the profile. Pre-flight with `recon.ps1` (profile lock /
-chrome-on-profile / budget breaker).
+Two-phase, confirm-gated. Deleting a `linkedin.lead` in Odoo ARCHIVES the candidate in
+the LinkedIn project (Recruiter has **no hard-delete** — archive IS the removal); only
+once removal is VERIFIED does the Odoo row get deleted.
+- **Trigger (akcr):** `linkedin.lead.unlink()` is deferred — for a lead with a project
+  link it POSTs `/v1/recruiter/leads/remove` + sets `removal_status='pending'` and does
+  NOT delete. Bypass (real delete) on context `akcr_removal_confirmed`, test rows, or no
+  project. Confirmed-removal callback `POST /akcr/api/lead_removed` hard-deletes.
+  (akcr branch `feat/recruiter-search-link`, PR **#1818** → qaodoo; needs `-u akcr`.)
+- **Backend:** `POST /v1/recruiter/leads/remove` → `RecruiterPipelineService.remove_candidate`
+  → daemon `recruiter_archive` run (workflow `fc9bb424`, env `RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID`).
+  Terminal hook `_after_archive` pushes `push_lead_removed` ONLY when verified → Odoo delete.
+- **Strategy `recruiter_archive_candidate`** (recruiter.mjs) — the archive interaction
+  cost 7 live iterations to nail; the working recipe:
+  1. The per-row archive button is `button[data-test-component='archive-profiles-btn']`
+     (NOT `data-view-name`); the candidate's FIRST name is in the button TEXT
+     ("Archivar a `<First>`, ya que…"), not an aria-label. Match the label as a PREFIX
+     of the full name; tag the button + its row.
+  2. The button lives in `.profile-item-actions`, **hidden until the ROW is hovered** —
+     `page.hover` the row FIRST, then click (clickResolved). A blind coordinate click does
+     nothing.
+  3. Clicking opens a confirm MODAL (`[data-test-archive-confirm-modal-body]`); the submit
+     button is `button[data-test-archive-confirm-modal-submit]` in the modal FOOTER
+     (`.artdeco-modal__actionbar`, a SIBLING of `__content` — scope to the modal ROOT, not
+     `__content`). Avoid `data-test-archive-confirm-modal-cancel`.
+  4. **Verify by the "Candidatos archivados / Archived candidates" counter increasing**
+     (0→1). Archived candidates STILL appear in "Todos los candidatos", so absence there
+     is NOT proof. The `sr-overlay` ("Automatización en curso") is OUR `pointer-events:none`
+     shield — never blocks clicks (red herring).
+- **Verified:** archived "Daniel De León" from job 323's project (count 0→1); Odoo lead
+  stayed intact (callback 404s until qaodoo akcr deploy → safe gate). See [[project_qaodoo_deploy_ops]].
+
+### DEMO flow — wipe a project + add one profile (Claude-runnable)
+
+`scripts/demo_recruiter_reset_and_add.sh` runs two daemon workflows on fernanda's warm
+seat (anti-bot always on). Defaults: project `-EZ Senior QA Automation Engineer`
+(`2057213706`), profile `/in/crandrey/`; override via `PROJECT_URL`/`PROJECT_NAME`/`PROFILE_URL`.
+1. **Archive ALL** — workflow `511ceaab` / strategy `recruiter_archive_all_in_project`
+   (param `project_url`). Loops the proven single-archive (hover row → click
+   `archive-profiles-btn` → confirm modal submit) over the FIRST active candidate each
+   iteration; terminates when **"Todos los candidatos" (active, excludes archived) hits 0**,
+   with a hard **175s time budget** (the daemon's per-step watchdog kills at 240s — DO NOT
+   let a strategy exceed it; the first attempt did ~15 rounds with reloads and timed out).
+   Select-all + bulk-archive was NOT viable (no bulk `archive-profiles-btn` surfaces).
+   Live-verified: archived 15 in one run (active 19→4), counter-verified, no timeout.
+2. **Add `/in/` profile** — workflow `a352e1e4` (save-to-project-param; params
+   `candidate_url`, `project_name`). The public `/in/<slug>/` URL bridges to the Recruiter
+   profile (Save-to-project button) in a logged-in seat. Live-verified (run completed).
+
+⚠️ Each archives REAL candidates on the sensitive account — only run on a throwaway/test
+project. The demo script poll is NOT `set -e` (a transient empty curl must not abort it).
+See [[project_recruiter_archive_candidate]].
+
+### Per-position message TEMPLATE (Odoo) + templated send + archive-project — LIVE-VERIFIED 2026-06-11
+
+- **Odoo template (akcr):** `hr.job.recruiter_message_template` (Text) — auto-default from
+  the position `name` + public `website_url` with the `{Nombre}` token; user-editable in
+  the hr.job form. The "Mandar mensaje" wizard prefills its body from it and has a **`send`
+  checkbox** (unchecked = preview only). Ships on akcr branch `feat/recruiter-search-link`
+  / PR **#1818** (operator `-u akcr` upgrade needed for the field + wizard).
+- **Templated send (`recruiter_message_compose`, wf `c46c296f`, env
+  `RECRUITER_MESSAGE_WORKFLOW_ID`):** selects the project's ACTIVE candidates → bulk InMail
+  composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
+  LinkedIn's **`{firstName}` variable CHIP** (the "Insert variables" `{}` button →
+  `ul[data-test-variables-dropdown]` items `{firstName}`/`{lastName}`/`{fullName}`) → sets
+  subject (`input[data-test-compose-subject-input]`) → **GATED**: `send=false` (default)
+  types + STOPS for a snapshot preview; `send=true` clicks Send
+  (`button[data-test-messaging-submit-btn]`). Reports the recipients it messaged so the
+  backend marks exactly those in Odoo. `POST /v1/recruiter/jobs/{id}/send-messages {body,
+  subject, send}`. **Live-verified: real InMail to Andrey only → Odoo `outreach_status=messaged`.**
+- **profile_url URN gotcha:** the project `/manage/all` rows report the `AEMAA…` urn, but
+  the public-`/in/`-bridge save yields a different `ACoAA…` urn — they must match for the
+  Odoo outreach-status update. Align the lead's `profile_url` to the `AEMAA…` form.
+- **Archive a PROJECT (`recruiter_archive_project`, wf `752753a9`, testing tool):**
+  `/talent/projects` → card by id/name → `[data-test-project-list-item-actions]` overflow
+  → "Archive project" menu item → **confirm modal "Archive project"** (NOT Cancel/Dismiss)
+  → verify gone from the active list. Live-verified (archived project `2056118114`).
+- See [[project_recruiter_archive_candidate]].
+
+### Key operational rules
+
+- **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
+- **Anti-bot always on:** daemon runs (`execution_target=daemon`, `use_profile`) are UNCONDITIONALLY protected. No toggle. NEVER run via the raw extension.
+- **Strategy hot-reload** (no restart): edit `extension/runtime-strategies/recruiter.mjs` → `scp` to `linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/recruiter.mjs'`
+- **Daemon BEHAVIOR hot-reload** (no restart, since 2026-06-15): run-claim/priority, the
+  generic click/type step + checkpoint hard-fail, and the keepalive ping now live in
+  hot-loaded `extension/runtime-strategies/daemon-behavior.mjs` (loaded by mtime each tick).
+  Change daemon behavior — incl. the future reply-scanner — by `scp`-ing JUST that file; the
+  host (`driver-daemon.mjs`) stays frozen. Strict fail-safe: a broken/missing/export-drifted
+  module makes the daemon poll+heartbeat only (`[behavior] module unavailable — NOT claiming`)
+  until a good file is synced. See [[project_daemon_hot_behavior]].
+- **Daemon restart kills the `/talent` seat** and requires human re-login (now RARELY needed —
+  only for `driver-daemon.mjs`/`src/` host changes, NOT behavior tweaks). Batch host changes.
+  After a restart: kill any **orphaned chrome** still holding the profile lock
+  (`...where CommandLine -like '*linkedin-profile*' | Stop-Process -Force`) or the new daemon
+  hits `Failed to create a ProcessSingleton`. Re-login by logging into the daemon's OWN open
+  Chrome window at the host (don't run `login-talent.bat` → 2nd Chrome re-hits the lock).
+- **Booleans from Odoo JDs only** — `scripts/boolean_from_odoo.py <id>` → never hand-craft.
+- **Creating a TEST position to drive the pipeline (qaodoo XML-RPC):** auth as
+  `support@akurey.com` / `Akurey1234*` (uid=2, db `qaodoo`). The `hr.job` needs
+  `linkedin_sync=True` + `is_published=True` (+`website_published`) + a real `description`
+  (→ boolean + project desc). akcr **caps LinkedIn sync at 4 jobs** — disable sync on stale
+  test jobs first (keep real 304/307). **Always set `job_location`** (`cr`/`latam`/`global`,
+  `required=True`): create succeeds without it, but the hr.job form then won't save and the
+  "ver candidatos" button rebounds with `Invalid fields: Job Location`. So pass `name` +
+  `department_id` + `job_location`. (Live job 323, 2026-06-11.)
 
 ## Read first
 
+- **`docs/recruiter-subworkflows.md`** — detailed build notes, run IDs, selectors, and
+  gotchas for every Recruiter sub-workflow. Reference when building or debugging a flow.
+- **`docs/recruiter-daemon-ops.md`** — daemon session ops: pre-flight checklist, how to
+  trigger runs, seat keepalive, restart gotchas, session backup/restore.
+- **`docs/recruiter-odoo-integration-design.md`** — full E2E design for the Odoo pipeline.
 - **`docs/recruitment-automation-flow.md`** — full runbook for the Odoo job
   publication → LinkedIn search → applicant ingestion → AI scoring loop. Has
   the end-to-end architecture diagram, all prerequisites, first-time setup,
   per-step verification, troubleshooting (9 common failure modes), and config
-  reference. Treat as the source of truth; this `CLAUDE.md` only adds
-  shorthand reminders.
-- **`docs/next-iteration-plan.md`** — implementation plan for the next four
-  improvements (Odoo sync-stats view, daemon health in dashboard, kill the
-  AI-extraction duplication with Easy Recruit, generic schema-driven
-  extractor). Has ordered tasks with acceptance criteria.
-- **`docs/windows-bot-host-runbook.md`** — how to access and operate the
-  PRODUCTION bot host (Fernanda's **Windows** machine): SSH over Tailscale as
-  `linkedin-bot@100.107.206.110` (elevated, key-based), where everything lives on
-  the host, the `linkedin-bot-daemon` scheduled task, common ops, and gotchas.
-  The daemon runs on Windows; the backend runs on Andrey's Mac
-  (`BACKEND=http://100.100.20.99:8081` over Tailscale). NOTE: the older
-  `docs/linkedin-bot-host-setup.md` is written for a **Mac** host — for Fernanda's
-  real host, the Windows runbook supersedes it. Setup scripts:
+  reference.
+- **`docs/next-iteration-plan.md`** — implementation plan for the next improvements
+  (Odoo sync-stats view, daemon health in dashboard, generic schema-driven extractor).
+- **`docs/windows-bot-host-runbook.md`** — how to access and operate the PRODUCTION bot
+  host (Fernanda's **Windows** machine): SSH over Tailscale as `linkedin-bot@100.107.206.110`,
+  `linkedin-bot-daemon` scheduled task, common ops, gotchas. Supersedes the older Mac-focused
+  `docs/linkedin-bot-host-setup.md`. Setup scripts:
   `scripts/setup-windows-host.ps1` + `scripts/elevate-bot-windows.ps1`.
 
 ## Deploying changes — AWS is the source of truth (keep ALL parts in sync)
@@ -361,9 +360,17 @@ Per change:
 - **Extension (`extension/`)** → rebuild pointed at AWS, then reload on each browser host:
   `VITE_API_BASE_URL=https://52-5-45-84.sslip.io/v1 VITE_API_KEY=<gateway-key> npm run build`
   → copy `dist/` to the host → reload unpacked.
-- **Daemon (`extension/driver-daemon.mjs` + `src/`)** → re-sync `extension/` to Fernanda's
-  host (`C:\Users\Public\extension`, see windows runbook) + restart `linkedin-bot-daemon`.
-  It already points at AWS via `daemon-task.ps1` (`BACKEND`/`API_KEY`).
+- **Daemon runtime strategy / behavior (`extension/runtime-strategies/{recruiter,daemon-behavior}.mjs`)**
+  → sync only that file to Fernanda's host; the daemon hot-loads it by file mtime, so no
+  restart/re-login is needed. `recruiter.mjs` = per-strategy steps; `daemon-behavior.mjs` =
+  run-claim/priority + generic click/type step + checkpoint hard-fail + keepalive (and the
+  future reply-scanner). `scp extension/runtime-strategies/<file>.mjs linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/<file>.mjs'`.
+- **Daemon bootstrap/HOST code (`extension/driver-daemon.mjs` + `src/`)** → re-sync `extension/` to
+  Fernanda's host (`C:\Users\Public\extension`, see windows runbook) + restart `linkedin-bot-daemon`.
+  This kills the `/talent` seat and requires the human login flow — now RARELY needed since
+  volatile logic lives in the hot `daemon-behavior.mjs`. After restart, kill orphaned chrome on
+  the profile (ProcessSingleton) + re-login in the daemon's own Chrome window. It already points
+  at AWS via `daemon-task.ps1` (`BACKEND`/`API_KEY`).
 - **Frontend (`frontend/`)** → `frontend/.env` points at AWS; rebuild/serve.
 
 **NEVER `docker compose down -v`** on the box: the Postgres volume holds the only
@@ -676,10 +683,14 @@ make frontend-install   | frontend-uninstall   # launchd (needs FDA)
 make dev-backend        | dev-frontend         # screen-based (no FDA)
 ```
 
-When editing the daemon code:
+When editing local daemon bootstrap/shared code:
 ```
 make daemon-restart && make daemon-logs
 ```
+
+For production Recruiter strategy-only changes, prefer
+`extension/runtime-strategies/recruiter.mjs` and sync that file to Fernanda's host; it hot-loads on
+the next `recruiter_*` workflow without a daemon restart.
 
 When editing backend code (auto-reload is off in screen mode):
 ```

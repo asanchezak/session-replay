@@ -62,6 +62,7 @@ class AddStepRequest(BaseModel):
     value: str | None = None
     methods: list[dict[str, Any]] | None = None
     success_condition: dict[str, Any] | None = None
+    checkpoint: bool = False
     dom_context: dict[str, Any] | None = None
 
 
@@ -577,6 +578,7 @@ async def get_workflow(
                 "value": s.value,
                 "methods": s.methods,
                 "success_condition": s.success_condition,
+                "checkpoint": s.checkpoint,
                 "dom_context": s.dom_context,
             }
             for s in steps
@@ -762,6 +764,7 @@ async def add_step(
         value=req.value,
         methods=methods_data,
         success_condition=req.success_condition,
+        checkpoint=req.checkpoint,
         dom_context=req.dom_context,
     )
     return {
@@ -1072,6 +1075,7 @@ async def run_workflow_with_parameters(
             workflow_id=workflow_id,
             execution_plan=execution_plan,
             execution_goal=req.execution_goal,
+            runtime_params=req.runtime_params,
         )
         if req.execution_target == "daemon":
             # Tag the run for the unattended daemon to pick up (it broadens its

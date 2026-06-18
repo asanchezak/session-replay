@@ -1,0 +1,661 @@
+[
+  {
+    "position_id": 231,
+    "title": "Sr. Full-Stack Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Full-Stack Engineer\" OR \"Senior Full-Stack Developer\" OR \"Sr. Full-Stack Engineer\" OR \"Lead Full-Stack Engineer\") AND \"Next.js\" AND \"React\" AND \"Azure\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 5,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Full-Stack Engineer",
+        "Senior Full-Stack Developer",
+        "Sr. Full-Stack Engineer",
+        "Lead Full-Stack Engineer"
+      ],
+      "must_have_skills": [
+        "Next.js",
+        "React",
+        "Azure",
+        "CDN",
+        "GitHub",
+        "API"
+      ],
+      "optional_skills": [
+        "Agile",
+        "Scrum",
+        "Kanban",
+        "Page Router",
+        "App Router"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 5,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Entry"
+      ]
+    }
+  },
+  {
+    "position_id": 203,
+    "title": "Lead Full-Stack Engineer (React & Express) – UI",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Lead Full-Stack Engineer\" OR \"Senior Full-Stack Developer\" OR \"Full-Stack Engineer\" OR \"Full-Stack Developer\") AND \"React\" AND \"Node.js\" AND \"Express\" NOT (\"Manager\" OR \"Intern\" OR \"Director\")",
+    "location": "LATAM",
+    "years_min": 7,
+    "seniority": "lead",
+    "spec": {
+      "title_variants": [
+        "Lead Full-Stack Engineer",
+        "Senior Full-Stack Developer",
+        "Full-Stack Engineer",
+        "Full-Stack Developer"
+      ],
+      "must_have_skills": [
+        "React",
+        "Node.js",
+        "Express",
+        "JavaScript",
+        "TypeScript",
+        "GraphQL"
+      ],
+      "optional_skills": [
+        "Redux",
+        "CSS",
+        "HTML",
+        "Framer Motion",
+        "GSAP",
+        "Jest"
+      ],
+      "seniority": "lead",
+      "location": "LATAM",
+      "years_min": 7,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Director",
+        "Junior"
+      ]
+    }
+  },
+  {
+    "position_id": 205,
+    "title": "Senior Full-Stack Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Full-Stack Engineer\" OR \"Full-Stack Developer\" OR \"Senior Software Engineer\" OR \"Full-Stack Web Developer\") AND \"Next.js\" AND \"React\" AND \"CDN\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 5,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Full-Stack Engineer",
+        "Full-Stack Developer",
+        "Senior Software Engineer",
+        "Full-Stack Web Developer"
+      ],
+      "must_have_skills": [
+        "Next.js",
+        "React",
+        "CDN",
+        "API",
+        "GitHub",
+        "Agile"
+      ],
+      "optional_skills": [
+        "Load Balancing",
+        "Responsive Design",
+        "Database",
+        "Scrum",
+        "Kanban",
+        "Code Review"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 5,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Trainee"
+      ]
+    }
+  },
+  {
+    "position_id": 160,
+    "title": "Software Developer: Fullstack lead",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Fullstack Developer\" OR \"Software Developer\" OR \"Senior Software Engineer\" OR \"Lead Software Engineer\") AND \"C#\" AND \".NET\" AND \"Node.js\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 6,
+    "seniority": "lead",
+    "spec": {
+      "title_variants": [
+        "Fullstack Developer",
+        "Software Developer",
+        "Senior Software Engineer",
+        "Lead Software Engineer"
+      ],
+      "must_have_skills": [
+        "C#",
+        ".NET",
+        "Node.js",
+        "TypeScript",
+        "SQL",
+        "Postgres"
+      ],
+      "optional_skills": [
+        "JavaScript",
+        "RESTful API",
+        "Agile",
+        "Microservices",
+        "Docker",
+        "AWS"
+      ],
+      "seniority": "lead",
+      "location": "LATAM",
+      "years_min": 6,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Trainee"
+      ]
+    }
+  },
+  {
+    "position_id": 162,
+    "title": "Senior Angular Front-End Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Angular Front-End Engineer\" OR \"Angular Developer\" OR \"Front-End Software Engineer\" OR \"Web Developer\") AND \"Angular\" AND \"HTML5\" AND \"CSS3\" NOT (\"Manager\" OR \"Intern\" OR \"Trainee\")",
+    "location": null,
+    "years_min": 7,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Angular Front-End Engineer",
+        "Angular Developer",
+        "Front-End Software Engineer",
+        "Web Developer"
+      ],
+      "must_have_skills": [
+        "Angular",
+        "HTML5",
+        "CSS3",
+        "JavaScript",
+        "TypeScript",
+        "Git"
+      ],
+      "optional_skills": [
+        "Ionic",
+        "C#",
+        "ASP.NET Core",
+        "Entity Framework",
+        "AWS",
+        "DevOps"
+      ],
+      "seniority": "senior",
+      "location": null,
+      "years_min": 7,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Trainee",
+        "Junior"
+      ]
+    }
+  },
+  {
+    "position_id": 189,
+    "title": "Senior Front-End Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Front-End Engineer\" OR \"Senior UI Engineer\" OR \"Front-End Developer\" OR \"Senior React Developer\") AND \"Next.js\" AND \"React\" AND \"JavaScript\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 5,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Front-End Engineer",
+        "Senior UI Engineer",
+        "Front-End Developer",
+        "Senior React Developer"
+      ],
+      "must_have_skills": [
+        "Next.js",
+        "React",
+        "JavaScript",
+        "GitHub",
+        "Redux",
+        "Webpack"
+      ],
+      "optional_skills": [
+        "Kotlin",
+        "Content Delivery Network",
+        "Agile",
+        "Babel",
+        "npm",
+        "Zustand"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 5,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Lead"
+      ]
+    }
+  },
+  {
+    "position_id": 161,
+    "title": "Senior Back-End C# .NET Core Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Back-End C# .NET Core Engineer\" OR \"Senior C# Developer\" OR \"C# Software Engineer\" OR \"Back-End Software Engineer\") AND \"C#\" AND \".NET Core\" AND \"Web APIs\" NOT (\"Manager\" OR \"Director\" OR \"Intern\")",
+    "location": null,
+    "years_min": 7,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Back-End C# .NET Core Engineer",
+        "Senior C# Developer",
+        "C# Software Engineer",
+        "Back-End Software Engineer"
+      ],
+      "must_have_skills": [
+        "C#",
+        ".NET Core",
+        "Web APIs",
+        "Entity Framework",
+        "SQL",
+        "Git"
+      ],
+      "optional_skills": [
+        "AWS",
+        "Docker",
+        "DevOps",
+        "Agile",
+        "Microservices",
+        "Code Reviews"
+      ],
+      "seniority": "senior",
+      "location": null,
+      "years_min": 7,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Director",
+        "Intern",
+        "Junior"
+      ]
+    }
+  },
+  {
+    "position_id": 169,
+    "title": "BackEnd Node Software Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"BackEnd Node Software Engineer\" OR \"Node.js Developer\" OR \"Back-End Developer\" OR \"Server-Side Engineer\") AND \"Node.js\" AND \"GCP\" AND \"RESTful API\" NOT (\"Manager\" OR \"Intern\" OR \"Lead\")",
+    "location": "LATAM",
+    "years_min": 3,
+    "seniority": "mid",
+    "spec": {
+      "title_variants": [
+        "BackEnd Node Software Engineer",
+        "Node.js Developer",
+        "Back-End Developer",
+        "Server-Side Engineer"
+      ],
+      "must_have_skills": [
+        "Node.js",
+        "GCP",
+        "RESTful API",
+        "GraphQL",
+        "npm",
+        "Git"
+      ],
+      "optional_skills": [
+        "Revenue Cat",
+        "Algolia",
+        "Mocha",
+        "Jest",
+        "Chai",
+        "CI/CD"
+      ],
+      "seniority": "mid",
+      "location": "LATAM",
+      "years_min": 3,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Lead",
+        "Director"
+      ]
+    }
+  },
+  {
+    "position_id": 145,
+    "title": "Senior Backend JS Software Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Backend Engineer\" OR \"Senior Software Engineer\" OR \"JavaScript Engineer\" OR \"JS Software Engineer\") AND \"JavaScript\" AND \"TypeScript\" AND \"Node.js\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "Costa Rica",
+    "years_min": 9,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Backend Engineer",
+        "Senior Software Engineer",
+        "JavaScript Engineer",
+        "JS Software Engineer"
+      ],
+      "must_have_skills": [
+        "JavaScript",
+        "TypeScript",
+        "Node.js",
+        "Express",
+        "AWS",
+        "Postgres"
+      ],
+      "optional_skills": [
+        "GraphQL",
+        "DynamoDB",
+        "Kafka",
+        "CloudFormation",
+        "Serverless",
+        "CI/CD"
+      ],
+      "seniority": "senior",
+      "location": "Costa Rica",
+      "years_min": 9,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Mid"
+      ]
+    }
+  },
+  {
+    "position_id": 190,
+    "title": "Mid+/Senior Backend Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Backend Engineer\" OR \"Senior Backend Engineer\" OR \"Platform Engineer\" OR \"Software Engineer\") AND \"Python\" AND \"Go\" AND \"API\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": null,
+    "years_min": 3,
+    "seniority": "mid",
+    "spec": {
+      "title_variants": [
+        "Backend Engineer",
+        "Senior Backend Engineer",
+        "Platform Engineer",
+        "Software Engineer"
+      ],
+      "must_have_skills": [
+        "Python",
+        "Go",
+        "API",
+        "Data Pipelines",
+        "Statistical Modeling",
+        "Experimental Design"
+      ],
+      "optional_skills": [
+        "AWS",
+        "GCP",
+        "Scrum",
+        "Kanban",
+        "Cloud Computing",
+        "Causal Inference"
+      ],
+      "seniority": "mid",
+      "location": null,
+      "years_min": 3,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Director"
+      ]
+    }
+  },
+  {
+    "position_id": 185,
+    "title": "Senior GCP DevOps Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior GCP DevOps Engineer\" OR \"GCP DevOps Engineer\" OR \"DevOps Engineer\" OR \"Site Reliability Engineer\") AND \"GCP\" AND \"Argo CD\" AND \"Prometheus\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 5,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior GCP DevOps Engineer",
+        "GCP DevOps Engineer",
+        "DevOps Engineer",
+        "Site Reliability Engineer"
+      ],
+      "must_have_skills": [
+        "GCP",
+        "Argo CD",
+        "Prometheus",
+        "Grafana",
+        "Cloud Monitoring",
+        "CI/CD"
+      ],
+      "optional_skills": [
+        "SRE",
+        "Kubernetes",
+        "Terraform",
+        "Python",
+        "Docker",
+        "Linux"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 5,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Trainee"
+      ]
+    }
+  },
+  {
+    "position_id": 166,
+    "title": "Mobile Flutter Software Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Flutter Developer\" OR \"Mobile App Developer\" OR \"Software Engineer Flutter\" OR \"Flutter Engineer\") AND \"Flutter\" AND \"Dart\" AND \"RESTful APIs\" NOT (\"Manager\" OR \"Intern\" OR \"Lead\")",
+    "location": "LATAM",
+    "years_min": 3,
+    "seniority": "mid",
+    "spec": {
+      "title_variants": [
+        "Flutter Developer",
+        "Mobile App Developer",
+        "Software Engineer Flutter",
+        "Flutter Engineer"
+      ],
+      "must_have_skills": [
+        "Flutter",
+        "Dart",
+        "RESTful APIs",
+        "Git",
+        "UI/UX Design",
+        "Cross-platform Development"
+      ],
+      "optional_skills": [
+        "Agile",
+        "JSON",
+        "QA",
+        "Continuous Integration",
+        "Solution Architecture",
+        "Problem Solving"
+      ],
+      "seniority": "mid",
+      "location": "LATAM",
+      "years_min": 3,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Lead",
+        "Senior"
+      ]
+    }
+  },
+  {
+    "position_id": 223,
+    "title": "Senior Android Developer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Android Developer\" OR \"Android Engineer\" OR \"Senior Mobile Developer\" OR \"Android Software Engineer\") AND \"Kotlin\" AND \"Java\" AND \"Android SDK\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 5,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Android Developer",
+        "Android Engineer",
+        "Senior Mobile Developer",
+        "Android Software Engineer"
+      ],
+      "must_have_skills": [
+        "Kotlin",
+        "Java",
+        "Android SDK",
+        "Jetpack",
+        "RESTful APIs",
+        "GraphQL"
+      ],
+      "optional_skills": [
+        "SQLite",
+        "Room",
+        "Realm",
+        "OAuth",
+        "JWT",
+        "CI/CD"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 5,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Lead"
+      ]
+    }
+  },
+  {
+    "position_id": 194,
+    "title": "AI Features & Quality Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"AI Engineer\" OR \"Machine Learning Engineer\" OR \"Data Scientist\" OR \"Backend Engineer\") AND \"Python\" AND \"Large Language Models\" AND \"LLMs\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "LATAM",
+    "years_min": 12,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "AI Engineer",
+        "Machine Learning Engineer",
+        "Data Scientist",
+        "Backend Engineer"
+      ],
+      "must_have_skills": [
+        "Python",
+        "Large Language Models",
+        "LLMs",
+        "Prompt Engineering",
+        "Data Analytics",
+        "Backend Development"
+      ],
+      "optional_skills": [
+        "GPT",
+        "Claude",
+        "Gemini",
+        "Vector Search",
+        "pgvector",
+        "FAISS"
+      ],
+      "seniority": "senior",
+      "location": "LATAM",
+      "years_min": 12,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Lead"
+      ]
+    }
+  },
+  {
+    "position_id": 87,
+    "title": "Senior Frontend JS Software Engineer",
+    "tightness": 3,
+    "max_tightness": 8,
+    "boolean_query": "(\"Senior Frontend Engineer\" OR \"Senior JavaScript Developer\" OR \"Lead Frontend Developer\" OR \"Frontend Software Engineer\") AND \"React\" AND \"Next.js\" AND \"TypeScript\" NOT (\"Manager\" OR \"Intern\" OR \"Junior\")",
+    "location": "Costa Rica",
+    "years_min": 8,
+    "seniority": "senior",
+    "spec": {
+      "title_variants": [
+        "Senior Frontend Engineer",
+        "Senior JavaScript Developer",
+        "Lead Frontend Developer",
+        "Frontend Software Engineer"
+      ],
+      "must_have_skills": [
+        "React",
+        "Next.js",
+        "TypeScript",
+        "JavaScript",
+        "CSS",
+        "Styled Components"
+      ],
+      "optional_skills": [
+        "Node.js",
+        "React Native",
+        "iOS",
+        "Android",
+        "Accessibility",
+        "ADA compliance"
+      ],
+      "seniority": "senior",
+      "location": "Costa Rica",
+      "years_min": 8,
+      "years_max": null,
+      "exclude": [
+        "Manager",
+        "Intern",
+        "Junior",
+        "Lead"
+      ]
+    }
+  }
+]

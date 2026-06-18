@@ -1,0 +1,38 @@
+{
+  "name": "Recruiter: save current search URL results to project",
+  "description": "Saves candidates from an already-built Recruiter search URL. Use this after a focused search/extract has produced a concrete /talent/search URL, to avoid re-driving the advanced-search facet form. Params: search_url, project_name, target_count.",
+  "target_url": "https://www.linkedin.com/talent/search",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Open existing Recruiter search results URL",
+      "value": "{{search_url}}"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "results load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "results load 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Select result cards and save them to project",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_save_results_to_project"
+        },
+        {
+          "kind": "recruiter_save_results_to_project",
+          "mode": "bulk",
+          "project_name": "{{project_name}}",
+          "target_count": "{{target_count}}",
+          "max_scroll_passes": 12,
+          "project_url": "{{project_url}}"
+        }
+      ]
+    }
+  ]
+}

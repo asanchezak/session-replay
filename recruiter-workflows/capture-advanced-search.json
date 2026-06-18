@@ -1,0 +1,13 @@
+{
+  "name": "Recruiter: CAPTURE advanced search (read-only, no submit)",
+  "description": "Read-only capture to lock the boolean Keywords field + facet + Search-button selectors for the advanced-search workflow. Navigates /talent/search/advanced + scrolls + snapshots per step (execution_options.snapshot). NO search submitted, NO data changed — pure DOM capture for offline selector analysis.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {"action_type":"navigate","intent":"Warm: Talent home","value":"https://www.linkedin.com/talent/home"},
+    {"action_type":"navigate","intent":"Advanced search (direct nav)","value":"https://www.linkedin.com/talent/search/advanced"},
+    {"action_type":"scroll","intent":"render 1"},
+    {"action_type":"scroll","intent":"render 2"},
+    {"action_type":"scroll","intent":"render 3"},
+    {"action_type":"scroll","intent":"render 4"}
+  ]
+}

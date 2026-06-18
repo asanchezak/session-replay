@@ -20,3 +20,10 @@ extension/dock-state-probe.png
 test-results/
 playwright-report/
 .local-e2e-sites/
+
+# Per-run /talent snapshot dirs (ephemeral debug captures; recruiter-snapshots/search-capture
+# is the tracked reference set). The run dirs are UUID-named.
+recruiter-snapshots/*-*-*-*-*/
+
+# local SSH known_hosts for the EC2 box (machine-specific)
+deploy/.known_hosts

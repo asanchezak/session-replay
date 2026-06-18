@@ -38,7 +38,8 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from services.connector_forum_service import ConnectorForumService
 from services.webhook_trigger_service import (
-    SUPPORTED_EVENT_KINDS,
+    ALLOWED_TRIGGER_EVENT_KINDS,
+    SUPPORTED_EVENT_KINDS,  # noqa: F401  (kept for callers/back-compat)
     WebhookTriggerService,
 )
 
@@ -76,7 +77,10 @@ class ReconcileSupervisor:
                 str(t.connector_id)
                 for t in triggers
                 if t.enabled
-                and t.event_kind in SUPPORTED_EVENT_KINDS
+                # Include recruiter_pipeline so the reconciler also picks up
+                # connectors running the /talent loop (not just the legacy
+                # new_job_position / linkedin_lead_search flows).
+                and t.event_kind in ALLOWED_TRIGGER_EVENT_KINDS
                 and t.connector_id
             }
         )
@@ -120,7 +124,11 @@ class ReconcileSupervisor:
 
         jobs = await self.forum.fetch_jobs(
             connector,
-            filters={"linkedin_sync": True, "is_published": True},
+            # The LinkedIn candidate-SOURCING pipeline is gated by the dedicated
+            # hr.job.recruiter_search_candidates flag (NOT linkedin_sync, which only
+            # syncs the posting to LinkedIn, and NOT publication) — so a position can be
+            # sourced regardless of where (or whether) it's published.
+            filters={"recruiter_search_candidates": True},
             limit=RECONCILE_JOB_FETCH_LIMIT,
         )
 

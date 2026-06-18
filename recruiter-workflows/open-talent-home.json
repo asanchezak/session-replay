@@ -1,0 +1,17 @@
+{
+  "name": "Recruiter: Open Talent Home",
+  "description": "Health-check / demo: daemon opens /talent/home using the staged Recruiter session (.linkedin-profile). Read-only.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Open Recruiter Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Open Recruiter Projects",
+      "value": "https://www.linkedin.com/talent/projects"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -21,6 +22,64 @@ from services.workflow_service import WorkflowService
 logger = logging.getLogger(__name__)
 log = get_logger()
 
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+# Runs orchestrated by the backend (Odoo pipeline / webhook / reconciler) have NO
+# human "watcher" — they are driven autonomously, not by a dashboard operator. The
+# tab-closed suspend signal (a dashboard RunDetailPage unloading on pagehide) is a
+# safety for INTERACTIVE daemon runs a human launched and is watching; it must NOT
+# pause autonomous runs, or an automated pipeline stalls the moment anyone's
+# dashboard tab navigates/closes. Identified by the run's origin.event_kind.
+_AUTONOMOUS_EVENT_KINDS = frozenset({
+    "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
+    "recruiter_archive", "recruiter_recommendations", "recruiter_preview_count",
+    "recruiter_demo_archive", "recruiter_demo_add",
+    "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
+})
+
+
+def _substitute_runtime_params(steps: list[dict], runtime_params: dict) -> int:
+    """In-place {{key}} substitution into each step's value / success_condition /
+    methods using runtime_params.
+
+    The lightweight "literal" counterpart of
+    TemplateService.substitute_parameters: it lets a plain (non-analyzed,
+    replay_strategy="literal") workflow be parameterized just by embedding
+    {{placeholders}} in its step values — exactly what the machine-built
+    Recruiter sub-workflows need (e.g. project name "-EZ {{position}}"). A step
+    with no placeholder is left untouched, so this is a safe no-op for every
+    existing literal workflow. Returns the number of placeholder hits.
+    """
+    if not runtime_params:
+        return 0
+    hits = 0
+
+    def _repl(match: re.Match) -> str:
+        nonlocal hits
+        key = match.group(1)
+        if key in runtime_params:
+            hits += 1
+            return str(runtime_params[key])
+        return match.group(0)
+
+    def _walk(node):
+        if isinstance(node, str):
+            return _PLACEHOLDER_RE.sub(_repl, node)
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        return node
+
+    for step in steps:
+        if isinstance(step.get("value"), str):
+            step["value"] = _walk(step["value"])
+        if isinstance(step.get("success_condition"), dict):
+            step["success_condition"] = _walk(step["success_condition"])
+        if isinstance(step.get("methods"), list):
+            step["methods"] = _walk(step["methods"])
+    return hits
+
 
 class ExecutionService:
     """Service for managing execution runs and their state transitions."""
@@ -36,6 +95,7 @@ class ExecutionService:
         user_id: str | None = None,
         execution_plan: dict | None = None,
         execution_goal: str | None = None,
+        runtime_params: dict | None = None,
     ) -> ExecutionRun:
         """Create a new execution run for a workflow."""
         logger.info("Creating run for workflow_id=%s", workflow_id)
@@ -62,6 +122,9 @@ class ExecutionService:
                     "value": s.value,
                     "methods": s.methods,
                     "success_condition": s.success_condition,
+                    # Critical-step flag: the daemon HARD-FAILS the run if a checkpoint
+                    # step doesn't act / its success_condition fails (vs soft-miss).
+                    "checkpoint": s.checkpoint,
                     "dom_context": s.dom_context,
                     # Phase 5: selector stability from EMA learning (None = no history yet)
                     "selector_stability_score": s.selector_stability_score,
@@ -69,6 +132,19 @@ class ExecutionService:
                 for s in steps
             ],
         }
+        # Literal-workflow parameterization: substitute {{key}} placeholders in
+        # the snapshot's step values with runtime_params. For "parameterized"
+        # workflows the substituted steps arrive via execution_plan and overwrite
+        # these in apply_execution_plan below; this pass is what lets the plain
+        # machine-built Recruiter sub-workflows be driven with runtime params
+        # too. No-op when there are no placeholders.
+        if runtime_params:
+            hits = _substitute_runtime_params(snapshot["steps"], runtime_params)
+            if hits:
+                logger.info(
+                    "create_run: substituted %d runtime placeholder(s) for workflow %s",
+                    hits, workflow_id,
+                )
         snapshot["original_steps"] = deepcopy(snapshot["steps"])
 
         analysis_data = await self._load_analysis(workflow_id)
@@ -486,6 +562,25 @@ class ExecutionService:
         logger.info("Created rerun id=%s source_run_id=%s", run.id, source.id)
         return run
 
+    async def relaunch(self, source_run_id: str) -> ExecutionRun:
+        """Re-launch a terminal run (e.g. a search that FAILED on a walled /talent seat):
+        clone it like rerun BUT preserve the source `origin` (pipeline context +
+        execution_target=daemon + target_operator + execution_options + runtime_params +
+        event_kind) and leave it QUEUED — so the SAME operator's daemon re-claims it and
+        the pipeline terminal hook (`_after_search`) still fires on completion.
+        """
+        source = await self.get_run(source_run_id)
+        new_run = await self.rerun(source_run_id)  # cloned snapshot, status=queued
+        if source.origin:
+            new_run.origin = deepcopy(source.origin)
+            flag_modified(new_run, "origin")
+            await self.session.flush()
+        logger.info(
+            "Relaunched run id=%s from source=%s (origin/target preserved, queued)",
+            new_run.id, source_run_id,
+        )
+        return new_run
+
     async def get_run(self, run_id: str) -> ExecutionRun:
         """Get a run by ID."""
         try:
@@ -610,7 +705,93 @@ class ExecutionService:
                         run_id, event_kind,
                     )
 
+            # Recruiter (/talent) automation pipeline: chain to the next step
+            # (create-project → search → save). advance() pushes the relevant
+            # write-back to Odoo and enqueues the next daemon run. Same
+            # commit-before-await discipline as the push hooks above.
+            if new_status == RunStatus.COMPLETED and (event_kind or "").startswith(
+                "recruiter_"
+            ):
+                try:
+                    await self.session.commit()
+                except Exception:
+                    logger.exception(
+                        "Pre-advance session commit failed for run %s", run_id
+                    )
+                try:
+                    adv = await self._advance_recruiter_pipeline_after_completion(run)
+                    logger.info(
+                        "Recruiter pipeline advance for run %s (%s): %s",
+                        run_id, event_kind, adv,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Recruiter pipeline advance failed for run %s (%s)",
+                        run_id, event_kind,
+                    )
+
+            # Recruiter automation FAILED → surface it on the Odoo hr.job (status +
+            # chatter note + a to-do for the recruiter) so a stalled flow is visible
+            # instead of silently failing. Same commit-before-await discipline as the
+            # hooks above; the notify runs in a fresh session.
+            if new_status == RunStatus.FAILED and (event_kind or "").startswith(
+                "recruiter_"
+            ):
+                try:
+                    await self.session.commit()
+                except Exception:
+                    logger.exception(
+                        "Pre-failure-notify commit failed for run %s", run_id
+                    )
+                try:
+                    notified = await self._notify_recruiter_failure(run)
+                    logger.info(
+                        "Recruiter failure notify for run %s (%s): %s",
+                        run_id, event_kind, notified,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Recruiter failure notify failed for run %s (%s)",
+                        run_id, event_kind,
+                    )
+
         return run
+
+    async def _advance_recruiter_pipeline_after_completion(self, run: ExecutionRun) -> dict:
+        """Advance the Recruiter automation pipeline in a fresh session.
+
+        Sibling of the push hooks: when a recruiter_* run COMPLETES, dispatch to
+        RecruiterPipelineService.advance, which performs the Odoo write-back for the
+        finished stage and enqueues the next daemon run. The lazy import avoids a
+        circular import (recruiter_pipeline_service imports ExecutionService).
+        """
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        async with async_session_factory() as adv_session:
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            adv_run = (await adv_session.execute(stmt)).scalar_one_or_none()
+            svc = RecruiterPipelineService(adv_session)
+            result = await svc.advance(adv_run if adv_run is not None else run)
+            await adv_session.commit()
+            return result
+
+    async def _notify_recruiter_failure(self, run: ExecutionRun) -> dict:
+        """Surface a FAILED recruiter_* run on the Odoo position, in a fresh session.
+
+        Sibling of the advance/push hooks: when a recruiter run FAILS (walled seat,
+        step timeout, checkpoint, pipeline stage error), notify Odoo so the hr.job
+        shows the failure (status + chatter + recruiter to-do). Best-effort."""
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        async with async_session_factory() as fail_session:
+            from sqlalchemy import select as _select
+            stmt = _select(ExecutionRun).where(ExecutionRun.id == run.id)
+            fail_run = (await fail_session.execute(stmt)).scalar_one_or_none()
+            svc = RecruiterPipelineService(fail_session)
+            result = await svc.notify_failure(fail_run if fail_run is not None else run)
+            await fail_session.commit()
+            return result
 
     async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:
         """Run post-completion Odoo applicant push in a fresh session.
@@ -724,6 +905,17 @@ class ExecutionService:
         states are returned unchanged.
         """
         run = await self.get_run(run_id)
+        # Autonomous (pipeline/webhook/reconciler) runs have no dashboard watcher —
+        # a RunDetailPage unloading must never suspend them. Only interactive daemon
+        # runs (no autonomous event_kind) are watch-gated.
+        event_kind = (run.origin or {}).get("event_kind")
+        if event_kind in _AUTONOMOUS_EVENT_KINDS:
+            logger.info(
+                "tab_closed ignored for autonomous run %s (event_kind=%s) — "
+                "pipeline/webhook runs are not gated by a dashboard watcher",
+                run_id, event_kind,
+            )
+            return run
         active_states = {
             RunStatus.RUNNING.value,
             RunStatus.RECOVERING.value,

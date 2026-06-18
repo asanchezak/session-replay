@@ -1,5 +1,10 @@
 # Runbook — Bot de LinkedIn en host dedicado (usuario en 2º plano)
 
+> ⚠️ **DEPRECADO (2026-06-15).** Este doc es el setup **Mac-focused** original. El host de
+> producción de Fernanda es **Windows** — usá **`docs/windows-bot-host-runbook.md`** (SSH
+> sobre Tailscale, scheduled tasks `linkedin-bot-daemon` + `recruiter-snapshot-prune`, ops y
+> gotchas). Se mantiene este archivo solo por contexto histórico del approach Mac.
+
 > **Para qué es este documento.** Guía paso a paso para dejar el bot de scraping
 > corriendo en la **única** Mac con acceso a recruiting (la del **titular de la
 > cuenta** de LinkedIn), dentro de un **usuario macOS dedicado** (`linkedin-bot`) en

@@ -507,15 +507,26 @@ export default function RunDetailPage() {
   // daemon, which re-checks run.status between steps, stops. We use a ref so the
   // listener always sees the latest run, and ONLY pagehide (not visibilitychange,
   // which also fires on a mere tab switch — we must not suspend on that).
-  const liveRunRef = useRef<{ target?: string; status?: string } | null>(null);
+  // Autonomous runs (Odoo pipeline / webhook / reconciler) have no human watcher —
+  // closing this window must NOT suspend them. Only INTERACTIVE daemon runs (no
+  // autonomous event_kind) are watch-gated. The backend enforces this too; this
+  // is the first line + avoids a wasteful POST. Keep in sync with
+  // execution_service._AUTONOMOUS_EVENT_KINDS.
+  const AUTONOMOUS_EVENT_KINDS = [
+    "recruiter_create_project", "recruiter_search", "recruiter_save", "recruiter_message",
+    "recruiter_archive", "recruiter_recommendations", "recruiter_preview_count",
+    "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
+  ];
+  const liveRunRef = useRef<{ target?: string; status?: string; eventKind?: string } | null>(null);
   liveRunRef.current = run
-    ? { target: run.origin?.execution_target, status: run.status }
+    ? { target: run.origin?.execution_target, status: run.status, eventKind: run.origin?.event_kind }
     : null;
   useEffect(() => {
     if (!runId) return;
     const onHide = () => {
       const r = liveRunRef.current;
       if (!r || r.target !== "daemon") return;
+      if (r.eventKind && AUTONOMOUS_EVENT_KINDS.includes(r.eventKind)) return;
       if (!["queued", "running", "recovering"].includes(r.status || "")) return;
       postKeepalive(`/runs/${runId}/tab-closed`);
     };
@@ -571,6 +582,23 @@ export default function RunDetailPage() {
       if (newTab && !newTab.closed) newTab.close();
       const msg = err instanceof Error ? err.message : "Failed to re-run";
       logger.error("RunDetailPage", "rerun", { run_id: runId }, err instanceof Error ? err : undefined);
+      setError(msg);
+    }
+    setActionLoading(null);
+  };
+
+  const handleRelaunch = async () => {
+    if (!runId) return;
+    // Re-queue this run preserving its pipeline origin + target operator, so the same
+    // (Fernanda) daemon re-claims it. Used after re-logging the /talent seat.
+    setActionLoading("relaunch");
+    setError(null);
+    try {
+      const data = await request<{ id: string }>("POST", `/runs/${runId}/relaunch`);
+      navigate(`/runs/${data.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to relaunch";
+      logger.error("RunDetailPage", "relaunch", { run_id: runId }, err instanceof Error ? err : undefined);
       setError(msg);
     }
     setActionLoading(null);
@@ -810,6 +838,16 @@ export default function RunDetailPage() {
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border text-text-gray hover:text-error hover:border-error transition-colors disabled:opacity-50"
             >
               <Square size={14} /> {actionLoading === "stop" ? "..." : "Stop"}
+            </button>
+          )}
+          {run.status === "failed" && run.origin?.execution_target === "daemon" && (
+            <button
+              onClick={handleRelaunch}
+              disabled={actionLoading !== null}
+              title="Re-queue this run with the same pipeline + operator so Fernanda's daemon re-claims it (re-login the /talent seat first if it lapsed)"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+            >
+              <RotateCcw size={14} /> {actionLoading === "relaunch" ? "Relanzando..." : "Relanzar"}
             </button>
           )}
           {run.status === "failed" && (

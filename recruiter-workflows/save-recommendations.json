@@ -1,0 +1,32 @@
+{
+  "name": "Recruiter: Save recommended matches to the project (automated sourcing)",
+  "description": "Adds a project's RECOMMENDED candidates (LinkedIn Automated Sourcing → Recommended matches, /discover/automatedSourcing/review) to the pipeline. The recruiter_save_recommendations strategy hovers each recommendation row and clicks its 'Save to first stage' button (data-test-save-to-first-stage), up to target_count (default 10), collecting name+profile_url; verifies the project's ACTIVE count rose. Returns `people` so the backend can push them as linkedin.lead. Params: project_url, target_count.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle 1"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Add recommended matches to the project",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_save_recommendations"
+        },
+        {
+          "kind": "recruiter_save_recommendations",
+          "project_url": "{{project_url}}",
+          "target_count": "{{target_count}}",
+          "require_open_to_work": "{{require_open_to_work}}"
+        }
+      ]
+    }
+  ]
+}
