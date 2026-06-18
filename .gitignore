@@ -9,6 +9,11 @@ docker/volumes/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+coverage*.json
+.hypothesis/
+.DS_Store
 *.db
 .e2e-profile/
 extension/.linkedin-profile/

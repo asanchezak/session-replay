@@ -30,30 +30,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models.connector import ConnectorConfig
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from services.profile_url_utils import (
+    RECRUITER_PROFILE_MARKERS,
+    canonical_profile_url,
+    is_profile_url,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_LEADS_PER_RUN = 50
 _PROJECT_URL_RE = re.compile(r"/talent/hire/(\d+)")
-# Recruiter candidate URLs are /talent/profile/<id>; also accept public /in/.
-_RECRUITER_PROFILE_MARKERS = ("/talent/profile/", "linkedin.com/in/")
-
-
-def _is_recruiter_profile_url(url: str | None) -> bool:
-    if not url:
-        return False
-    head = url.split("?", 1)[0]
-    return any(m in head for m in _RECRUITER_PROFILE_MARKERS)
-
-
-def _canonical_url(url: str) -> str:
-    """Canonicalize for dedup/match — drop query (?project=…&trk=…) + fragment.
-
-    The keying contract (see docs/recruiter-odoo-integration-design.md): leads and
-    outreach updates join on the bare /talent/profile/<id> URL, so search-push and
-    message-push must canonicalize identically.
-    """
-    return url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
 
 
 class RecruiterPushService:
@@ -138,9 +124,9 @@ class RecruiterPushService:
                 if not isinstance(person, dict):
                     continue
                 url = person.get("profile_url") or person.get("url")
-                if not _is_recruiter_profile_url(url):
+                if not is_profile_url(url, RECRUITER_PROFILE_MARKERS):
                     continue
-                canon = _canonical_url(url)
+                canon = canonical_profile_url(url)
                 lead = by_url.get(canon)
                 if lead is None:
                     lead = {"profile_url": canon, "name": "", "headline": ""}
@@ -169,7 +155,7 @@ class RecruiterPushService:
         m = _PROJECT_URL_RE.search(url)
         payload = {
             "job_id": job_id,
-            "recruiter_project_url": _canonical_url(url),
+            "recruiter_project_url": canonical_profile_url(url),
             "recruiter_project_id": m.group(1) if m else None,
         }
         try:
@@ -239,9 +225,9 @@ class RecruiterPushService:
         messages = []
         for m in messaged:
             if isinstance(m, str):
-                messages.append({"profile_url": _canonical_url(m)})
+                messages.append({"profile_url": canonical_profile_url(m)})
             elif isinstance(m, dict) and (m.get("profile_url") or m.get("url")):
-                url = _canonical_url(m.get("profile_url") or m.get("url"))
+                url = canonical_profile_url(m.get("profile_url") or m.get("url"))
                 messages.append({**m, "profile_url": url})
         if not messages:
             return {"pushed": 0, "skipped": "no_valid_urls"}
@@ -282,12 +268,12 @@ class RecruiterPushService:
         replies = []
         for m in replied:
             if isinstance(m, str):
-                replies.append({"profile_url": _canonical_url(m)})
+                replies.append({"profile_url": canonical_profile_url(m)})
             elif isinstance(m, dict):
                 url = m.get("profile_url") or m.get("url")
                 entry = {**m}
                 if url:
-                    entry["profile_url"] = _canonical_url(url)
+                    entry["profile_url"] = canonical_profile_url(url)
                 # keep name-only entries — akcr falls back to name matching
                 if entry.get("profile_url") or entry.get("name"):
                     replies.append(entry)
@@ -395,7 +381,7 @@ class RecruiterPushService:
         payload = {
             "job_id": job_id,
             "source_run_id": str(run_id),
-            "profile_url": _canonical_url(profile_url),
+            "profile_url": canonical_profile_url(profile_url),
             "name": name or "",
         }
         try:

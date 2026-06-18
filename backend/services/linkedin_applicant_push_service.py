@@ -20,11 +20,11 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.models.connector import ConnectorConfig
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from services.profile_url_utils import canonical_profile_url, is_profile_url
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PROFILES_PER_RUN = 2
-PROFILE_URL_PREFIX = "linkedin.com/in/"
 CANONICAL_PROFILE_FIELDS = (
     "full_name",
     "headline",
@@ -38,17 +38,6 @@ CANONICAL_PROFILE_FIELDS = (
     "courses",
     "languages",
 )
-
-
-def _is_profile_url(url: str | None) -> bool:
-    if not url:
-        return False
-    return PROFILE_URL_PREFIX in url.split("?", 1)[0]
-
-
-def _canonical_profile_url(url: str) -> str:
-    base = url.split("?", 1)[0].rstrip("/")
-    return base
 
 
 def _summaries_from_push_results(results: list[dict]) -> list[dict]:
@@ -302,9 +291,9 @@ class LinkedInApplicantPushService:
         for ev in rows:
             payload = ev.payload or {}
             url = payload.get("url") or ev.page_url
-            if not _is_profile_url(url):
+            if not is_profile_url(url):
                 continue
-            canon = _canonical_profile_url(url)
+            canon = canonical_profile_url(url)
             data = payload.get("data") or []
             if not isinstance(data, list):
                 continue

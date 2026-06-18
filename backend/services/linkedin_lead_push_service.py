@@ -22,21 +22,11 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.models.connector import ConnectorConfig
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from services.profile_url_utils import canonical_profile_url, is_profile_url
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_LEADS_PER_RUN = 50
-PROFILE_URL_PREFIX = "linkedin.com/in/"
-
-
-def _is_profile_url(url: str | None) -> bool:
-    if not url:
-        return False
-    return PROFILE_URL_PREFIX in url.split("?", 1)[0]
-
-
-def _canonical_profile_url(url: str) -> str:
-    return url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
 
 
 def _summaries_from_push_result(inner: dict, leads: list[dict]) -> list[dict]:
@@ -204,9 +194,9 @@ class LinkedInLeadPushService:
                     if not isinstance(person, dict):
                         continue
                     url = person.get("profile_url") or person.get("url")
-                    if not _is_profile_url(url):
+                    if not is_profile_url(url):
                         continue
-                    canon = _canonical_profile_url(url)
+                    canon = canonical_profile_url(url)
                     lead = by_url.get(canon)
                     if lead is None:
                         lead = {"profile_url": canon, "name": "", "headline": ""}
