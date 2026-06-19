@@ -147,9 +147,12 @@ class RecruiterPipelineService:
         await self.session.flush()
         return run
 
-    async def _has_active_pipeline_run(self, job_id) -> bool:
-        """Avoid duplicate concurrent pipelines for the same position. Scans recent
-        non-terminal runs (origin is JSON → filter in Python; rare event)."""
+    async def _has_active_pipeline_run(self, job_id, event_kinds=None) -> bool:
+        """Avoid duplicate concurrent runs for the same position. Scans recent
+        non-terminal runs (origin is JSON → filter in Python; rare event). By default
+        matches any pipeline stage; pass `event_kinds` to scope to specific stages
+        (e.g. {EVENT_RECOMMENDATIONS} to dedup just recommendation runs)."""
+        kinds = event_kinds or PIPELINE_EVENT_KINDS
         result = await self.session.execute(
             select(ExecutionRun)
             .where(ExecutionRun.status.in_(_NON_TERMINAL))
@@ -158,7 +161,7 @@ class RecruiterPipelineService:
         )
         for r in result.scalars().all():
             o = r.origin or {}
-            if o.get("event_kind") in PIPELINE_EVENT_KINDS:
+            if o.get("event_kind") in kinds:
                 if str((o.get("pipeline") or {}).get("job_id")) == str(job_id):
                     return True
         return False
@@ -1146,6 +1149,15 @@ class RecruiterPipelineService:
         wf = settings.recruiter_recommendations_workflow_id
         if not wf:
             logger.warning("recruiter pipeline: recruiter_recommendations_workflow_id unset — skip")
+            return None
+        # Dedup: never stack recommendation runs for the same job. akcr can POST this
+        # repeatedly (toggle on-enable + cron + manual button) — only ONE active run at a
+        # time, so the seat doesn't churn and the Odoo chatter stays clean.
+        if await self._has_active_pipeline_run(job_id, event_kinds={EVENT_RECOMMENDATIONS}):
+            logger.info(
+                "recruiter pipeline: a recommendations run is already active for job %s — skip (dedup)",
+                job_id,
+            )
             return None
         ctx = await self._gather_job_context(job_id)
         project_url = ctx.get("project_url")
