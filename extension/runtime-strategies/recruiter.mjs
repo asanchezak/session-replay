@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-save-stage-v2";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-save-stage-v3-toast";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -1809,15 +1809,24 @@ async function composeRecruiterNote(page, options, orand, runtime) {
                bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
     }
 
-    // save=true: click "Añadir" to save the note, verify the modal closed, THEN move the
-    // selected candidates to the native "contacted" pipeline stage.
+    // save=true: click "Añadir" to save the note, then VERIFY with a POSITIVE signal — the
+    // success toast ("Se ha añadido la nota a N candidatos" / "Note added…") — corroborated
+    // by the modal closing. Relying on modal-close alone is the "clicked != persisted" trap
+    // (cf. save-to-project / archive); the toast is LinkedIn's affirmative confirmation.
     const savedClick = await clickSel("button[data-test-create-edit-note-submit-btn]");
     await sleep(1900 + Math.floor(orand() * 600));
-    const modalGone = await page.evaluate(() =>
-      !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]")
-    ).catch(() => false);
-    const noteSaved = savedClick && modalGone;
-    await shot(`nota: guardada=${noteSaved}`).catch(() => {});
+    const verifySave = await page.evaluate(() => {
+      const modalGone = !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]");
+      const toastEl = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+      const t = toastEl ? (toastEl.innerText || toastEl.textContent || "") : "";
+      const toast = /(nota|note)/i.test(t) && /(a[ñn]adid|agregad|added|guardad|saved)/i.test(t);
+      return { modalGone, toast, toast_text: t.replace(/\s+/g, " ").trim().slice(0, 120) };
+    }).catch(() => ({ modalGone: false, toast: false, toast_text: "" }));
+    // Positive confirmation = the toast; the modal closing is the corroborating signal. A
+    // real failure shows neither (modal lingers with an inline error, no success toast).
+    const noteSaved = savedClick && (verifySave.toast || verifySave.modalGone);
+    diag.note_save = { ...verifySave, clicked: savedClick };
+    await shot(`nota: guardada=${noteSaved} (toast=${verifySave.toast})`).catch(() => {});
 
     // Move to stage "contacted" (data-test-move-to-state=CONTACTED — locale/label-proof;
     // SHORTLISTED=uncontacted [current, disabled], REPLIED=replied). The note-save may have
