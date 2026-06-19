@@ -4,7 +4,7 @@ import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import DataTable from "../components/DataTable";
 import EmptyState from "../components/EmptyState";
-import { useRuns, pipelineLabel, pipelineJobId, pipelineProjectName, type RunSummary } from "../hooks/useRuns";
+import { useRuns, pipelineLabel, pipelineJobId, type RunSummary } from "../hooks/useRuns";
 import { useWorkflows } from "../hooks/useWorkflows";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
@@ -121,11 +121,20 @@ export default function RunsPage() {
                 #{r.id.slice(0, 8)}
               </span>
             )},
-            { key: "workflow", label: "Workflow", render: (r: RunSummary) => (
-              <span className="text-text-secondary text-xs whitespace-nowrap" title={r.workflow_id}>
-                {workflowName.get(r.workflow_id) || `#${r.workflow_id.slice(0, 8)}`}
-              </span>
-            )},
+            { key: "workflow", label: "Workflow", render: (r: RunSummary) => {
+              const full = workflowName.get(r.workflow_id) || `#${r.workflow_id.slice(0, 8)}`;
+              // Concise: drop the "Recruiter:" prefix every recruiter workflow carries, and
+              // truncate the (often long) descriptive name — full name on hover.
+              const concise = full.replace(/^recruiter:\s*/i, "");
+              return (
+                <span
+                  className="text-text-secondary text-xs truncate inline-block max-w-[220px] align-middle"
+                  title={full}
+                >
+                  {concise}
+                </span>
+              );
+            }},
             { key: "pipeline", label: "Position", render: (r: RunSummary) => {
               const label = pipelineLabel(r.origin);
               const jobId = pipelineJobId(r.origin);
@@ -141,17 +150,8 @@ export default function RunsPage() {
                 </span>
               );
             }},
-            { key: "project", label: "Project", render: (r: RunSummary) => {
-              const name = pipelineProjectName(r.origin);
-              return name
-                ? <span className="text-text-secondary text-xs whitespace-nowrap">{name}</span>
-                : <span className="text-text-tertiary text-xs">—</span>;
-            }},
             { key: "status", label: "Status", render: (r: RunSummary) => (
               <StatusBadge status={r.status as any} size="sm" />
-            )},
-            { key: "step", label: "Step", render: (r: RunSummary) => (
-              <span className="text-text-secondary">{r.current_step_index + 1}/{r.total_steps}</span>
             )},
             { key: "error", label: "Error", render: (r: RunSummary) => (
               <span className="text-error text-xs">{r.error_summary || "—"}</span>

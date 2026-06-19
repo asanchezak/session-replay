@@ -722,7 +722,10 @@ export default function RunDetailPage() {
   const isRecovering = run.status === "recovering";
   const isCancelable = CANCELABLE_STATUSES.includes(run.status);
   const isTerminal = ["completed", "failed", "canceled"].includes(run.status);
-  const progressPct = run.total_steps > 0 ? Math.round((run.current_step_index / run.total_steps) * 100) : 0;
+  const progressPct = run.total_steps > 0 ? Math.min(100, Math.round((run.current_step_index / run.total_steps) * 100)) : 0;
+  // current_step_index reaches total_steps when a run finishes (0-based index → count), so a
+  // naive `current_step_index + 1` overshoots (e.g. "5/4"). Clamp the displayed step to total.
+  const displayedStep = run.total_steps > 0 ? Math.min(run.current_step_index + 1, run.total_steps) : 0;
   const pushedApplicants = run.linkedin_applicants || [];
   const displayedApplicants = pushedApplicants;
 
@@ -759,7 +762,7 @@ export default function RunDetailPage() {
           )}
           <div className="flex items-center gap-4 text-xs text-text-secondary">
             {workflow && <span className="font-mono text-text-gray">#{run.id.slice(0, 8)}</span>}
-            <span>Step {run.current_step_index + 1} of {run.total_steps}</span>
+            <span>Step {displayedStep} of {run.total_steps}</span>
             {run.origin?.triggered_by && <span>By {run.origin.triggered_by}</span>}
             {run.started_at && <span>Started {formatTime(run.started_at)}</span>}
             {run.ended_at && <span>Ended {formatTime(run.ended_at)}</span>}
