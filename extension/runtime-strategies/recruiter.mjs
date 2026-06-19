@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-v4-link-cleanpreview";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-v6-paginate";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -1592,6 +1592,38 @@ async function composeRecruiterNote(page, options, orand, runtime) {
     return true;
   };
 
+  // Read the bulk bar's selected-count ("N SELECCIONADOS" / "N selected"). The note/stage
+  // applies to the SELECTED set, so this is the number that actually gets the note.
+  const readSelectedCount = () => page.evaluate(() => {
+    const t = document.body.innerText || "";
+    const m = t.match(/(\d+)\s*(?:SELECCIONAD\w*|seleccionad\w*|selected)/i);
+    return m ? parseInt(m[1], 10) : null;
+  }).catch(() => null);
+
+  const HEADER_CB = "[data-live-test-select-all] input, .profile-list__select-all input, input.small-input";
+  // Recruiter's project pipeline has NO "select all across pages" and NO page-size control —
+  // the header checkbox selects only the VISIBLE PAGE (~25). So to cover EVERY active candidate
+  // we PAGINATE (data-test-pagination-next), applying the note + stage move per page.
+  const selectPage = async () => {
+    if (!await clickSel(HEADER_CB)) return null;
+    await sleep(900 + Math.floor(orand() * 300));
+    return await readSelectedCount();
+  };
+  // Click the next-page control if present and enabled; returns true if it navigated.
+  const NEXT_PAGE = "[data-test-pagination-next], [data-live-test-pagination-next], [data-test-mini-pagination-next], [data-live-test-mini-pagination-next]";
+  const nextPage = async () => {
+    const enabled = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      if (!b) return false;
+      return !(b.disabled || b.getAttribute("aria-disabled") === "true" || b.matches("[disabled]") || getComputedStyle(b).pointerEvents === "none");
+    }, NEXT_PAGE).catch(() => false);
+    if (!enabled) return false;
+    if (!await clickSel(NEXT_PAGE)) return false;
+    await sleep(2400 + Math.floor(orand() * 700));
+    await page.waitForSelector(HEADER_CB, { timeout: 10000 }).catch(() => {});
+    return true;
+  };
+
   // Scan the whole DOM (piercing nothing fancy — Recruiter bulk bar is light DOM) for any
   // visible control that looks like an "add note" trigger: data-test-action / aria-label /
   // text containing note|nota. Returns candidates with a stable selector + a click point so
@@ -1667,7 +1699,109 @@ async function composeRecruiterNote(page, options, orand, runtime) {
     return null;
   }).catch(() => null);
 
-  const diag = { bulk_bar: null, note_candidates: [], note_field: null, overflow_tried: false, opened_via: null };
+  const NOTE_FIELD = "textarea[data-test-mentions-edit-textarea], textarea.mentions-edit__text-box";
+  // Locate a clickable bulk "Añadir nota" (data-test-action='add-note'). Two exist in the DOM:
+  // the COLLAPSED original and, once the toolbar overflow is open, a VISIBLE clone — return the
+  // visible one's point (querySelector returns the hidden original first).
+  const addNoteState = () => page.evaluate(() => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+    const all = Array.from(document.querySelectorAll("[data-test-action='add-note'], [data-live-test-action='add-note']"));
+    const visEl = all.find(vis);
+    if (!all.length) return { present: false, visible: false, point: null };
+    if (!visEl) return { present: true, visible: false, point: null };
+    const r = visEl.getBoundingClientRect();
+    return { present: true, visible: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+  }).catch(() => ({ present: false, visible: false, point: null }));
+
+  // Open the bulk note composer: expand the collapsible-toolbar overflow ("Más elementos") if
+  // add-note is collapsed, then click the visible clone. Returns {present, opened, fieldFound}.
+  const openAddNote = async () => {
+    let st = await addNoteState();
+    if (st.present && !st.visible) {
+      const expandPt = await page.evaluate(() => {
+        const bar = document.querySelector("[data-test-profile-list-bulk-actions], .profile-list-bulk-actions");
+        const cand = bar && bar.querySelector("button.collapsible-toolbar__dropdown-trigger");
+        if (!cand) return null;
+        cand.scrollIntoView({ block: "center" });
+        const r = cand.getBoundingClientRect();
+        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      }).catch(() => null);
+      if (expandPt) { await clickPoint(expandPt); await sleep(1300 + Math.floor(orand() * 500)); }
+      st = await addNoteState();
+    }
+    if (!st.present) return { present: false, opened: false, fieldFound: false };
+    if (!st.point) return { present: true, opened: false, fieldFound: false };
+    await clickPoint(st.point);
+    await sleep(1500 + Math.floor(orand() * 500));
+    const fieldFound = await page.evaluate((sel) => !!document.querySelector(sel), NOTE_FIELD).catch(() => false);
+    return { present: true, opened: true, fieldFound };
+  };
+
+  // Type the note + set visibility = whole company (HIRING_CONTEXT). Does NOT save.
+  const fillNote = async () => {
+    await clickSel(NOTE_FIELD);
+    await sleep(300);
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await sleep(200);
+    if (typeHumanLike) await typeHumanLike(page, noteText, orand);
+    else await page.keyboard.type(noteText, { delay: 24 });
+    await sleep(600 + Math.floor(orand() * 300));
+    return await page.evaluate(() => {
+      const input = document.querySelector("input[visibility-value='HIRING_CONTEXT'], [id$='-note-visbility-option-HIRING_CONTEXT']");
+      if (!input) return false;
+      const label = input.id ? document.querySelector(`label[for='${input.id}']`) : null;
+      (label || input).click();
+      return true;
+    }).catch(() => false);
+  };
+
+  // Click "Añadir" + verify via the success toast ("Se ha añadido una nota a N candidatos").
+  // Returns {ok, count, toast_text}.
+  const saveNote = async () => {
+    const clicked = await clickSel("button[data-test-create-edit-note-submit-btn]");
+    await sleep(1900 + Math.floor(orand() * 600));
+    const v = await page.evaluate(() => {
+      const modalGone = !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]");
+      const toastEl = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+      const t = toastEl ? (toastEl.innerText || toastEl.textContent || "") : "";
+      const isNote = /(nota|note)/i.test(t) && /(a[ñn]adid|agregad|added|guardad|saved)/i.test(t);
+      const m = t.match(/(\d+)\s*(?:candidat|perfil|profile|people)/i);
+      return { modalGone, toast: isNote, count: m ? parseInt(m[1], 10) : null, toast_text: t.replace(/\s+/g, " ").trim().slice(0, 120) };
+    }).catch(() => ({ modalGone: false, toast: false, count: null, toast_text: "" }));
+    return { ok: clicked && (v.toast || v.modalGone), ...v };
+  };
+
+  // Move the CURRENT page's selection to the native "contacted" stage; verify via the toast
+  // ("Se ha movido a N candidatos a la fase contacted"). Returns {moved, count}.
+  const moveContacted = async () => {
+    const sel = await readSelectedCount();
+    if (!sel) { await clickSel(HEADER_CB); await sleep(800); }
+    const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
+    if (!await clickSel(stageTrigger)) return { moved: false };
+    await sleep(1100 + Math.floor(orand() * 400));
+    const pt = await page.evaluate(() => {
+      const el = document.querySelector("[data-test-move-to-state='CONTACTED']");
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: el.getAttribute("aria-disabled") === "true" } : null;
+    }).catch(() => null);
+    if (!pt) return { moved: false, reason: "contacted_not_found" };
+    if (pt.disabled) return { moved: false, reason: "already_contacted" };
+    await clickPoint(pt);
+    await sleep(1800 + Math.floor(orand() * 600));
+    const v = await page.evaluate(() => {
+      const toast = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+      const t = toast ? (toast.innerText || toast.textContent || "") : "";
+      const moved = /contacted/i.test(t) && /(movido|moved|cambiad|changed|fase|stage)/i.test(t);
+      const m = t.match(/(\d+)\s*(?:candidat|perfil|profile|people)/i);
+      return { moved, count: m ? parseInt(m[1], 10) : null };
+    }).catch(() => ({ moved: false, count: null }));
+    return v;
+  };
+
+  const diag = { bulk_bar: null, note_candidates: [], note_field: null, overflow_tried: false, opened_via: null, pages: [] };
 
   try {
     await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -1692,161 +1826,71 @@ async function composeRecruiterNote(page, options, orand, runtime) {
       return out;
     }).catch(() => []);
 
-    // Select all → the bulk-action bar appears.
-    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
+    // Recruiter's project list selects only the VISIBLE PAGE (~25) — there is NO across-pages
+    // select and NO page-size control (confirmed via snapshot). So to cover EVERY active
+    // candidate we PAGINATE: per page → select → add note → move to "contacted" → next page.
+    const MAX_PAGES = 6;
+
+    // Page 1: select + open the note composer (shared by the preview and the save path).
+    const page1Sel = await selectPage();
+    if (page1Sel == null) {
       return { ok: false, saved: false, recipient_count: recipientCount, reason: "select_all_not_found" };
     }
-    await sleep(1200 + Math.floor(orand() * 500));
     diag.bulk_bar = await dumpBulkBar();
-    await shot(`nota: barra bulk visible (${recipientCount} candidato(s))`).catch(() => {});
-
-    // The bulk "Añadir nota" action is data-test-action='add-note'. There are TWO in the DOM:
-    // the COLLAPSED original (collapsible-toolbar__item--hidden) and, once the toolbar overflow
-    // ("Más elementos") is open, a VISIBLE clone (data-test-collapsible-toolbar-dropdown-item).
-    // querySelector returns the hidden original first, so locate the VISIBLE one by coordinates
-    // and click THAT (a blind selector click hit the hidden original → fell back onto "Cambiar
-    // fase"). Returns {present, visible, point} of a clickable add-note.
-    const addNoteState = () => page.evaluate(() => {
-      const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
-      const all = Array.from(document.querySelectorAll("[data-test-action='add-note'], [data-live-test-action='add-note']"));
-      const visEl = all.find(vis);
-      if (!all.length) return { present: false, visible: false, point: null };
-      if (!visEl) return { present: true, visible: false, point: null };
-      const r = visEl.getBoundingClientRect();
-      return { present: true, visible: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
-    }).catch(() => ({ present: false, visible: false, point: null }));
-    diag.note_candidates = await scanNote();
-    let st = await addNoteState();
-    diag.add_note_state = { before_expand: { present: st.present, visible: st.visible } };
-    if (st.present && !st.visible) {
-      // Expand the collapsible toolbar's OWN overflow ("Más elementos", class
-      // collapsible-toolbar__dropdown-trigger) — NOT a generic aria-expanded button (that
-      // matched the "Cambiar fase" stage dropdown last time).
-      diag.overflow_tried = true;
-      const expandPt = await page.evaluate(() => {
-        const bar = document.querySelector("[data-test-profile-list-bulk-actions], .profile-list-bulk-actions");
-        const cand = bar && bar.querySelector("button.collapsible-toolbar__dropdown-trigger");
-        if (!cand) return null;
-        cand.scrollIntoView({ block: "center" });
-        const r = cand.getBoundingClientRect();
-        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
-      }).catch(() => null);
-      if (expandPt) { await clickPoint(expandPt); await sleep(1300 + Math.floor(orand() * 500)); }
-      st = await addNoteState();
-      diag.add_note_state.after_expand = { present: st.present, visible: st.visible };
-      diag.note_candidates = await scanNote();
-      await shot("nota: overflow 'Más elementos' abierto").catch(() => {});
-    }
-
-    if (!st.present) {
-      // No bulk note action found — return diagnostics so we decide (bulk vs per-row) offline.
+    await shot(`nota: barra bulk visible (página: ${page1Sel} de ${recipientCount})`).catch(() => {});
+    const open1 = await openAddNote();
+    diag.add_note_state = open1;
+    if (!open1.present) {
       return { ok: true, saved: false, gated: true, note_field_found: false, bulk_supported: false,
                recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
     }
-
-    // Open the bulk note composer by clicking the VISIBLE add-note (the dropdown clone).
-    diag.opened_via = st.point ? `point(${Math.round(st.point.x)},${Math.round(st.point.y)})` : "add-note present but not visible";
-    const opened = st.point ? await clickPoint(st.point) : false;
-    if (!opened) return { ok: true, saved: false, gated: true, note_field_found: false, bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
-    await sleep(1600 + Math.floor(orand() * 600));
-
-    // Fill the note field (exact, locale-proof: textarea[data-test-mentions-edit-textarea]).
-    const NOTE_FIELD = "textarea[data-test-mentions-edit-textarea], textarea.mentions-edit__text-box";
-    diag.note_field = await findNoteField();
-    await shot("nota: composer abierto").catch(() => {});
-    let noteFieldFound = await page.evaluate((sel) => !!document.querySelector(sel), NOTE_FIELD).catch(() => false);
-    if (noteFieldFound) {
-      await clickSel(NOTE_FIELD);
-      await sleep(300);
-      await page.keyboard.press("Control+A").catch(() => {});
-      await page.keyboard.press("Backspace").catch(() => {});
-      await sleep(200);
-      if (typeHumanLike) await typeHumanLike(page, noteText, orand);
-      else await page.keyboard.type(noteText, { delay: 24 });
-      await sleep(700 + Math.floor(orand() * 300));
+    if (!open1.opened) {
+      return { ok: true, saved: false, gated: true, note_field_found: false, bulk_supported: true,
+               recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
     }
-
-    // Visibility = "Cualquier persona dentro de la empresa" → radio visibility-value=HIRING_CONTEXT
-    // (locale-proof; OWNER=just me, PROJECT=project members [default]). Click its label (the
-    // input itself is visually hidden in artdeco radios).
-    const visSet = await page.evaluate(() => {
-      const input = document.querySelector("input[visibility-value='HIRING_CONTEXT'], #ember-note-visbility-option-HIRING_CONTEXT, [id$='-note-visbility-option-HIRING_CONTEXT']");
-      if (!input) return false;
-      const label = input.id ? document.querySelector(`label[for='${input.id}']`) : null;
-      (label || input).click();
-      return true;
-    }).catch(() => false);
+    const visSet = await fillNote();
     diag.visibility_set = visSet;
     await shot(`nota: texto+visibilidad (empresa=${visSet}) — sin guardar`).catch(() => {});
 
-    // GATED: save=false leaves the composer open with the note typed (NOT saved) so the
-    // per-step snapshot shows exactly what would be saved — and never mutates anything.
+    // GATED preview: leave the composer open with the note typed; never save/mutate.
     if (!save) {
       await sleep(1500);
-      return { ok: true, saved: false, gated: true, note_field_found: noteFieldFound,
-               bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
+      return { ok: true, saved: false, gated: true, note_field_found: open1.fieldFound,
+               bulk_supported: true, recipient_count: recipientCount, selected_count: page1Sel, recipients, diag, manage_url: manageUrl };
     }
 
-    // save=true: click "Añadir" to save the note, then VERIFY with a POSITIVE signal — the
-    // success toast ("Se ha añadido la nota a N candidatos" / "Note added…") — corroborated
-    // by the modal closing. Relying on modal-close alone is the "clicked != persisted" trap
-    // (cf. save-to-project / archive); the toast is LinkedIn's affirmative confirmation.
-    const savedClick = await clickSel("button[data-test-create-edit-note-submit-btn]");
-    await sleep(1900 + Math.floor(orand() * 600));
-    const verifySave = await page.evaluate(() => {
-      const modalGone = !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]");
-      const toastEl = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
-      const t = toastEl ? (toastEl.innerText || toastEl.textContent || "") : "";
-      const toast = /(nota|note)/i.test(t) && /(a[ñn]adid|agregad|added|guardad|saved)/i.test(t);
-      return { modalGone, toast, toast_text: t.replace(/\s+/g, " ").trim().slice(0, 120) };
-    }).catch(() => ({ modalGone: false, toast: false, toast_text: "" }));
-    // Positive confirmation = the toast; the modal closing is the corroborating signal. A
-    // real failure shows neither (modal lingers with an inline error, no success toast).
-    const noteSaved = savedClick && (verifySave.toast || verifySave.modalGone);
-    diag.note_save = { ...verifySave, clicked: savedClick };
-    await shot(`nota: guardada=${noteSaved} (toast=${verifySave.toast})`).catch(() => {});
+    // save=true: save page 1's note + move it to "contacted", then loop the remaining pages.
+    let notedTotal = 0, movedTotal = 0, pagesDone = 0, anyNoteSaved = false;
+    const saveStageAndRecord = async (pageSel) => {
+      const s = await saveNote();
+      await shot(`nota: guardada=${s.ok} (${s.count ?? "?"})`).catch(() => {});
+      if (s.ok) { notedTotal += (s.count || pageSel || 0); anyNoteSaved = true; }
+      const mv = await moveContacted();
+      await shot(`fase: contacted=${mv.moved} (${mv.count ?? mv.reason ?? "?"})`).catch(() => {});
+      if (mv.moved) movedTotal += (mv.count || pageSel || 0);
+      pagesDone++;
+      diag.pages.push({ page: pagesDone, selected: pageSel, noted: s.ok ? (s.count || pageSel) : 0,
+                        moved: mv.moved ? (mv.count || pageSel) : 0, note_toast: s.toast_text, stage_reason: mv.reason });
+    };
 
-    // Move to stage "contacted" (data-test-move-to-state=CONTACTED — locale/label-proof;
-    // SHORTLISTED=uncontacted [current, disabled], REPLIED=replied). The note-save may have
-    // left the bulk selection intact; re-assert select-all to be safe.
-    let stageMoved = false;
-    try {
-      const stillSelected = await page.evaluate(() => {
-        const cb = document.querySelector("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input");
-        return !!(cb && cb.checked);
-      }).catch(() => false);
-      if (!stillSelected) { await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input"); await sleep(900); }
-      const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
-      if (await clickSel(stageTrigger)) {
-        await sleep(1100 + Math.floor(orand() * 400));
-        const contactedPt = await page.evaluate(() => {
-          const el = document.querySelector("[data-test-move-to-state='CONTACTED']");
-          if (!el) return null;
-          el.scrollIntoView({ block: "center" });
-          const r = el.getBoundingClientRect();
-          return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: el.getAttribute("aria-disabled") === "true" } : null;
-        }).catch(() => null);
-        if (contactedPt && !contactedPt.disabled) {
-          await clickPoint(contactedPt);
-          await sleep(1800 + Math.floor(orand() * 600));
-          // Verify via the success TOAST ("Se ha movido a N candidatos a la fase contacted" /
-          // "Moved N candidates to the contacted stage"). Clicking CONTACTED closes the
-          // dropdown, so the dropdown item is gone — the toast is the live confirmation.
-          stageMoved = await page.evaluate(() => {
-            const toast = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
-            const t = toast ? (toast.innerText || toast.textContent || "") : "";
-            return /contacted/i.test(t) && /(movido|moved|cambiad|changed|fase|stage)/i.test(t);
-          }).catch(() => false);
-        }
-      }
-      await shot(`fase: movido a contacted=${stageMoved}`).catch(() => {});
-    } catch { /* stage move best-effort; note save is the primary gate */ }
+    await saveStageAndRecord(page1Sel);
+    while (pagesDone < MAX_PAGES) {
+      if (!await nextPage()) break;
+      const ps = await selectPage();
+      if (!ps) break;
+      const op = await openAddNote();
+      if (!op.opened) break;
+      await fillNote();
+      await saveStageAndRecord(ps);
+    }
 
-    diag.stage_moved = stageMoved;
-    // ok gates on the note save (the user's primary ask); stage move is reported alongside.
-    return { ok: noteSaved, saved: noteSaved, stage_moved: stageMoved, note_field_found: noteFieldFound,
-             bulk_supported: true, recipient_count: recipientCount, recipients, diag,
-             ...(noteSaved ? {} : { reason: "note_save_unverified" }), manage_url: manageUrl };
+    diag.stage_moved = movedTotal > 0;
+    // ok gates on the note save (the user's primary ask); stage move + counts reported alongside.
+    return { ok: anyNoteSaved, saved: anyNoteSaved, stage_moved: movedTotal > 0,
+             noted_count: notedTotal, moved_count: movedTotal, pages: pagesDone,
+             note_field_found: open1.fieldFound, bulk_supported: true,
+             recipient_count: recipientCount, selected_count: notedTotal, recipients, diag,
+             ...(anyNoteSaved ? {} : { reason: "note_save_unverified" }), manage_url: manageUrl };
   } catch (e) {
     return { ok: false, saved: false, reason: `error:${(e && e.message) || e}`, diag };
   }

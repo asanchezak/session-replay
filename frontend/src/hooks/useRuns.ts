@@ -29,6 +29,7 @@ const PIPELINE_STAGE: Record<string, string> = {
   recruiter_search: "search",
   recruiter_save: "save",
   recruiter_message: "message",
+  recruiter_note: "contact note",
   recruiter_recommendations: "recommendations",
   recruiter_archive: "archive",
   new_job_position: "applicant scrape",

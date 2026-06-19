@@ -1010,7 +1010,10 @@ class RecruiterPipelineService:
         note = await self.push.read_note_compose_result(run.id)
         saved = bool(note.get("saved"))
         moved = bool(note.get("stage_moved"))
-        n = note.get("recipient_count") or 0
+        # noted_count = candidates actually noted across ALL pages (the strategy paginates so
+        # every active candidate is covered, not just the first ~25). Fall back to recipient_count.
+        noted = note.get("noted_count") or note.get("recipient_count") or 0
+        movedN = note.get("moved_count") or 0
         if not pipeline.get("save") or not saved:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
@@ -1021,10 +1024,10 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_NOTE, run_id=run.id,
-            message=(f"📝 Nota de contacto agregada a {n} candidato(s)"
-                     + (" + movidos a 'contacted'." if moved else ".")),
+            message=(f"📝 Nota de contacto agregada a {noted} candidato(s)"
+                     + (f" + {movedN} movidos a 'contacted'." if moved else ".")),
         )
-        return {"stage": "note", "saved": True, "stage_moved": moved}
+        return {"stage": "note", "saved": True, "noted_count": noted, "moved_count": movedN, "stage_moved": moved}
 
     async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
         """An archive (remove-from-project) run completed. Only when the strategy
