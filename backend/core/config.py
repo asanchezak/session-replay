@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     recruiter_search_workflow_id: str = ""
     recruiter_save_workflow_id: str = ""
     recruiter_message_workflow_id: str = ""
+    # Add a "Contactado para <posición>" NOTE to a project's candidates (bulk) AND move
+    # them to the native "contacted" pipeline stage — the LinkedIn-side markers of "already
+    # contacted". GATED by `save` (false=preview/STOP, true=save the note + move stage).
+    # Triggered standalone (POST /v1/recruiter/jobs/{id}/add-note + Odoo button) and chained
+    # after a real message send (_after_message). Defaulted to the deployed id so it works
+    # after a plain backend redeploy (no box env change). Workflow params: project_url,
+    # note_text, save. Env: RECRUITER_NOTE_WORKFLOW_ID.
+    recruiter_note_workflow_id: str = "37a8f06d-4bfc-4fbd-9c45-923ab11a598c"
     recruiter_advanced_search_workflow_id: str = ""
     # Bulk results-page save: ONE daemon run selects N candidates on the search
     # results page and bulk-saves them to the project (zero profile visits → much

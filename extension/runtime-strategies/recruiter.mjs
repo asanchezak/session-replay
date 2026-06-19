@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-18-stage-verdict-19-url";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-save-stage-v2";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -147,6 +147,19 @@ function readMessageComposeOptions(step) {
   };
 }
 
+function readNoteComposeOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_note_compose",
+  ) || {};
+  const save = method.save;
+  return {
+    projectUrl: String(method.project_url ?? "").trim(),
+    noteText: String(method.note_text ?? "").trim(),
+    save: save === true || save === "true" || save === 1 || save === "1",
+  };
+}
+
 function readArchiveProjectOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
   const method = methods.find(
@@ -167,6 +180,7 @@ export function handlesStrategy(strategy) {
     || strategy === "recruiter_read_project"
     || strategy === "recruiter_add_profile"
     || strategy === "recruiter_message_compose"
+    || strategy === "recruiter_note_compose"
     || strategy === "recruiter_archive_project"
     || strategy === "recruiter_hot_reload_probe";
 }
@@ -284,6 +298,15 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     };
   }
 
+  if (strategy === "recruiter_note_compose") {
+    const r = await composeRecruiterNote(page, readNoteComposeOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { note_compose_result: r },
+      log: `recruiter_note_compose ok=${r.ok} saved=${r.saved} note_field=${r.note_field_found} recipients=${r.recipient_count} reason="${r.reason || ""}"`,
+    };
+  }
+
   if (strategy === "recruiter_archive_project") {
     const r = await archiveRecruiterProject(page, readArchiveProjectOptions(step), orand, runtime);
     return {
@@ -354,6 +377,13 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     }
     case "recruiter_archive_project":
       return ex.archive_project_result && ex.archive_project_result.ok ? ok() : fail("archive_project_failed");
+    case "recruiter_note_compose": {
+      // EXPLORATORY/gated. save=false (the probe) always returns ok:true (we only typed,
+      // never saved) → never fail the run so the per-step snapshots still upload. save=true
+      // gates on whether the note actually persisted.
+      const r = ex.note_compose_result || {};
+      return r.ok ? ok() : fail(r.reason || "note_failed");
+    }
     // read-only / probe / unknown strategies → never gate
     case "recruiter_read_project":
     case "recruiter_hot_reload_probe":
@@ -1508,6 +1538,330 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
              ...(sent ? {} : { blocked: true, reason: "rate_limited_24h" }) };
   } catch (e) {
     return { ok: false, sent: false, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// EXPLORATORY (Phase 1) — add a "Contactado para <posición>" NOTE to a project's
+// candidates, mirroring composeRecruiterMessage. Navigates …/manage/all, selects all,
+// then HUNTS for the bulk "add note" action (LinkedIn Recruiter notes are a "recruiting
+// tool"; the bulk-bar layout/selectors are not yet known on the live seat — so this
+// function captures the bulk-bar HTML + a DOM scan of note-ish controls into the result
+// for OFFLINE selector discovery), opens the note composer, types the note, and STOPS.
+// GATED: save=false (default, the probe) only types + screenshots — it NEVER clicks Save.
+// save=true (Phase 2+) will click Save and verify; for now save=true still types and
+// reports note_field_found so we can confirm the field before wiring the real save.
+// Params: project_url, note_text, save.
+async function composeRecruiterNote(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const typeHumanLike = runtimeValue(runtime, "typeHumanLike", null);
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const noteText = String(options.noteText || "");
+  const save = !!options.save;
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, saved: false, reason: "missing_project_id" };
+  if (!noteText) return { ok: false, saved: false, reason: "missing_note_text" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+
+  // Same trusted-click helper as composeRecruiterMessage: resolve+click, else bezier-mouse.
+  const clickSel = async (sel) => {
+    if (resolveLocatorWithWait && clickResolved) {
+      const t = await resolveLocatorWithWait(page, [{ type: "css", value: sel }], { timeoutMs: 8000 });
+      if (t) { try { if (await clickResolved(page, t, { moveMouseAlongBezier, orand })) return true; } finally { await t.handle?.dispose?.().catch(() => {}); } }
+    }
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s); if (!el) return null;
+      el.scrollIntoView({ block: "center" }); const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  // Click at viewport coordinates (for elements found by the note-scan, which returns a point).
+  const clickPoint = async (pt) => {
+    if (!pt || pt.x == null) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+
+  // Scan the whole DOM (piercing nothing fancy — Recruiter bulk bar is light DOM) for any
+  // visible control that looks like an "add note" trigger: data-test-action / aria-label /
+  // text containing note|nota. Returns candidates with a stable selector + a click point so
+  // we can both ACT now and record the selector for the spec offline.
+  const scanNote = () => page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+    const NOTE = /\bnotes?\b|\bnotas?\b|agregar nota|add (a )?note/i;
+    const sigOf = (e) => [e.getAttribute("data-test-action"), e.getAttribute("data-test-component"), e.getAttribute("data-view-name"), e.getAttribute("aria-label"), clean(e.innerText || e.textContent)].filter(Boolean).join(" | ");
+    const selOf = (e) => {
+      const da = e.getAttribute("data-test-action"); if (da) return `[data-test-action='${da}']`;
+      const dc = e.getAttribute("data-test-component"); if (dc) return `[data-test-component='${dc}']`;
+      const dv = e.getAttribute("data-view-name"); if (dv) return `[data-view-name='${dv}']`;
+      const al = e.getAttribute("aria-label"); if (al) return `${e.tagName.toLowerCase()}[aria-label="${al.replace(/"/g, '\\"')}"]`;
+      return null;
+    };
+    const out = [];
+    // Do NOT pre-filter by visibility — a bulk note action may sit in the COLLAPSED part
+    // of the toolbar (display:none until the overflow is expanded). Report its selector +
+    // a `visible` flag so we can decide to expand-then-click.
+    const els = Array.from(document.querySelectorAll("button, [role='button'], [role='menuitem'], a"));
+    for (const e of els) {
+      const hay = sigOf(e);
+      if (!NOTE.test(hay)) continue;
+      const r = e.getBoundingClientRect();
+      out.push({ sig: hay.slice(0, 140), selector: selOf(e), visible: vis(e), x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    }
+    return out.slice(0, 12);
+  }).catch(() => []);
+
+  // Dump the bulk-action bar + an ENUMERATION of every collapsible-toolbar item (incl.
+  // the visually-collapsed/--hidden ones, which are in the DOM regardless) for OFFLINE
+  // selector discovery — this is how we settle "is there a bulk note action?".
+  const dumpBulkBar = () => page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const bar = document.querySelector("[data-test-profile-list-bulk-actions], [data-live-test-profile-list-bulk-actions], .profile-list-bulk-actions, .bulk-actions");
+    const grab = (sel) => { const el = document.querySelector(sel); return el ? clean(el.outerHTML).slice(0, 16000) : null; };
+    let items = [];
+    if (bar) {
+      const lis = Array.from(bar.querySelectorAll("li, button, [role='menuitem'], [data-test-component]"));
+      const seen = new Set();
+      for (const e of lis) {
+        const btn = e.matches("button") ? e : e.querySelector("button, [role='button']");
+        const action = (btn || e).getAttribute?.("data-test-action") || (btn || e).getAttribute?.("data-live-test-action");
+        const comp = e.getAttribute?.("data-test-component") || (btn || e).getAttribute?.("data-test-component");
+        const key = action || comp || clean(e.textContent).slice(0, 30);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const hidden = e.classList?.contains("collapsible-toolbar__item--hidden") || e.closest(".collapsible-toolbar__item--hidden") != null;
+        items.push({ action: action || null, component: comp || null, text: clean(e.textContent).slice(0, 50), hidden });
+      }
+    }
+    return {
+      bulk_actions: bar ? clean(bar.outerHTML).slice(0, 16000) : null,
+      toolbar_items: items.slice(0, 30),
+      open_menu: grab("[role='menu'], .artdeco-dropdown__content--is-open"),
+    };
+  }).catch(() => ({ bulk_actions: null, toolbar_items: [], open_menu: null }));
+
+  // Find a note text field after opening the composer (textarea / contenteditable / textbox).
+  const findNoteField = () => page.evaluate(() => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+    const cands = [
+      "textarea[data-test-notes-input]", "textarea[name*='note' i]", "textarea[aria-label*='note' i]", "textarea[aria-label*='nota' i]",
+      "[data-test-note-input] .ql-editor[contenteditable='true']", ".notes-editor .ql-editor[contenteditable='true']",
+      "div[role='textbox'][aria-label*='note' i]", "div[role='textbox'][aria-label*='nota' i]",
+      "textarea", "div[role='textbox']", ".ql-editor[contenteditable='true']",
+    ];
+    for (const sel of cands) {
+      const el = document.querySelector(sel);
+      if (el && vis(el)) return { selector: sel, tag: el.tagName.toLowerCase(), contenteditable: el.getAttribute("contenteditable") === "true" };
+    }
+    return null;
+  }).catch(() => null);
+
+  const diag = { bulk_bar: null, note_candidates: [], note_field: null, overflow_tried: false, opened_via: null };
+
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 600));
+    const recipientCount = await readPipelineCounts(page).then((c) => c.active);
+    if (recipientCount === 0) return { ok: false, saved: false, recipient_count: 0, reason: "no_active_candidates" };
+
+    // Capture the active candidates we'd note (so the backend can mark them later).
+    const recipients = await page.evaluate(() => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+      const out = []; const seen = new Set();
+      for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
+        const link = row.querySelector('a[href*="/talent/profile/"]');
+        const url = canon(link && link.getAttribute("href"));
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        out.push({ profile_url: url, name: clean(link.innerText || link.textContent) });
+      }
+      return out;
+    }).catch(() => []);
+
+    // Select all → the bulk-action bar appears.
+    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
+      return { ok: false, saved: false, recipient_count: recipientCount, reason: "select_all_not_found" };
+    }
+    await sleep(1200 + Math.floor(orand() * 500));
+    diag.bulk_bar = await dumpBulkBar();
+    await shot(`nota: barra bulk visible (${recipientCount} candidato(s))`).catch(() => {});
+
+    // The bulk "Añadir nota" action is data-test-action='add-note'. There are TWO in the DOM:
+    // the COLLAPSED original (collapsible-toolbar__item--hidden) and, once the toolbar overflow
+    // ("Más elementos") is open, a VISIBLE clone (data-test-collapsible-toolbar-dropdown-item).
+    // querySelector returns the hidden original first, so locate the VISIBLE one by coordinates
+    // and click THAT (a blind selector click hit the hidden original → fell back onto "Cambiar
+    // fase"). Returns {present, visible, point} of a clickable add-note.
+    const addNoteState = () => page.evaluate(() => {
+      const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+      const all = Array.from(document.querySelectorAll("[data-test-action='add-note'], [data-live-test-action='add-note']"));
+      const visEl = all.find(vis);
+      if (!all.length) return { present: false, visible: false, point: null };
+      if (!visEl) return { present: true, visible: false, point: null };
+      const r = visEl.getBoundingClientRect();
+      return { present: true, visible: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+    }).catch(() => ({ present: false, visible: false, point: null }));
+    diag.note_candidates = await scanNote();
+    let st = await addNoteState();
+    diag.add_note_state = { before_expand: { present: st.present, visible: st.visible } };
+    if (st.present && !st.visible) {
+      // Expand the collapsible toolbar's OWN overflow ("Más elementos", class
+      // collapsible-toolbar__dropdown-trigger) — NOT a generic aria-expanded button (that
+      // matched the "Cambiar fase" stage dropdown last time).
+      diag.overflow_tried = true;
+      const expandPt = await page.evaluate(() => {
+        const bar = document.querySelector("[data-test-profile-list-bulk-actions], .profile-list-bulk-actions");
+        const cand = bar && bar.querySelector("button.collapsible-toolbar__dropdown-trigger");
+        if (!cand) return null;
+        cand.scrollIntoView({ block: "center" });
+        const r = cand.getBoundingClientRect();
+        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      }).catch(() => null);
+      if (expandPt) { await clickPoint(expandPt); await sleep(1300 + Math.floor(orand() * 500)); }
+      st = await addNoteState();
+      diag.add_note_state.after_expand = { present: st.present, visible: st.visible };
+      diag.note_candidates = await scanNote();
+      await shot("nota: overflow 'Más elementos' abierto").catch(() => {});
+    }
+
+    if (!st.present) {
+      // No bulk note action found — return diagnostics so we decide (bulk vs per-row) offline.
+      return { ok: true, saved: false, gated: true, note_field_found: false, bulk_supported: false,
+               recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
+    }
+
+    // Open the bulk note composer by clicking the VISIBLE add-note (the dropdown clone).
+    diag.opened_via = st.point ? `point(${Math.round(st.point.x)},${Math.round(st.point.y)})` : "add-note present but not visible";
+    const opened = st.point ? await clickPoint(st.point) : false;
+    if (!opened) return { ok: true, saved: false, gated: true, note_field_found: false, bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
+    await sleep(1600 + Math.floor(orand() * 600));
+
+    // Fill the note field (exact, locale-proof: textarea[data-test-mentions-edit-textarea]).
+    const NOTE_FIELD = "textarea[data-test-mentions-edit-textarea], textarea.mentions-edit__text-box";
+    diag.note_field = await findNoteField();
+    await shot("nota: composer abierto").catch(() => {});
+    let noteFieldFound = await page.evaluate((sel) => !!document.querySelector(sel), NOTE_FIELD).catch(() => false);
+    if (noteFieldFound) {
+      await clickSel(NOTE_FIELD);
+      await sleep(300);
+      await page.keyboard.press("Control+A").catch(() => {});
+      await page.keyboard.press("Backspace").catch(() => {});
+      await sleep(200);
+      if (typeHumanLike) await typeHumanLike(page, noteText, orand);
+      else await page.keyboard.type(noteText, { delay: 24 });
+      await sleep(700 + Math.floor(orand() * 300));
+    }
+
+    // Visibility = "Cualquier persona dentro de la empresa" → radio visibility-value=HIRING_CONTEXT
+    // (locale-proof; OWNER=just me, PROJECT=project members [default]). Click its label (the
+    // input itself is visually hidden in artdeco radios).
+    const visSet = await page.evaluate(() => {
+      const input = document.querySelector("input[visibility-value='HIRING_CONTEXT'], #ember-note-visbility-option-HIRING_CONTEXT, [id$='-note-visbility-option-HIRING_CONTEXT']");
+      if (!input) return false;
+      const label = input.id ? document.querySelector(`label[for='${input.id}']`) : null;
+      (label || input).click();
+      return true;
+    }).catch(() => false);
+    diag.visibility_set = visSet;
+    await shot(`nota: texto+visibilidad (empresa=${visSet}) — sin guardar`).catch(() => {});
+
+    // ── Same run: DISCOVER the "Cambiar fase" stage options (move-to-pipeline). The dropdown
+    // contents render lazily, so cancel the note modal, open the stage dropdown, and dump the
+    // options for offline confirmation of the "contacted" stage selector. (Read-only: we never
+    // click a stage here.)
+    if (!save) {
+      await clickSel("button[data-test-create-edit-note-cancel-btn]").catch(() => {});
+      await sleep(900 + Math.floor(orand() * 300));
+      const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
+      await clickSel(stageTrigger).catch(() => {});
+      await sleep(1200 + Math.floor(orand() * 400));
+      diag.stage_options = await page.evaluate(() => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const box = document.querySelector("[data-test-move-to-dropdown-contents], .move-to-pipeline__dropdown-content");
+        const out = { html: box ? clean(box.outerHTML).slice(0, 4000) : null, items: [] };
+        const scope = box || document;
+        for (const e of Array.from(scope.querySelectorAll("button, [role='menuitem'], li, a"))) {
+          const t = clean(e.innerText || e.textContent);
+          if (!t) continue;
+          const da = e.getAttribute("data-test-pipeline-state") || e.getAttribute("data-live-test-pipeline-state") || e.getAttribute("data-test-action");
+          out.items.push({ text: t.slice(0, 40), state: da || null });
+        }
+        out.items = out.items.slice(0, 12);
+        return out;
+      }).catch(() => null);
+      await shot("fase: dropdown 'Cambiar fase' abierto (descubrimiento)").catch(() => {});
+      await sleep(800);
+      return { ok: true, saved: false, gated: true, note_field_found: noteFieldFound,
+               bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
+    }
+
+    // save=true: click "Añadir" to save the note, verify the modal closed, THEN move the
+    // selected candidates to the native "contacted" pipeline stage.
+    const savedClick = await clickSel("button[data-test-create-edit-note-submit-btn]");
+    await sleep(1900 + Math.floor(orand() * 600));
+    const modalGone = await page.evaluate(() =>
+      !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]")
+    ).catch(() => false);
+    const noteSaved = savedClick && modalGone;
+    await shot(`nota: guardada=${noteSaved}`).catch(() => {});
+
+    // Move to stage "contacted" (data-test-move-to-state=CONTACTED — locale/label-proof;
+    // SHORTLISTED=uncontacted [current, disabled], REPLIED=replied). The note-save may have
+    // left the bulk selection intact; re-assert select-all to be safe.
+    let stageMoved = false;
+    try {
+      const stillSelected = await page.evaluate(() => {
+        const cb = document.querySelector("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input");
+        return !!(cb && cb.checked);
+      }).catch(() => false);
+      if (!stillSelected) { await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input"); await sleep(900); }
+      const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
+      if (await clickSel(stageTrigger)) {
+        await sleep(1100 + Math.floor(orand() * 400));
+        const contactedPt = await page.evaluate(() => {
+          const el = document.querySelector("[data-test-move-to-state='CONTACTED']");
+          if (!el) return null;
+          el.scrollIntoView({ block: "center" });
+          const r = el.getBoundingClientRect();
+          return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: el.getAttribute("aria-disabled") === "true" } : null;
+        }).catch(() => null);
+        if (contactedPt && !contactedPt.disabled) {
+          await clickPoint(contactedPt);
+          await sleep(1800 + Math.floor(orand() * 600));
+          // Verify via the success TOAST ("Se ha movido a N candidatos a la fase contacted" /
+          // "Moved N candidates to the contacted stage"). Clicking CONTACTED closes the
+          // dropdown, so the dropdown item is gone — the toast is the live confirmation.
+          stageMoved = await page.evaluate(() => {
+            const toast = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+            const t = toast ? (toast.innerText || toast.textContent || "") : "";
+            return /contacted/i.test(t) && /(movido|moved|cambiad|changed|fase|stage)/i.test(t);
+          }).catch(() => false);
+        }
+      }
+      await shot(`fase: movido a contacted=${stageMoved}`).catch(() => {});
+    } catch { /* stage move best-effort; note save is the primary gate */ }
+
+    diag.stage_moved = stageMoved;
+    // ok gates on the note save (the user's primary ask); stage move is reported alongside.
+    return { ok: noteSaved, saved: noteSaved, stage_moved: stageMoved, note_field_found: noteFieldFound,
+             bulk_supported: true, recipient_count: recipientCount, recipients, diag,
+             ...(noteSaved ? {} : { reason: "note_save_unverified" }), manage_url: manageUrl };
+  } catch (e) {
+    return { ok: false, saved: false, reason: `error:${(e && e.message) || e}`, diag };
   }
 }
 

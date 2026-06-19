@@ -365,6 +365,16 @@ class RecruiterPushService:
                 out = mc
         return out
 
+    async def read_note_compose_result(self, run_id) -> dict:
+        """Read a recruiter_note_compose run's result → {saved, stage_moved, recipient_count,
+        note_field_found, recipients, ...}. Last non-empty wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            nc = rec.get("note_compose_result")
+            if isinstance(nc, dict):
+                out = nc
+        return out
+
     async def push_lead_removed(self, *, run_id, job_id, connector_id,
                                 profile_url: str | None, name: str | None = None) -> dict:
         """Confirmed removal: the candidate is archived/gone in LinkedIn, so delete

@@ -42,13 +42,16 @@ EVENT_SAVE = "recruiter_save"
 EVENT_MESSAGE = "recruiter_message"
 EVENT_ARCHIVE = "recruiter_archive"
 EVENT_RECOMMENDATIONS = "recruiter_recommendations"
+# Add a "Contactado para <posición>" NOTE (bulk) + move to the native "contacted" stage.
+# Standalone (POST .../add-note + Odoo button) and chained after a real message send.
+EVENT_NOTE = "recruiter_note"
 # DEMO button chain (Odoo "Demo"): reset the project to ONLY the demo profile, then
 # optionally message it. archive-all (looped) → add-profile → (send → recruiter_message).
 EVENT_DEMO_ARCHIVE = "recruiter_demo_archive"
 EVENT_DEMO_ADD = "recruiter_demo_add"
 PIPELINE_EVENT_KINDS = {
     EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
-    EVENT_RECOMMENDATIONS, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
+    EVENT_RECOMMENDATIONS, EVENT_NOTE, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
 }
 
 # Recruiter event kinds whose FAILURE should NOT raise a position-level alarm in Odoo:
@@ -64,6 +67,7 @@ _FLOW_STAGE_LABELS = {
     EVENT_MESSAGE: "message",
     EVENT_ARCHIVE: "archive candidate",
     EVENT_RECOMMENDATIONS: "add recommended",
+    EVENT_NOTE: "add contact note",
 }
 
 _NON_TERMINAL = (
@@ -84,6 +88,9 @@ DEFAULT_MESSAGE_BODY = (
     "nos llamó la atención para una posición que tenemos abierta. ¿Te interesaría "
     "que conversemos? ¡Saludos!"
 )
+# Default note text for the "add contact note" flow; overridable per call. The position
+# name comes from the job context so the LinkedIn note records WHAT they were contacted for.
+DEFAULT_NOTE_PREFIX = "Contactado para "
 
 
 class RecruiterPipelineService:
@@ -311,6 +318,8 @@ class RecruiterPipelineService:
             return await self._after_archive(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_RECOMMENDATIONS:
             return await self._after_recommendations(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_NOTE:
+            return await self._after_note(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_DEMO_ARCHIVE:
             return await self._after_demo_archive(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_DEMO_ADD:
@@ -901,7 +910,105 @@ class RecruiterPipelineService:
             event_kind=EVENT_MESSAGE, run_id=run.id,
             message=f"✉️ Message sent to {len(recipients)} candidate(s).",
         )
-        return {"stage": "message", "sent": True, "outreach": res}
+        # "Ambos": after a REAL send, chain an add-note run (save=true) so the messaged
+        # candidates get the "Contactado para <posición>" note + the native "contacted"
+        # stage — the LinkedIn-side markers of "already contacted". Best-effort: if the
+        # note workflow is unset it no-ops; a note failure never un-does the send.
+        note_run_id = None
+        if settings.recruiter_note_workflow_id:
+            try:
+                note_run_id = await self._enqueue_note_run(
+                    job_id=job_id, connector_id=connector_id,
+                    project_id=pipeline.get("project_id"),
+                    position=pipeline.get("position"),
+                    project_name=pipeline.get("project_name"),
+                )
+            except Exception:  # noqa: BLE001 — chaining is best-effort
+                logger.exception("recruiter pipeline: failed to chain add-note after message (job %s)", job_id)
+        return {"stage": "message", "sent": True, "outreach": res, "note_run_id": note_run_id}
+
+    async def _enqueue_note_run(
+        self, *, job_id, connector_id, project_id, position: str | None = None,
+        project_name: str | None = None, note_text: str | None = None, save: bool = True,
+    ) -> str | None:
+        """Create a QUEUED recruiter_note run: add the "Contactado para <posición>" note
+        to the project's active candidates AND move them to the native "contacted" stage
+        (save=true). Shared by add_note_to_candidates (standalone/Odoo button) and the
+        post-message chain. Returns the run id, or None if the job has no project."""
+        if not settings.recruiter_note_workflow_id or not project_id:
+            return None
+        note_text = (note_text or f"{DEFAULT_NOTE_PREFIX}{(position or '').strip()}").strip()
+        project_url = f"https://www.linkedin.com/talent/hire/{project_id}/manage/all"
+        pipeline_ctx = {
+            "job_id": str(job_id), "connector_id": connector_id, "project_id": project_id,
+            "position": position, "project_name": project_name,
+            "note_text": note_text, "save": bool(save),
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=settings.recruiter_note_workflow_id,
+            event_kind=EVENT_NOTE,
+            runtime_params={
+                "project_url": project_url,
+                "note_text": note_text,
+                "save": "true" if save else "false",
+            },
+            pipeline=pipeline_ctx,
+            connector_id=connector_id,
+        )
+        logger.info(
+            "recruiter pipeline: started add-note run %s for job %s (save=%s note=%r)",
+            run.id, job_id, save, note_text,
+        )
+        await self._push_flow_status(
+            job_id=str(job_id), connector_id=connector_id, status="running",
+            event_kind=EVENT_NOTE, run_id=run.id,
+            message=("📝 Agregando la nota de contacto + marcando 'contacted'…"
+                     if save else "📝 Preparando la nota de contacto (preview)…"),
+        )
+        return str(run.id)
+
+    async def add_note_to_candidates(self, job_id, note_text: str | None = None,
+                                     save: bool = False) -> str | None:
+        """Standalone (Odoo button) trigger: add the "Contactado para <posición>" note to
+        the job's project candidates (bulk) + move them to "contacted". GATED by `save`
+        (false=preview/STOP, true=save the note + move stage). note_text defaults to
+        "Contactado para <position>" from the job context. Returns the run id, or None if
+        the job has no project / the workflow is unset."""
+        if not settings.recruiter_note_workflow_id:
+            logger.warning("recruiter pipeline: recruiter_note_workflow_id unset — skip")
+            return None
+        ctx = await self._gather_job_context(job_id)
+        if not ctx.get("project_id"):
+            logger.warning("recruiter pipeline: no project for job %s — can't add note", job_id)
+            return None
+        return await self._enqueue_note_run(
+            job_id=job_id, connector_id=ctx.get("connector_id"),
+            project_id=ctx.get("project_id"), position=ctx.get("position"),
+            project_name=ctx.get("project_name"), note_text=note_text, save=save,
+        )
+
+    async def _after_note(self, run, pipeline, connector_id, job_id) -> dict:
+        """An add-note run completed. The note + "contacted" stage are LinkedIn-side
+        markers (Odoo's outreach_status is set by the message flow), so this only reports
+        status to the position chatter. ok=false (note not saved) surfaces as failed."""
+        note = await self.push.read_note_compose_result(run.id)
+        saved = bool(note.get("saved"))
+        moved = bool(note.get("stage_moved"))
+        n = note.get("recipient_count") or 0
+        if not pipeline.get("save") or not saved:
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_NOTE, run_id=run.id,
+                message="📝 Vista previa de la nota lista (no guardada).",
+            )
+            return {"stage": "note", "saved": False, "preview": True}
+        await self._push_flow_status(
+            job_id=job_id, connector_id=connector_id, status="done",
+            event_kind=EVENT_NOTE, run_id=run.id,
+            message=(f"📝 Nota de contacto agregada a {n} candidato(s)"
+                     + (" + movidos a 'contacted'." if moved else ".")),
+        )
+        return {"stage": "note", "saved": True, "stage_moved": moved}
 
     async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
         """An archive (remove-from-project) run completed. Only when the strategy

@@ -32,6 +32,14 @@ class SendMessagesRequest(BaseModel):
     send: bool = False
 
 
+class AddNoteRequest(BaseModel):
+    # Defaults to "Contactado para <posición>" (from the job context) when omitted.
+    note_text: str | None = None
+    # Gated: false (default) = open the note composer + type + STOP for a snapshot preview
+    # (no save); true = save the note AND move the candidates to the "contacted" stage.
+    save: bool = False
+
+
 class InboxReply(BaseModel):
     profile_url: str | None = None
     name: str | None = None
@@ -108,6 +116,34 @@ async def send_messages(
             "reason": "no project or no saved candidates for this job",
         }
     return {"status": "queued", "job_id": job_id, "run_id": run_id}
+
+
+@router.post("/jobs/{job_id}/add-note")
+async def add_note(
+    job_id: str,
+    req: AddNoteRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a "Contactado para <posición>" NOTE to the job's ACTIVE project candidates
+    (bulk) AND move them to the native "contacted" pipeline stage — the LinkedIn-side
+    markers of "already contacted". GATED: save=false (default) opens the composer + types
+    + STOPS for a snapshot preview (no save); save=true saves the note + moves the stage,
+    then records outreach in the position chatter. Creates a daemon run on the LinkedIn
+    operator; returns its id (or skips if the job has no project)."""
+    svc = RecruiterPipelineService(db)
+    run_id = await svc.add_note_to_candidates(
+        job_id,
+        note_text=(req.note_text if req else None),
+        save=(req.save if req else False),
+    )
+    await db.commit()
+    if not run_id:
+        return {
+            "status": "skipped",
+            "job_id": job_id,
+            "reason": "no project for this job or note workflow unset",
+        }
+    return {"status": "queued", "job_id": job_id, "run_id": run_id, "save": (req.save if req else False)}
 
 
 @router.post("/request-inbox-scan")

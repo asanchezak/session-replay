@@ -11,6 +11,7 @@
     { "spec": "add-profile-to-project.json", "workflow_id": "f003f090-d74a-41bc-90a9-67f5fd603a5d", "env_var": null, "name": "Recruiter: Add a profile to a project (public /in/ or /talent/profile/) — robust" },
     { "spec": "read-project-counts.json", "workflow_id": "b5e3d433-fa33-4795-881a-40d3125c773f", "env_var": null, "name": "Recruiter: Read a project's candidate counts (read-only)" },
     { "spec": "message-compose.json", "workflow_id": "c46c296f-21f8-4662-9681-45ecceb9db52", "env_var": "RECRUITER_MESSAGE_WORKFLOW_ID", "name": "Recruiter: compose bulk InMail from a template ({Nombre} chip, gated send)" },
+    { "spec": "note-compose.json", "workflow_id": "37a8f06d-4bfc-4fbd-9c45-923ab11a598c", "env_var": "RECRUITER_NOTE_WORKFLOW_ID", "name": "Recruiter: add 'Contactado para <posición>' note (bulk) + move to 'contacted' stage (gated save)" },
     { "spec": "archive-project.json", "workflow_id": "752753a9-17b5-4e36-afcb-82bae204726e", "env_var": "RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID", "name": "Recruiter: Archive a PROJECT (testing tool)" },
     { "spec": "archive-candidate-param.json", "workflow_id": "fc9bb424-cecb-4d0d-bd7e-4a823e0867a4", "env_var": "RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID", "name": "Recruiter: Archive (remove) a candidate from a project — parameterized" },
     { "spec": "save-recommendations.json", "workflow_id": "77bc4e98-c90e-4ca2-9400-5457efe5e0af", "env_var": "RECRUITER_RECOMMENDATIONS_WORKFLOW_ID", "name": "Recruiter: Save recommended matches to the project (automated sourcing)" },
