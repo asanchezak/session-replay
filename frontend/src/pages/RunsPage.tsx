@@ -153,9 +153,6 @@ export default function RunsPage() {
             { key: "status", label: "Status", render: (r: RunSummary) => (
               <StatusBadge status={r.status as any} size="sm" />
             )},
-            { key: "error", label: "Error", render: (r: RunSummary) => (
-              <span className="text-error text-xs">{r.error_summary || "—"}</span>
-            )},
             { key: "created", label: "Started", render: (r: RunSummary) => (
               <span className="text-text-secondary text-xs">{formatTime(r.created_at)}</span>
             )},
