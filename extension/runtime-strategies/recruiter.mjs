@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-save-stage-v3-toast";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-v4-link-cleanpreview";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -1779,32 +1779,10 @@ async function composeRecruiterNote(page, options, orand, runtime) {
     diag.visibility_set = visSet;
     await shot(`nota: texto+visibilidad (empresa=${visSet}) — sin guardar`).catch(() => {});
 
-    // ── Same run: DISCOVER the "Cambiar fase" stage options (move-to-pipeline). The dropdown
-    // contents render lazily, so cancel the note modal, open the stage dropdown, and dump the
-    // options for offline confirmation of the "contacted" stage selector. (Read-only: we never
-    // click a stage here.)
+    // GATED: save=false leaves the composer open with the note typed (NOT saved) so the
+    // per-step snapshot shows exactly what would be saved — and never mutates anything.
     if (!save) {
-      await clickSel("button[data-test-create-edit-note-cancel-btn]").catch(() => {});
-      await sleep(900 + Math.floor(orand() * 300));
-      const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
-      await clickSel(stageTrigger).catch(() => {});
-      await sleep(1200 + Math.floor(orand() * 400));
-      diag.stage_options = await page.evaluate(() => {
-        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-        const box = document.querySelector("[data-test-move-to-dropdown-contents], .move-to-pipeline__dropdown-content");
-        const out = { html: box ? clean(box.outerHTML).slice(0, 4000) : null, items: [] };
-        const scope = box || document;
-        for (const e of Array.from(scope.querySelectorAll("button, [role='menuitem'], li, a"))) {
-          const t = clean(e.innerText || e.textContent);
-          if (!t) continue;
-          const da = e.getAttribute("data-test-pipeline-state") || e.getAttribute("data-live-test-pipeline-state") || e.getAttribute("data-test-action");
-          out.items.push({ text: t.slice(0, 40), state: da || null });
-        }
-        out.items = out.items.slice(0, 12);
-        return out;
-      }).catch(() => null);
-      await shot("fase: dropdown 'Cambiar fase' abierto (descubrimiento)").catch(() => {});
-      await sleep(800);
+      await sleep(1500);
       return { ok: true, saved: false, gated: true, note_field_found: noteFieldFound,
                bulk_supported: true, recipient_count: recipientCount, recipients, diag, manage_url: manageUrl };
     }

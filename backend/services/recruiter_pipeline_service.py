@@ -88,9 +88,11 @@ DEFAULT_MESSAGE_BODY = (
     "nos llamó la atención para una posición que tenemos abierta. ¿Te interesaría "
     "que conversemos? ¡Saludos!"
 )
-# Default note text for the "add contact note" flow; overridable per call. The position
-# name comes from the job context so the LinkedIn note records WHAT they were contacted for.
-DEFAULT_NOTE_PREFIX = "Contactado para "
+# "Add contact note" copy; overridable per call. The note records WHAT position they were
+# contacted for, WHO contacted them (the automation, by default), and a deep-link back to
+# the Odoo position — composed in _default_note_text from the job context + connector URL.
+DEFAULT_NOTE_PREFIX = "Contactado - "
+DEFAULT_CONTACTED_BY = "Automation"
 
 
 class RecruiterPipelineService:
@@ -927,6 +929,20 @@ class RecruiterPipelineService:
                 logger.exception("recruiter pipeline: failed to chain add-note after message (job %s)", job_id)
         return {"stage": "message", "sent": True, "outreach": res, "note_run_id": note_run_id}
 
+    async def _default_note_text(self, job_id, position: str | None,
+                                 connector_id, contacted_by: str = DEFAULT_CONTACTED_BY) -> str:
+        """Compose the LinkedIn note: "Contactado - <posición> · por: <quién> · <link Odoo>".
+        The Odoo deep-link (classic web client form URL) is built from the connector's base
+        URL + job_id; if the connector is unconfigured the link is omitted (graceful)."""
+        pos = (position or "").strip()
+        parts = [f"{DEFAULT_NOTE_PREFIX}{pos}".strip(" -") if pos else "Contactado",
+                 f"por: {contacted_by}"]
+        ep = await self.push._connector_endpoint(connector_id)
+        if ep:
+            base, _key = ep
+            parts.append(f"{base.rstrip('/')}/web#id={job_id}&model=hr.job&view_type=form")
+        return " · ".join(parts)
+
     async def _enqueue_note_run(
         self, *, job_id, connector_id, project_id, position: str | None = None,
         project_name: str | None = None, note_text: str | None = None, save: bool = True,
@@ -937,7 +953,7 @@ class RecruiterPipelineService:
         post-message chain. Returns the run id, or None if the job has no project."""
         if not settings.recruiter_note_workflow_id or not project_id:
             return None
-        note_text = (note_text or f"{DEFAULT_NOTE_PREFIX}{(position or '').strip()}").strip()
+        note_text = (note_text or await self._default_note_text(job_id, position, connector_id)).strip()
         project_url = f"https://www.linkedin.com/talent/hire/{project_id}/manage/all"
         pipeline_ctx = {
             "job_id": str(job_id), "connector_id": connector_id, "project_id": project_id,
