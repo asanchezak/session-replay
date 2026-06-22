@@ -1,0 +1,92 @@
+{
+  "_comment": "CONTRACTS — the 'definition of correct' per Recruiter workflow, read by the AI failure-diagnosis (self_healing_service). Derived from extension/runtime-strategies/recruiter.mjs `stageVerdict` (the live postconditions + failure reasons), the spec `description`/`intent` fields, and CLAUDE.md. Keyed by the recruiter strategy. The diagnosis also gets a per-run `event_kind` to disambiguate strategies that serve >1 stage (recruiter_search_people).",
+  "_offline_validation_rule": "A proposed selector_swap is only trustworthy if the new selector string appears in the captured evidence (the strategy's diag DOM fragments + page snapshot visible_elements). Prefer data-test-* selectors; never ES/EN words (the /talent seat language flips ES<->EN).",
+  "strategies": {
+    "recruiter_search_people": {
+      "intent": "Run the boolean + location search and extract candidate cards (or, for create-project, land on the new project workspace).",
+      "params": ["boolean_query", "location", "target_count"],
+      "success_criteria": "create_project: URL matches /talent/hire/<id> (landed on the project). search: a total_count was read (even 0) OR cards were collected.",
+      "failure_reasons": {
+        "project_not_created": "Did not land on /talent/hire/<id> — the create-project step didn't commit.",
+        "search_results_did_not_render": "No count read AND no cards — usually a walled seat (login/checkpoint) or the results selector drifted."
+      },
+      "known_gotchas": "Locale-proof selectors only (data-test-facet-*). A walled /talent seat 'succeeds' with 0 candidates — that's a wall, not an empty search."
+    },
+    "recruiter_save_results_to_project": {
+      "intent": "Select N results on the search-results page and bulk-save them to the project.",
+      "params": ["search_url", "project_name", "target_count"],
+      "success_criteria": "save_result.saved_count > 0 AND save_result.verified_in_project != 0.",
+      "failure_reasons": {
+        "save_selected_none": "Nothing was saved — the select-all or Save button selector likely drifted, or the project typeahead matched the wrong/no project.",
+        "save_unverified_zero": "Saved click happened but the project's candidate count is demonstrably 0 — the save didn't persist."
+      },
+      "known_gotchas": "The save typeahead lists ALL projects (can pick the WRONG one); selection resets on pagination (save per page)."
+    },
+    "recruiter_archive_candidate": {
+      "intent": "Archive (remove) one candidate from a project by name and verify they left the active list.",
+      "params": ["project_url", "candidate_name"],
+      "success_criteria": "archive_result.ok (the 'Candidatos archivados' counter increased).",
+      "failure_reasons": {
+        "archive_not_verified": "The per-row archive button (data-test-component=archive-profiles-btn) or the confirm modal submit drifted, or the archived counter didn't increase. Row actions are hidden until the row is HOVERED."
+      },
+      "known_gotchas": "Hover the row first; submit is in the modal footer (data-test-archive-confirm-modal-submit)."
+    },
+    "recruiter_archive_all_in_project": {
+      "intent": "Loop the single-archive over the first active candidate until the active count hits 0.",
+      "params": ["project_url"],
+      "success_criteria": "archive_all_result.ok (made progress; more_remaining is orthogonal).",
+      "failure_reasons": { "archive_all_no_progress": "No candidate was archived in the round — same selectors as recruiter_archive_candidate." }
+    },
+    "recruiter_save_recommendations": {
+      "intent": "Add a project's LinkedIn Recommended matches (Automated Sourcing) to the pipeline.",
+      "params": ["project_url", "target_count", "require_open_to_work"],
+      "success_criteria": "save_recommendations_result.ok (ACTIVE-count delta > 0).",
+      "failure_reasons": { "recommendations_none": "No recommendation was added — the per-row data-test-save-to-first-stage (hover-gated) drifted, or the surface is /automatedSourcing/review not /recommendedMatches." }
+    },
+    "recruiter_add_profile": {
+      "intent": "Add a public /in/ or /talent/profile/ candidate to a project (bridge to the Recruiter profile, Save-to-project).",
+      "params": ["candidate_url", "project_name"],
+      "success_criteria": "add_profile_result.ok (saved + verified).",
+      "failure_reasons": { "add_profile_failed": "The /in/ bridge to the Recruiter profile or the Save-to-project button drifted." }
+    },
+    "recruiter_message_compose": {
+      "intent": "Bulk-InMail the project's active candidates from a template ({Nombre} -> {firstName} chip), gated by `send`.",
+      "params": ["project_url", "body", "subject", "send"],
+      "success_criteria": "message_compose_result.ok (gated preview OR a real send that delivered).",
+      "failure_reasons": {
+        "rate_limited_24h": "LinkedIn won't contact the same person twice within 24h — the Send button is disabled.",
+        "no_inmail_credits": "0 InMail credits left.",
+        "send_button_disabled": "Send is greyed out for another reason.",
+        "composer_open_failed": "The Message button (data-test-action=send-message) or the composer editor drifted."
+      }
+    },
+    "recruiter_note_compose": {
+      "intent": "Add a 'Contactado para <posición>' note (bulk) to the project's active candidates and move them to the native 'contacted' stage. Paginates across pages. Gated by `save` (false=preview, true=save+move).",
+      "params": ["project_url", "note_text", "save"],
+      "success_criteria": "note_compose_result.ok. save=false (preview) always ok; save=true gates on whether the note actually persisted (success toast 'Se ha añadido una nota a N candidatos').",
+      "failure_reasons": {
+        "note_failed": "The bulk add-note flow failed to persist.",
+        "note_save_unverified": "Clicked 'Añadir' but no success toast/modal-close — the submit button (data-test-create-edit-note-submit-btn) or the textarea (data-test-mentions-edit-textarea) drifted.",
+        "select_all_not_found": "The header select-all (input.small-input) drifted.",
+        "missing_project_id": "project_url had no /talent/hire/<id>.",
+        "no_active_candidates": "The project has 0 active candidates."
+      },
+      "known_gotchas": "add-note lives in the collapsible-toolbar OVERFLOW ('Más elementos', button.collapsible-toolbar__dropdown-trigger); there are TWO add-note buttons (hidden original + visible dropdown clone) — click the visible one. No across-pages select -> paginate (data-test-pagination-next)."
+    },
+    "recruiter_archive_project": {
+      "intent": "Archive a whole project (testing tool).",
+      "params": ["project_url", "project_name"],
+      "success_criteria": "archive_project_result.ok (gone from the active projects list).",
+      "failure_reasons": { "archive_project_failed": "The project overflow menu / 'Archive project' confirm drifted." }
+    },
+    "_generic_step": {
+      "intent": "A generic navigate/click/type step driven by the daemon's literal executor (no recruiter strategy). Used by simple/probe workflows and fault-injection tests.",
+      "success_criteria": "The step's selector_chain resolves to a visible element and the action completes; checkpoint:true steps HARD-FAIL the run when the target is missing.",
+      "failure_reasons": {
+        "selector_not_resolved": "The selector_chain matched no element within the resolve timeout — almost always selector drift or a locale-dependent text/aria selector that flipped ES<->EN.",
+        "checkpoint_failed": "A checkpoint:true step's target was missing."
+      },
+      "known_gotchas": "Prefer data-test-* CSS over text/aria (the /talent seat language flips). A failing click/type step is the canonical selector-drift case."
+    }
+  }
+}

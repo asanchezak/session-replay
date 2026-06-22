@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -36,6 +37,10 @@ _AUTONOMOUS_EVENT_KINDS = frozenset({
     "recruiter_demo_archive", "recruiter_demo_add", "recruiter_note",
     "new_job_position", "linkedin_lead_search", "recruiter_pipeline",
 })
+
+# Detached AI self-healing diagnosis tasks (fire-and-forget on FAILED recruiter runs).
+# Kept referenced so the event loop doesn't GC them mid-run.
+_DIAGNOSIS_TASKS: set = set()
 
 
 def _substitute_runtime_params(steps: list[dict], runtime_params: dict) -> int:
@@ -755,7 +760,32 @@ class ExecutionService:
                         run_id, event_kind,
                     )
 
+            # AI SELF-HEALING (SHADOW): diagnose a FAILED recruiter run in the BACKGROUND so
+            # the slow LLM call never blocks this terminal transition (it opens its own session).
+            # Best-effort; applies NOTHING — it persists a diagnosis into run.origin.ai_diagnosis.
+            if new_status == RunStatus.FAILED and self._is_recruiter_run(run, event_kind):
+                try:
+                    from services.self_healing_service import diagnose_failed_run
+
+                    task = asyncio.create_task(diagnose_failed_run(str(run_id)))
+                    _DIAGNOSIS_TASKS.add(task)
+                    task.add_done_callback(_DIAGNOSIS_TASKS.discard)
+                except Exception:
+                    logger.exception("self-heal: failed to spawn diagnosis for run %s", run_id)
+
         return run
+
+    @staticmethod
+    def _is_recruiter_run(run: ExecutionRun, event_kind: str) -> bool:
+        """A failed run worth AI-diagnosing: a recruiter pipeline event_kind, OR any workflow
+        whose snapshot name starts with 'Recruiter:' / targets /talent/ (covers ad-hoc + test
+        copies run via run-with-params, which carry no recruiter event_kind)."""
+        if (event_kind or "").startswith("recruiter_"):
+            return True
+        wf = (run.workflow_snapshot or {}).get("workflow") or {}
+        name = str(wf.get("name") or "")
+        target = str(wf.get("target_url") or "")
+        return name.startswith("Recruiter:") or "/talent/" in target
 
     async def _advance_recruiter_pipeline_after_completion(self, run: ExecutionRun) -> dict:
         """Advance the Recruiter automation pipeline in a fresh session.

@@ -171,6 +171,73 @@ interface GoalProgress {
   intents?: Array<{ step_index: number; intent: string; status: string }>;
 }
 
+interface AIDiagnosis {
+  failure_class?: string;
+  root_cause?: string;
+  human_summary?: string;
+  confidence?: number;
+  auto_heal_safe?: boolean;
+  mode?: string;
+  provider?: string;
+  proposed_fix?: {
+    type?: string;
+    step_index?: number | null;
+    old_selector?: string | null;
+    new_selector?: string | null;
+    rationale?: string;
+  } | null;
+  offline_validation?: { performed?: boolean; matched_in_evidence?: boolean | null; note?: string };
+}
+
+/** SHADOW-mode AI failure diagnosis surfaced on a failed recruiter run (applies nothing). */
+function AIDiagnosisPanel({ d }: { d: AIDiagnosis }) {
+  const fix = d.proposed_fix && d.proposed_fix.type && d.proposed_fix.type !== "none" ? d.proposed_fix : null;
+  const ov = d.offline_validation;
+  const matched = ov?.matched_in_evidence;
+  return (
+    <div className="mt-3 max-w-2xl rounded-md border border-accent/30 bg-accent/5 px-3 py-2.5 text-xs">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="font-semibold text-accent">🩺 AI diagnosis</span>
+        <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary text-[10px] uppercase">shadow</span>
+        {d.failure_class && (
+          <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent text-[10px] font-mono">{d.failure_class}</span>
+        )}
+        {typeof d.confidence === "number" && (
+          <span className="text-text-tertiary text-[10px]">conf {Math.round((d.confidence || 0) * 100)}%</span>
+        )}
+      </div>
+      {d.human_summary && <div className="text-text-primary mb-1">{d.human_summary}</div>}
+      {d.root_cause && <div className="text-text-secondary mb-1.5">{d.root_cause}</div>}
+      {fix && (
+        <div className="rounded bg-bg-secondary border border-border px-2 py-1.5 mb-1.5">
+          <div className="text-text-secondary mb-1">
+            Proposed fix: <span className="font-mono text-text-primary">{fix.type}</span>
+            {fix.step_index != null && <span className="text-text-tertiary"> · step {fix.step_index}</span>}
+          </div>
+          {fix.old_selector && (
+            <div className="font-mono text-error/80 break-all">- {fix.old_selector}</div>
+          )}
+          {fix.new_selector && (
+            <div className="font-mono text-success break-all">+ {fix.new_selector}</div>
+          )}
+          {fix.rationale && <div className="text-text-tertiary mt-1">{fix.rationale}</div>}
+        </div>
+      )}
+      <div className="flex items-center gap-3 text-[10px] text-text-tertiary">
+        {ov?.performed ? (
+          <span className={matched ? "text-success" : "text-warning"}>
+            offline-validated: {matched ? "✓ selector found in captured DOM" : "✗ not found (low trust)"}
+          </span>
+        ) : (
+          <span>offline-validation: n/a</span>
+        )}
+        {d.provider && <span>· {d.provider}</span>}
+        <span>· not applied (shadow)</span>
+      </div>
+    </div>
+  );
+}
+
 interface RunDetail {
   id: string;
   workflow_id: string;
@@ -205,6 +272,8 @@ interface RunDetail {
       label_outputs?: boolean;
     } | null;
     triggered_by?: string | null;
+    /** AI self-healing (shadow) diagnosis attached to a FAILED recruiter run. */
+    ai_diagnosis?: AIDiagnosis;
   } | null;
   /** Clickable link to the originating Odoo position (hr.job), computed by the backend. */
   odoo_job_url?: string | null;
@@ -786,6 +855,7 @@ export default function RunDetailPage() {
               {run.error_summary}
             </div>
           )}
+          {run.origin?.ai_diagnosis && <AIDiagnosisPanel d={run.origin.ai_diagnosis} />}
         </div>
       </div>
 

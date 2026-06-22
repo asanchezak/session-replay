@@ -1,0 +1,24 @@
+{
+  "name": "Recruiter: TEST broken selector (fault injection)",
+  "description": "THROWAWAY fault-injection workflow for the AI self-healing (shadow) system. NOT in registry. Navigates to Talent home (benign, no mutation) then a checkpoint click with a deliberately BROKEN selector so the run HARD-FAILS — to exercise the failure-diagnosis hook. The 'Recruiter:' name prefix + /talent/ target make the diagnosis hook fire even though there is no recruiter event_kind.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Open Recruiter Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle"
+    },
+    {
+      "action_type": "click",
+      "intent": "Open the 'Proyectos' (Projects) tab in the Recruiter top navigation",
+      "checkpoint": true,
+      "selector_chain": [
+        { "type": "css", "value": "a.this-projects-nav-link-does-not-exist-xyz123" }
+      ]
+    }
+  ]
+}
