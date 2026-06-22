@@ -33,25 +33,40 @@ JOB DESCRIPTION:
 Return ONLY this JSON object (no markdown, no comments):
 {{
   "title_variants": ["up to 4 job-title strings a matching profile might use, incl. common synonyms/abbreviations"],
-  "must_have_skills": ["the hard skills/technologies REQUIRED, ordered most→least important, max 6, concrete & searchable e.g. \\"React\\", \\"Kubernetes\\", \\"Python\\""],
-  "optional_skills": ["nice-to-have hard skills, max 6"],
+  "must_have_skills": [["a REQUIRED capability as a GROUP of 2-5 INTERCHANGEABLE terms — synonyms, equivalent tools, and the umbrella concept — so a candidate matches if they have ANY term in the group. Ordered most→least important, max 6 groups."]],
+  "optional_skills": [["nice-to-have capability groups, max 4"]],
   "seniority": "one of: junior, mid, senior, lead, or null",
   "location": "country or region the role targets, or null",
   "years_min": integer or null,
   "years_max": integer or null,
   "exclude": ["titles/terms to NOT match, e.g. \\"Manager\\", \\"Intern\\", max 4"],
-  "recommended_tightness": "integer: how many of the most-important skills above to REQUIRE (AND together), counting must_have first then optional. This sets how STRICT the search is. Choose it from how specific/senior the role is and how many skills are genuinely mandatory: a focused senior/lead role with a clear, distinctive stack → 5-7; a normal mid/senior role → 4-5; a broad or vague/junior role → 2-3. Never exceed the number of skills you listed."
+  "recommended_tightness": "integer: how many of the above skill GROUPS to REQUIRE (AND together), most-important first. A focused senior/lead role with a distinctive stack → 4-6; a normal mid/senior role → 3-4; a broad/vague/junior role → 2. Never exceed the number of groups you listed."
 }}
 
-Rules: skills must be concrete searchable tech/tools, NOT soft skills or sentences.
-Prefer specific terms over generic ones. Use the BASE technology name WITHOUT version
-numbers ("Next.js" not "Next.js 15", "Angular" not "Angular 2+", "Python" not "Python 3")
-— LinkedIn profiles list the base tech, so a versioned AND term over-narrows to ~0.
-If the JD is sparse, infer reasonable terms from the title.
+HOW TO BUILD SKILL GROUPS (this is the important part — do it well):
+- Each group represents ONE required capability via DIFFERENT words. A candidate matches the
+  group if they have ANY term in it, so DON'T force every exact tool — cluster interchangeable
+  ones. E.g. orchestration/streaming → ["Kafka","Airflow","Spark","streaming"]; containers & IaC
+  → ["Kubernetes","Docker","Terraform","CloudFormation"]; cloud → ["AWS","GCP","Azure"] (use a
+  1-term group like ["AWS"] ONLY if a single cloud is genuinely mandatory).
+- Derive capabilities from BOTH the explicit tech stack AND the RESPONSIBILITIES — the role's
+  distinctive duties are often the best signal. E.g. a duty "design APIs for ML models / deploy
+  ML models" → ["model serving","MLOps","ML API","inference","machine learning"].
+- One capability per group; do NOT mix unrelated skills. Prefer specific umbrella terms
+  ("model serving","MLOps") over bare generic ones ("API","data","cloud").
+- Do NOT create a group that merely restates the job title/role (e.g. a "Data Engineering"
+  group for a Data Engineer role) — the title is already searched separately, so spend each
+  group on a DISTINCT hard capability/tool instead.
+
+Rules: terms must be concrete searchable tech/tools/role-concepts, NOT soft skills or sentences.
+Use the BASE technology name WITHOUT version numbers ("Next.js" not "Next.js 15", "Angular" not
+"Angular 2+", "Python" not "Python 3") — a versioned AND term over-narrows to ~0. If the JD is
+sparse, infer reasonable groups from the title.
 """
 
 _MAX_TITLES = 4
-_MAX_SKILLS = 8  # combined must + optional cap for the AND chain
+_MAX_GROUPS = 8        # combined must + optional cap for the AND chain (each AND clause = a group)
+_MAX_TERMS_PER_GROUP = 5
 
 
 def _clean_terms(items, cap):
@@ -79,6 +94,28 @@ def _clean_terms(items, cap):
     return out
 
 
+def _clean_groups(items, cap_groups):
+    """Normalize skills into a list of GROUPS (each a cleaned list of interchangeable terms).
+    Tolerates the legacy flat shape (a string item becomes a 1-term group)."""
+    out, seen = [], set()
+    for grp in items or []:
+        if isinstance(grp, str):
+            grp = [grp]
+        if not isinstance(grp, list):
+            continue
+        terms = _clean_terms(grp, _MAX_TERMS_PER_GROUP)
+        if not terms:
+            continue
+        key = tuple(sorted(t.lower() for t in terms))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(terms)
+        if len(out) >= cap_groups:
+            break
+    return out
+
+
 class BooleanQueryBuilder:
     """Stateless: corpus → spec (AI) → boolean (deterministic). The orchestrator
     keeps the spec + the current tightness in origin.pipeline for re-tuning."""
@@ -102,8 +139,8 @@ class BooleanQueryBuilder:
         spec["title_variants"] = _clean_terms(spec.get("title_variants"), _MAX_TITLES) or (
             [fallback_title.strip()] if fallback_title.strip() else []
         )
-        spec["must_have_skills"] = _clean_terms(spec.get("must_have_skills"), 6)
-        spec["optional_skills"] = _clean_terms(spec.get("optional_skills"), 6)
+        spec["must_have_skills"] = _clean_groups(spec.get("must_have_skills"), 6)
+        spec["optional_skills"] = _clean_groups(spec.get("optional_skills"), 4)
         spec["exclude"] = _clean_terms(spec.get("exclude"), 4)
         spec["seniority"] = (spec.get("seniority") or None)
         spec["location"] = (spec.get("location") or None)
@@ -127,18 +164,25 @@ class BooleanQueryBuilder:
             return {}
 
     def assemble(self, spec: dict, tightness: int) -> str:
-        """Boolean = (title OR variants) AND skill1 AND skill2 ... [NOT (excl...)].
-        `tightness` = how many skills are AND'd (musts first, then optionals).
-        0 = title-only (broadest); higher = tighter."""
+        """Boolean = (title OR variants) AND (g1a OR g1b ...) AND (g2a OR ...) ... [NOT (excl)].
+        Each AND clause is a GROUP of interchangeable terms (OR'd), so a candidate matches a
+        clause with ANY of its terms — much better recall than AND'ing every exact tool.
+        `tightness` = how many groups are AND'd (musts first, then optionals); 0 = title-only."""
         titles = [f'"{t}"' for t in spec.get("title_variants", [])]
-        skills = [f'"{s}"' for s in (
+        groups = (
             list(spec.get("must_have_skills", [])) + list(spec.get("optional_skills", []))
-        )][:_MAX_SKILLS]
-        t = max(0, min(int(tightness), len(skills)))
+        )[:_MAX_GROUPS]
+        t = max(0, min(int(tightness), len(groups)))
         parts: list[str] = []
         if titles:
             parts.append("(" + " OR ".join(titles) + ")")
-        parts.extend(skills[:t])
+        for g in groups[:t]:
+            if isinstance(g, str):  # tolerate a legacy flat spec
+                g = [g]
+            terms = [f'"{x}"' for x in g if x]
+            if not terms:
+                continue
+            parts.append(terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")")
         query = " AND ".join(parts) if parts else (titles[0] if titles else "")
         excl = [f'"{e}"' for e in spec.get("exclude", [])][:3]
         if excl and query:
@@ -147,7 +191,7 @@ class BooleanQueryBuilder:
 
     def max_tightness(self, spec: dict) -> int:
         return min(
-            _MAX_SKILLS,
+            _MAX_GROUPS,
             len(spec.get("must_have_skills", [])) + len(spec.get("optional_skills", [])),
         )
 
