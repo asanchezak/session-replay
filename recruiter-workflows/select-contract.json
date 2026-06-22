@@ -1,0 +1,19 @@
+{
+  "name": "Recruiter: select Morsoft contract (contract-chooser)",
+  "description": "Force the /talent/contract-chooser and pick the Morsoft SRL-Recruiter (Empresa) contract so the Recruiter surface is usable (NOT the individual Job Posting one). Selecting it sticks for the daemon's persistent seat. NOT in registry. Selector verified live: button[data-live-test-contract-select='Morsoft SRL-Recruiter'].",
+  "target_url": "https://www.linkedin.com/talent/contract-chooser",
+  "steps": [
+    { "action_type": "navigate", "intent": "Open the contract chooser", "value": "https://www.linkedin.com/talent/contract-chooser" },
+    { "action_type": "scroll", "intent": "settle (chooser rendered)" },
+    {
+      "action_type": "click",
+      "intent": "Select the Morsoft SRL-Recruiter contract",
+      "checkpoint": true,
+      "selector_chain": [
+        { "type": "css", "value": "button[data-live-test-contract-select='Morsoft SRL-Recruiter']" },
+        { "type": "css", "value": "button[data-live-test-contract-select*='Morsoft']" }
+      ]
+    },
+    { "action_type": "scroll", "intent": "settle after selecting contract" }
+  ]
+}
