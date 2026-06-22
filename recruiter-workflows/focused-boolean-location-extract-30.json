@@ -35,7 +35,7 @@
         },
         {
           "type": "css",
-          "value": "button[aria-label=\"Añadir Palabras clave del perfil u operadores booleanos\"]"
+          "value": "button[aria-label=\"A\u00f1adir Palabras clave del perfil u operadores booleanos\"]"
         }
       ],
       "success_condition": {
@@ -81,7 +81,7 @@
         },
         {
           "type": "css",
-          "value": "button[aria-label=\"Añadir ubicación del candidato\"]"
+          "value": "button[aria-label=\"A\u00f1adir ubicaci\u00f3n del candidato\"]"
         }
       ],
       "success_condition": {
@@ -112,7 +112,7 @@
         },
         {
           "type": "css",
-          "value": "input[placeholder^=\"Introducir una ubicación\"]"
+          "value": "input[placeholder^=\"Introducir una ubicaci\u00f3n\"]"
         }
       ],
       "value": "{{location}}"
@@ -176,7 +176,7 @@
         {
           "kind": "extract_strategy",
           "strategy": "recruiter_search_people",
-          "target_count": 30,
+          "target_count": 6,
           "max_pages": 4,
           "max_scroll_passes": 18
         }

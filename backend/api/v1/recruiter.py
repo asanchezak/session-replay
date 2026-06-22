@@ -208,7 +208,7 @@ async def run_demo(
 @router.post("/jobs/{job_id}/save-recommendations")
 async def save_recommendations(
     job_id: str,
-    count: int = 10,
+    count: int = 6,
     open_to_work: bool = False,
     db: AsyncSession = Depends(get_db),
 ):

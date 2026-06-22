@@ -1283,7 +1283,7 @@ class RecruiterPipelineService:
         )
         return str(run.id)
 
-    async def save_recommendations(self, job_id, *, count: int = 10,
+    async def save_recommendations(self, job_id, *, count: int = 6,
                                    require_open_to_work: bool = False) -> str | None:
         """Add the job's project RECOMMENDED matches (Automated Sourcing) to the pipeline.
         Resolves the project from prior runs, fires ONE daemon run of the recommendations
