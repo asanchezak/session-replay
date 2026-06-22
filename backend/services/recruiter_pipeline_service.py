@@ -331,7 +331,24 @@ class RecruiterPipelineService:
     async def _after_recommendations(self, run, pipeline, connector_id, job_id) -> dict:
         """Terminal hook: the recommended matches were added to the LinkedIn project —
         push them to Odoo as linkedin.lead (the strategy posted them under `people`, so
-        the SAME collector as search→save ingests them)."""
+        the SAME collector as search→save ingests them). If LinkedIn had no new
+        recommendations to add (an EXPECTED empty outcome), just post a soft note — it's
+        not a failure and shouldn't push leads."""
+        rec: dict = {}
+        try:
+            for row in await self.push._extraction_rows(run.id):
+                v = row.get("save_recommendations_result")
+                if isinstance(v, dict):
+                    rec = v
+        except Exception:  # noqa: BLE001
+            logger.debug("recommendations hook: no extraction for run %s", run.id, exc_info=True)
+        if rec.get("no_recommendations") or rec.get("reason") == "no_recommendations":
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
+                message="✨ No hay recomendaciones nuevas por ahora — LinkedIn no sugirió más candidatos para esta posición.",
+            )
+            return {"stage": "recommendations", "done": True, "no_recommendations": True, "leads": 0}
         lead_res = await self.push.push_recruiter_leads(
             run_id=run.id, job_id=job_id, connector_id=connector_id,
             source="recommendation",

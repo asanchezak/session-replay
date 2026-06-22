@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-19-note-compose-v6-paginate";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-22-recommendations-soft-empty";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -365,8 +365,14 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     case "recruiter_archive_all_in_project":
       // `ok` already accounts for partial progress; `more_remaining` is orthogonal.
       return ex.archive_all_result && ex.archive_all_result.ok ? ok() : fail("archive_all_no_progress");
-    case "recruiter_save_recommendations":
-      return ex.save_recommendations_result && ex.save_recommendations_result.ok ? ok() : fail("recommendations_none");
+    case "recruiter_save_recommendations": {
+      const r = ex.save_recommendations_result || {};
+      if (r.ok) return ok();
+      // "No recommendations available right now" = expected empty outcome, NOT a failure
+      // (don't fail the run / don't alarm Odoo). Real errors (walled seat, selectors) still fail.
+      if (r.no_recommendations || r.reason === "no_recommendations") return ok();
+      return fail(r.reason || "recommendations_none");
+    }
     case "recruiter_add_profile":
       return ex.add_profile_result && ex.add_profile_result.ok ? ok() : fail("add_profile_failed");
     case "recruiter_message_compose": {
@@ -2346,6 +2352,10 @@ async function saveRecommendations(page, options, orand, runtime) {
       review_url: reviewUrl,
       manage_url: manageUrl,
       people,  // {name, headline, profile_url, open_to_work} — backend pushes as linkedin.lead
+      // "No recommendations available right now" is an EXPECTED empty outcome (the review
+      // surface rendered but had nothing new to add), NOT a failure — flag it so stageVerdict
+      // doesn't fail the run and the backend posts a soft note.
+      no_recommendations: reason === "no_recommendations",
       ...(reason ? { reason } : {}),
     };
   } catch (e) {
