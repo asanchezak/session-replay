@@ -33,14 +33,14 @@ JOB DESCRIPTION:
 Return ONLY this JSON object (no markdown, no comments):
 {{
   "title_variants": ["up to 4 job-title strings a matching profile might use, incl. common synonyms/abbreviations"],
-  "must_have_skills": [["a REQUIRED capability as a GROUP of 2-5 INTERCHANGEABLE terms — synonyms, equivalent tools, and the umbrella concept — so a candidate matches if they have ANY term in the group. Ordered most→least important, max 6 groups."]],
-  "optional_skills": [["nice-to-have capability groups, max 4"]],
+  "must_have_skills": [["a REQUIRED capability as a GROUP of 2-5 INTERCHANGEABLE terms — synonyms, equivalent tools, and the umbrella concept — so a candidate matches if they have ANY term in the group. These are the ONLY skills the search REQUIRES (AND'd together), so put every genuinely-required capability here. Ordered most→least important, max 6 groups."]],
+  "optional_skills": [["TRUE nice-to-haves only (NOT required) — same group shape, max 4. These are recorded for context but NEVER filter candidates, so do NOT put any required capability here."]],
   "seniority": "one of: junior, mid, senior, lead, or null",
   "location": "country or region the role targets, or null",
   "years_min": integer or null,
   "years_max": integer or null,
   "exclude": ["titles/terms to NOT match, e.g. \\"Manager\\", \\"Intern\\", max 4"],
-  "recommended_tightness": "integer: how many of the above skill GROUPS to REQUIRE (AND together), most-important first. A focused senior/lead role with a distinctive stack → 4-6; a normal mid/senior role → 3-4; a broad/vague/junior role → 2. Never exceed the number of groups you listed."
+  "recommended_tightness": "integer: how many of the MUST_HAVE skill groups to REQUIRE (AND together), most-important first. A focused senior/lead role with a distinctive stack → 4-6; a normal mid/senior role → 3-4; a broad/vague/junior role → 2. Never exceed the number of must_have groups you listed (optional skills are NOT counted — they never gate)."
 }}
 
 HOW TO BUILD SKILL GROUPS (this is the important part — do it well):
@@ -167,11 +167,11 @@ class BooleanQueryBuilder:
         """Boolean = (title OR variants) AND (g1a OR g1b ...) AND (g2a OR ...) ... [NOT (excl)].
         Each AND clause is a GROUP of interchangeable terms (OR'd), so a candidate matches a
         clause with ANY of its terms — much better recall than AND'ing every exact tool.
-        `tightness` = how many groups are AND'd (musts first, then optionals); 0 = title-only."""
+        ONLY must-have groups are AND'd (`tightness` = how many); 0 = title-only. optional_skills
+        are nice-to-haves and NEVER gate the search (a hard AND on a nice-to-have over-narrows,
+        and LinkedIn boolean has no soft/ranking operator) — they're extracted for context only."""
         titles = [f'"{t}"' for t in spec.get("title_variants", [])]
-        groups = (
-            list(spec.get("must_have_skills", [])) + list(spec.get("optional_skills", []))
-        )[:_MAX_GROUPS]
+        groups = list(spec.get("must_have_skills", []))[:_MAX_GROUPS]
         t = max(0, min(int(tightness), len(groups)))
         parts: list[str] = []
         if titles:
@@ -190,10 +190,8 @@ class BooleanQueryBuilder:
         return query.strip()
 
     def max_tightness(self, spec: dict) -> int:
-        return min(
-            _MAX_GROUPS,
-            len(spec.get("must_have_skills", [])) + len(spec.get("optional_skills", [])),
-        )
+        # Only must-have groups are AND'd, so the strictness ceiling is the # of must groups.
+        return min(_MAX_GROUPS, len(spec.get("must_have_skills", [])))
 
     async def build(self, corpus: str, fallback_title: str = "", start_tightness: int = 2) -> dict:
         """One-shot: corpus → {query, spec, tightness}.

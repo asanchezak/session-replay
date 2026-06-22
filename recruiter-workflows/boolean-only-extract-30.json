@@ -1,0 +1,106 @@
+{
+  "name": "Recruiter: BOOLEAN-only search -> extract 30 (global, no location facet)",
+  "description": "Copy of focused-boolean-location-extract-30 with the location-facet block removed, for GLOBAL boolean-only searches (param: boolean_query). For A/B testing the boolean constructor. NOT in registry.",
+  "target_url": "https://www.linkedin.com/talent/home",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Advanced search",
+      "value": "https://www.linkedin.com/talent/search/advanced"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 2"
+    },
+    {
+      "action_type": "click",
+      "intent": "Open keyword/boolean facet",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "[data-test-facet-keywords] button[data-test-facet-edit]"
+        },
+        {
+          "type": "css",
+          "value": "button[aria-label=\"Add Profile keywords or boolean\"]"
+        },
+        {
+          "type": "css",
+          "value": "button[aria-label=\"A\u00f1adir Palabras clave del perfil u operadores booleanos\"]"
+        }
+      ],
+      "success_condition": {
+        "type": "selector_exists",
+        "selector": "textarea[data-test-free-text-single-value-facet-textarea]"
+      },
+      "checkpoint": true
+    },
+    {
+      "action_type": "scroll",
+      "intent": "delay keyword textarea 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "delay keyword textarea 2"
+    },
+    {
+      "action_type": "type",
+      "intent": "Boolean keywords + Enter to commit",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "textarea[data-test-free-text-single-value-facet-textarea]"
+        }
+      ],
+      "value": "{{boolean_query}}\n"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle keyword commit"
+    },
+    {
+      "action_type": "click",
+      "intent": "Run the advanced search",
+      "selector_chain": [
+        {
+          "type": "css",
+          "value": "button[data-test-save-advanced-button]"
+        },
+        {
+          "type": "css",
+          "value": "button.advanced-search__header--actions-primary"
+        }
+      ]
+    },
+    {
+      "action_type": "scroll",
+      "intent": "results load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "results load 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Extract 30 candidates + total count",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_search_people",
+          "target_count": 30,
+          "max_pages": 4,
+          "max_scroll_passes": 18
+        }
+      ]
+    }
+  ]
+}
