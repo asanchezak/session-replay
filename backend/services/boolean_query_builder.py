@@ -20,6 +20,15 @@ from ai.client import get_ai_provider
 
 logger = logging.getLogger(__name__)
 
+
+class BooleanBuildError(Exception):
+    """The AI step required to build the JD boolean failed (e.g. OpenAI
+    insufficient_quota / 429, network, or an unusable response). Raised instead of
+    silently degrading to a title-only search — a title-only boolean runs a poor,
+    overly-broad search on the sensitive account. The pipeline catches this and FAILS
+    the run (visible + relaunchable) instead of executing the process with no AI."""
+
+
 _SYSTEM = (
     "You are a senior technical sourcer building a LinkedIn Recruiter boolean "
     "search. You output ONLY strict JSON, no prose."
@@ -131,10 +140,14 @@ class BooleanQueryBuilder:
                 system=_SYSTEM,
                 max_tokens=700,
             )
-            spec = self._parse(resp.content)
-        except Exception:
-            logger.exception("boolean builder: AI extract failed — title-only fallback")
-            spec = {}
+        except Exception as exc:
+            # Do NOT swallow this into a title-only fallback: without the AI we can't
+            # build a real boolean, and a title-only search is a poor/broad search on
+            # the sensitive account. Fail loudly so the run is marked failed and not
+            # executed (e.g. OpenAI insufficient_quota). See BooleanBuildError.
+            logger.error("boolean builder: AI extract call failed — aborting (no title-only fallback): %s", exc)
+            raise BooleanBuildError(f"AI extraction failed: {exc}") from exc
+        spec = self._parse(resp.content)
         # Normalize + defaults
         spec["title_variants"] = _clean_terms(spec.get("title_variants"), _MAX_TITLES) or (
             [fallback_title.strip()] if fallback_title.strip() else []

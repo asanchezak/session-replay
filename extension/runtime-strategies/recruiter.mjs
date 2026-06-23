@@ -423,11 +423,38 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
       const m = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/);
       return m ? "https://www.linkedin.com" + m[0] : "";
     };
+    // Result count. LinkedIn Recruiter ABBREVIATES large counts as "26 mil+ resultados"
+    // (es) / "26K+ results" (en) / "1,2 millones". The old regex couldn't parse the
+    // multiplier word/letter, so it skipped the real header and matched a smaller
+    // sub-count elsewhere on the page (e.g. a spotlight "199 resultados") — making us
+    // think a broad 26k+ search was a precise 199. Parse the multiplier and take the
+    // LARGEST match (the header total ≥ any sub-facet count).
     let total = null;
-    const cm = (document.body.innerText || "").match(
-      /([\d][\d.,]*)\s*\+?\s*(?:results|resultados|candidates|candidatos|perfiles|matches)/i,
-    );
-    if (cm) { const n = parseInt(cm[1].replace(/[.,]/g, ""), 10); if (!isNaN(n)) total = n; }
+    {
+      const body = (document.body.innerText || "");
+      const re = /([\d][\d.,\s]*?)\s*(millones|millón|mill|mil|k|m|b)?\s*\+?\s*(?:results?|resultados?|candidates?|candidatos?|perfiles|matches)/gi;
+      let m, best = null;
+      while ((m = re.exec(body)) !== null) {
+        const mult = (m[2] || "").toLowerCase();
+        let n;
+        if (mult) {
+          // with a multiplier the number can be decimal ("1,2 mil"=1200): treat , / . as the decimal point
+          n = parseFloat(m[1].replace(/\s/g, "").replace(",", "."));
+        } else {
+          // a plain integer count ("26,000" / "199"): , and . are thousands separators
+          n = parseInt(m[1].replace(/[.,\s]/g, ""), 10);
+        }
+        if (isNaN(n)) continue;
+        if (mult === "mil") n *= 1e3;
+        else if (mult.startsWith("mill")) n *= 1e6;
+        else if (mult === "k") n *= 1e3;
+        else if (mult === "m") n *= 1e6;
+        else if (mult === "b") n *= 1e9;
+        n = Math.round(n);
+        if (best === null || n > best) best = n;
+      }
+      if (best !== null) total = best;
+    }
     const cards = [];
     for (const card of Array.from(document.querySelectorAll(CARD))) {
       const link = card.querySelector('a[href*="/talent/profile/"], a[href*="/talent/search/profile/"]');

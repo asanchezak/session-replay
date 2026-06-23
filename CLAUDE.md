@@ -348,6 +348,15 @@ The backend runs on **AWS** (single EC2 + docker-compose), and everything reache
 at the stable URL **`https://52-5-45-84.sslip.io`**. Infra IDs / secrets / teardown
 are in memory `project_aws_backend_deploy`.
 
+> **TWO environments now exist:** DEV (`52-5-45-84.sslip.io` → qaodoo) and PROD
+> (`54-211-23-18.sslip.io` → morsoft), separate EC2 boxes, served by ONE shared
+> multi-backend daemon/seat. Full runbook — per-env IDs, how to deploy backend/frontend/
+> daemon to each, DB seeding, provisioning a new box, secrets, gotchas, teardown — is
+> **`docs/deploy-environments.md`** (bootstrap script `deploy/ec2-bootstrap.sh`). Read it
+> before any cross-environment deploy. `deploy/redeploy.sh` takes `EIP/DOMAIN/PEM/API_KEY`
+> overrides (default = DEV); prod = `EIP=54.211.23.18 DOMAIN=54-211-23-18.sslip.io
+> PEM=deploy/sr-prod.pem API_KEY=<prod-key> ./deploy/redeploy.sh`.
+
 **Standing rule: after ANY change, redeploy so every part stays up to date** — the
 backend on AWS AND the clients that point at it (extension, daemon on Fernanda's host,
 frontend). Don't leave the box running stale code.

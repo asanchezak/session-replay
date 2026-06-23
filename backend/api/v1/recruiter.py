@@ -40,6 +40,14 @@ class AddNoteRequest(BaseModel):
     save: bool = False
 
 
+class StartPipelineRequest(BaseModel):
+    # MANUAL boolean override — the operator supplies the LinkedIn boolean text so the
+    # pipeline runs without calling OpenAI (used when the AI is out of quota). Required.
+    boolean_query: str
+    # Optional location facet override (e.g. "Costa Rica"); else derived from the Odoo job.
+    location: str | None = None
+
+
 class InboxReply(BaseModel):
     profile_url: str | None = None
     name: str | None = None
@@ -88,6 +96,22 @@ async def remove_candidate(
             "reason": "missing candidate name or no project for this job",
         }
     return {"status": "queued", "job_id": req.job_id, "run_id": run_id}
+
+
+@router.post("/jobs/{job_id}/start-pipeline")
+async def start_pipeline(
+    job_id: str,
+    req: StartPipelineRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Start the recruiter pipeline (create-project → search → save) for an existing job
+    using a MANUALLY-supplied boolean — NO OpenAI call. For when the AI is out of quota:
+    the operator passes the boolean text. Resolves the connector + job title automatically.
+    Returns the create-project run id (or an error/skip reason)."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.start_manual(job_id, boolean_query=req.boolean_query, location=req.location)
+    await db.commit()
+    return res
 
 
 @router.post("/jobs/{job_id}/send-messages")
@@ -238,16 +262,26 @@ async def pipeline_status(
     return await svc.pipeline_status(job_id)
 
 
+class PreviewCountRequest(BaseModel):
+    # MANUAL boolean to count verbatim (NO AI) — iterate selectivity while OpenAI is down.
+    boolean_query: str | None = None
+    tightness: int = 4
+
+
 @router.post("/jobs/{job_id}/preview-count")
 async def preview_count(
     job_id: str,
     tightness: int = 4,
+    req: PreviewCountRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Cheap strictness calibration: build the JD boolean at `tightness` and fire a
-    COUNT-ONLY search (no 30-candidate extract, no save, no lead push). Returns the
-    run id + boolean; poll the run's extraction for total_count."""
+    """Cheap strictness calibration: COUNT-ONLY search (no 30-candidate extract, no save,
+    no lead push). Either builds the JD boolean at `tightness` (AI) or, when the body
+    carries `boolean_query`, counts that text verbatim with NO AI. Returns the run id +
+    boolean; poll the run's extraction for total_count."""
     svc = RecruiterPipelineService(db)
-    res = await svc.preview_count(job_id, tightness)
+    boolean_query = req.boolean_query if req else None
+    t = (req.tightness if req and req.boolean_query is None else tightness)
+    res = await svc.preview_count(job_id, t, boolean_query=boolean_query)
     await db.commit()
     return res

@@ -1,5 +1,10 @@
 """Unit tests for the grouped boolean assembly (OR-clusters instead of a rigid AND chain)."""
-from services.boolean_query_builder import BooleanQueryBuilder, _clean_groups
+import asyncio
+
+import pytest
+
+from services import boolean_query_builder as bqb
+from services.boolean_query_builder import BooleanBuildError, BooleanQueryBuilder, _clean_groups
 
 
 def test_assemble_groups_as_or_clusters():
@@ -58,6 +63,24 @@ def test_optionals_never_gate_even_at_high_tightness():
         'AND ("Docker" OR "Kubernetes") NOT ("Manager")'
     )
     assert b.max_tightness(spec) == 3  # only must groups count
+
+
+def test_ai_failure_raises_instead_of_title_only(monkeypatch):
+    """If the AI call fails (e.g. OpenAI 429 insufficient_quota) the builder MUST raise
+    BooleanBuildError — NOT silently degrade to a title-only search (which would run a
+    poor, broad search on the sensitive account). The pipeline relies on this to fail
+    the run instead of executing the process with no AI."""
+    class _Boom:
+        async def generate(self, *a, **k):
+            raise RuntimeError("Error code: 429 - insufficient_quota")
+
+    monkeypatch.setattr(bqb, "get_ai_provider", lambda: _Boom())
+    b = BooleanQueryBuilder()
+    with pytest.raises(BooleanBuildError):
+        asyncio.run(b.extract_spec("Data Engineer; Kafka, Airflow, AWS", fallback_title="Data Engineer"))
+    # build() must propagate the same error (not swallow it)
+    with pytest.raises(BooleanBuildError):
+        asyncio.run(b.build("Data Engineer; Kafka, Airflow, AWS", fallback_title="Data Engineer"))
 
 
 def test_clean_groups_normalizes_and_strips_versions():

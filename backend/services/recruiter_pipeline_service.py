@@ -224,8 +224,15 @@ class RecruiterPipelineService:
         )
 
     # -------------------------------------------------------------------- start
-    async def start(self, connector_id, job_payload: dict) -> str | None:
-        """Kick off the pipeline for a new position: create the -EZ project run."""
+    async def start(self, connector_id, job_payload: dict, *,
+                    boolean_query: str | None = None,
+                    location: str | None = None) -> str | None:
+        """Kick off the pipeline for a new position: create the -EZ project run.
+
+        `boolean_query` (optional) is a MANUAL boolean override — when given, the AI
+        extraction is skipped entirely (used when OpenAI is unavailable / out of quota:
+        the operator supplies the boolean text). `location` optionally overrides the
+        search location facet (else derived from the Odoo job_location)."""
         position = self.position_from_payload(job_payload)
         job_id = str(job_payload.get("job_id") or job_payload.get("id") or "")
         if not position or not job_id:
@@ -269,6 +276,65 @@ class RecruiterPipelineService:
             "candidate_count": candidate_count,
             "job_payload": job_payload,
         }
+        # Build the JD boolean UP FRONT (it needs the AI). If the AI is unavailable
+        # (e.g. OpenAI insufficient_quota / 429), FAIL the pipeline now — before creating
+        # the LinkedIn project or touching the seat — instead of running a degraded
+        # title-only search. The built boolean is stashed for the search step to reuse
+        # (one AI call). Only when the advanced (boolean) search is configured.
+        if settings.recruiter_advanced_search_workflow_id:
+            if boolean_query and boolean_query.strip():
+                # MANUAL override — skip the AI entirely (e.g. OpenAI out of quota). Still
+                # fetch the location facet from Odoo (no AI). tightness=None disables the
+                # calibration reruns (the operator's boolean is used verbatim).
+                try:
+                    _, _, job_location = await self._fetch_job_corpus(job_id, connector_id)
+                except Exception:
+                    job_location = ""
+                if location is not None:
+                    job_location = location
+                pipeline["search_spec"] = {}
+                pipeline["search_tightness"] = None
+                pipeline["search_query"] = boolean_query.strip()
+                pipeline["search_reruns"] = 0
+                pipeline["search_manual"] = True
+                pipeline["job_location"] = job_location
+                logger.info(
+                    "recruiter pipeline: MANUAL boolean for job %s (location=%r): %s",
+                    job_id, job_location, boolean_query.strip(),
+                )
+            else:
+                from services.boolean_query_builder import BooleanBuildError, BooleanQueryBuilder
+                corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
+                try:
+                    built = await BooleanQueryBuilder().build(
+                        corpus, fallback_title=title or position,
+                        start_tightness=settings.recruiter_search_start_tightness,
+                    )
+                except BooleanBuildError as exc:
+                    logger.error(
+                        "recruiter pipeline: boolean build failed for job %s — NOT starting "
+                        "(no project created): %s", job_id, exc,
+                    )
+                    await self._push_flow_status(
+                        job_id=job_id, connector_id=connector_id, status="failed",
+                        event_kind=EVENT_CREATE_PROJECT, error_summary=str(exc),
+                        message="❌ No se pudo generar la búsqueda booleana: la IA no está "
+                                "disponible (sin cuota de OpenAI). Proceso detenido — no se "
+                                "creó el proyecto ni se ejecutó la búsqueda. Reintentar cuando "
+                                "haya cuota.",
+                    )
+                    return None
+                if location is not None:
+                    job_location = location
+                pipeline["search_spec"] = built["spec"]
+                pipeline["search_tightness"] = built["tightness"]
+                pipeline["search_query"] = built["query"]
+                pipeline["search_reruns"] = 0
+                pipeline["job_location"] = job_location
+                logger.info(
+                    "recruiter pipeline: prebuilt boolean for job %s (t=%s): %s",
+                    job_id, built["tightness"], built["query"],
+                )
         run = await self._create_pipeline_run(
             workflow_id=wf,
             event_kind=EVENT_CREATE_PROJECT,
@@ -286,6 +352,38 @@ class RecruiterPipelineService:
             message="🛠️ Creating the LinkedIn Recruiter project for this position…",
         )
         return str(run.id)
+
+    async def start_manual(self, job_id, boolean_query: str,
+                           location: str | None = None) -> dict:
+        """Start the pipeline for an existing job with a MANUALLY-supplied boolean (no AI).
+        Resolves the connector + job title from prior runs / Odoo, then calls start().
+        Used when OpenAI is unavailable: the operator provides the boolean text. Returns
+        {run_id} or {skipped/error}."""
+        if not boolean_query or not boolean_query.strip():
+            return {"error": "boolean_query is required"}
+        job_id = str(job_id)
+        ctx = await self._gather_job_context(job_id)
+        connector_id = ctx.get("connector_id") or await self._latest_recruiter_connector()
+        if not connector_id:
+            return {"error": "could not resolve a connector for this job"}
+        # Title for the project name / position — prefer Odoo (no AI), fall back to prior runs.
+        title = ""
+        try:
+            _, title, _ = await self._fetch_job_corpus(job_id, connector_id)
+        except Exception:
+            pass
+        position = title or ctx.get("position") or ""
+        if not position:
+            return {"error": "could not resolve the job title/position"}
+        if await self._has_active_pipeline_run(job_id):
+            return {"skipped": "active pipeline run already exists for this job"}
+        job_payload = {"job_id": job_id, "name": position, "job_title": position}
+        run_id = await self.start(
+            connector_id, job_payload, boolean_query=boolean_query, location=location,
+        )
+        if not run_id:
+            return {"error": "pipeline did not start (see logs)"}
+        return {"run_id": run_id, "boolean": boolean_query.strip(), "position": position}
 
     # ------------------------------------------------------------------ advance
     async def advance(self, run: ExecutionRun) -> dict:
@@ -484,21 +582,47 @@ class RecruiterPipelineService:
         # the legacy title-only Copilot search when not configured.
         adv_wf = settings.recruiter_advanced_search_workflow_id
         if adv_wf:
-            from services.boolean_query_builder import BooleanQueryBuilder
-            corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
-            built = await BooleanQueryBuilder().build(
-                corpus, fallback_title=title or pipeline.get("position", ""),
-                start_tightness=settings.recruiter_search_start_tightness,
-            )
-            pipeline["search_spec"] = built["spec"]
-            pipeline["search_tightness"] = built["tightness"]
-            pipeline["search_query"] = built["query"]
-            pipeline["search_reruns"] = 0
+            # The boolean is normally prebuilt at pipeline start() (so an AI/quota
+            # failure aborts BEFORE the project is created). Reuse it. Only build here as
+            # a fallback for pipelines started before this path existed / relaunches with
+            # no stash — and there too, FAIL (never run a title-only search) if the AI is
+            # unavailable.
+            if pipeline.get("search_query"):
+                query = pipeline["search_query"]
+                job_location = pipeline.get("job_location") or ""
+                tightness = pipeline.get("search_tightness")
+            else:
+                from services.boolean_query_builder import BooleanBuildError, BooleanQueryBuilder
+                corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
+                try:
+                    built = await BooleanQueryBuilder().build(
+                        corpus, fallback_title=title or pipeline.get("position", ""),
+                        start_tightness=settings.recruiter_search_start_tightness,
+                    )
+                except BooleanBuildError as exc:
+                    logger.error(
+                        "recruiter pipeline: boolean build failed for job %s — search NOT "
+                        "started: %s", job_id, exc,
+                    )
+                    await self._push_flow_status(
+                        job_id=job_id, connector_id=connector_id, status="failed",
+                        event_kind=EVENT_SEARCH, error_summary=str(exc),
+                        message="❌ No se pudo generar la búsqueda booleana: la IA no está "
+                                "disponible (sin cuota de OpenAI). Búsqueda no ejecutada.",
+                    )
+                    return {"stage": "create_project", "boolean_failed": True}
+                pipeline["search_spec"] = built["spec"]
+                pipeline["search_tightness"] = built["tightness"]
+                pipeline["search_query"] = built["query"]
+                pipeline["search_reruns"] = 0
+                pipeline["job_location"] = job_location
+                query = built["query"]
+                tightness = built["tightness"]
             logger.info(
                 "recruiter pipeline: boolean for job %s (t=%s): %s",
-                job_id, built["tightness"], built["query"],
+                job_id, tightness, query,
             )
-            search_params = {"boolean_query": built["query"]}
+            search_params = {"boolean_query": query}
             # Location facet from the Odoo job_location (cr→Costa Rica, latam→Latin
             # America, global→skip). Only thread it when non-empty: a blank location is
             # OMITTED so the search workflow's skip_if_blank:location steps are pruned
@@ -533,7 +657,7 @@ class RecruiterPipelineService:
                 message="🔍 Project created — searching for candidates on LinkedIn…",
             )
             return {"stage": "create_project", "project_link": link_res,
-                    "next_run": str(search_run.id), "boolean": built["query"]}
+                    "next_run": str(search_run.id), "boolean": query}
 
         search_wf = settings.recruiter_search_workflow_id
         if not search_wf:
@@ -1372,23 +1496,31 @@ class RecruiterPipelineService:
         return {"job_id": str(job_id), "project_url": project_url,
                 "search_query": search_query, "zero_results": zero_results, "runs": runs}
 
-    async def preview_count(self, job_id, tightness: int) -> dict:
-        """Cheap strictness calibration: build the boolean from the job's JD at the
-        given tightness and fire a COUNT-ONLY search (one page, no 30-candidate
-        pagination, no save, no lead push). Returns {run_id, boolean, tightness};
-        poll the run's extraction for total_count. The count-only flag is patched onto
-        the extract method in this run's snapshot, so no separate workflow is needed."""
+    async def preview_count(self, job_id, tightness: int, boolean_query: str | None = None) -> dict:
+        """Cheap strictness calibration: fire a COUNT-ONLY search (one page, no 30-candidate
+        pagination, no save, no lead push) and return {run_id, boolean, tightness}; poll the
+        run's extraction for total_count. The boolean is either built from the JD at `tightness`
+        (AI) OR, when `boolean_query` is given, used verbatim — a MANUAL count check with NO AI
+        (iterate the boolean's selectivity while OpenAI is unavailable). Count-only is patched
+        onto the extract method in this run's snapshot, so no separate workflow is needed."""
         adv_wf = settings.recruiter_advanced_search_workflow_id
         if not adv_wf:
             return {"error": "recruiter_advanced_search_workflow_id unset"}
         ctx = await self._gather_job_context(job_id)
         connector_id = ctx.get("connector_id")
         corpus, title, job_location = await self._fetch_job_corpus(job_id, connector_id)
-        from services.boolean_query_builder import BooleanQueryBuilder
-        b = BooleanQueryBuilder()
-        spec = await b.extract_spec(corpus, fallback_title=title)
-        t = max(0, min(int(tightness), b.max_tightness(spec)))
-        query = b.assemble(spec, t)
+        if boolean_query and boolean_query.strip():
+            query = boolean_query.strip()
+            t = None
+        else:
+            from services.boolean_query_builder import BooleanBuildError, BooleanQueryBuilder
+            b = BooleanQueryBuilder()
+            try:
+                spec = await b.extract_spec(corpus, fallback_title=title)
+            except BooleanBuildError as exc:
+                return {"error": "ai_unavailable", "detail": str(exc)}
+            t = max(0, min(int(tightness), b.max_tightness(spec)))
+            query = b.assemble(spec, t)
         params = {"boolean_query": query}
         location = self._resolve_search_location(job_location)
         if location:

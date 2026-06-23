@@ -15,6 +15,28 @@ interface SearchResult {
   path: string;
 }
 
+// Which environment is this dashboard pointing at? Explicit VITE_ENV_LABEL (baked per
+// build: DEV / PROD) wins; otherwise infer from the host it's served on. PROD shows red
+// (caution — live LinkedIn account + real Odoo), DEV blue, anything else gray.
+function resolveEnv(): { label: string; cls: string } {
+  let label = ((import.meta.env.VITE_ENV_LABEL as string | undefined) || "").toUpperCase();
+  if (!label) {
+    const h = window.location.hostname;
+    if (h.includes("54-211-23-18")) label = "PROD";
+    else if (h.includes("52-5-45-84")) label = "DEV";
+    else label = "LOCAL";
+  }
+  const isProd = label === "PROD" || label === "PRODUCTION";
+  const cls = isProd
+    ? "bg-[#E74C3C] text-white"
+    : label === "DEV"
+      ? "bg-[#3B82F6] text-white"
+      : "bg-[#6B7280] text-white";
+  return { label, cls };
+}
+
+const ENV = resolveEnv();
+
 export default function AppShell() {
   const [waitingRun, setWaitingRun] = useState<{
     id: string;
@@ -28,6 +50,11 @@ export default function AppShell() {
   const { request } = useApi();
   const navigate = useNavigate();
   const location = window.location;
+
+  // Prefix the browser tab title with the env so DEV/PROD tabs are distinguishable.
+  useEffect(() => {
+    document.title = `[${ENV.label}] Session Replay`;
+  }, []);
 
   const checkWaitingRuns = useCallback(async () => {
     try {
@@ -146,8 +173,14 @@ function Sidebar() {
 
   return (
     <nav className="w-56 bg-[#1A1D27] border-r border-[#2D3148] flex flex-col p-4 gap-1" role="navigation" aria-label="Main navigation">
-      <div className="text-[#E8EAED] font-semibold text-base mb-6 px-3">
-        Session Replay
+      <div className="mb-6 px-3">
+        <div className="text-[#E8EAED] font-semibold text-base">Session Replay</div>
+        <span
+          className={`inline-block mt-1.5 text-[10px] font-bold uppercase tracking-wider rounded px-1.5 py-0.5 leading-none ${ENV.cls}`}
+          title={`Environment: ${ENV.label}`}
+        >
+          {ENV.label}
+        </span>
       </div>
       {navItems.map((item) => {
         const Icon = item.icon;

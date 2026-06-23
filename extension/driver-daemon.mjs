@@ -50,8 +50,15 @@ const __dirname = path.dirname(__filename);
 const PROFILE_DIR = path.resolve(__dirname, ".linkedin-profile");
 const RUNTIME_STRATEGIES_DIR = path.resolve(__dirname, "runtime-strategies");
 
-const BACKEND = process.env.BACKEND || "http://localhost:8081";
-const API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
+// Multi-backend: the ONE seat/daemon serves several environments (DEV + PROD). Each
+// backend is an endpoint {url, key}. The daemon drives ONE run at a time, so BACKEND/
+// API_KEY/HEADERS below are MUTABLE "active" pointers — setActive() repoints them at
+// the endpoint we're currently polling or driving, so every `${BACKEND}` call (start/
+// step/extract/complete/fail/artifacts/heartbeat) lands on that run's origin backend.
+// Add a 2nd env via BACKEND_2/API_KEY_2 (e.g. dev primary + prod secondary). While
+// idle we poll AND heartbeat every endpoint; while driving, only the run's endpoint.
+let BACKEND = process.env.BACKEND || "http://localhost:8081";
+let API_KEY = process.env.API_KEY || "dev-api-key-change-in-production";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || "5000");
 // Browser viewport. Default 1440x900 matches a real Mac display. On a
 // non-interactive Windows session the OS reports a small generic screen
@@ -97,7 +104,20 @@ const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 // findPendingRun (we require an explicit match to avoid misrouting).
 const OPERATOR_ID = process.env.OPERATOR_ID || "";
 
-const HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
+let HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
+// Endpoints this daemon serves. ENDPOINTS[0] = the primary (BACKEND/API_KEY, dev by
+// default); a 2nd appears when BACKEND_2 is set (prod). Captured at module load BEFORE
+// any setActive() so the primary's original values are preserved as we mutate BACKEND.
+const ENDPOINTS = [{ url: BACKEND, key: API_KEY }];
+if (process.env.BACKEND_2) {
+  ENDPOINTS.push({ url: process.env.BACKEND_2, key: process.env.API_KEY_2 || API_KEY });
+}
+// Repoint the active backend (used by every `${BACKEND}` URL + the X-API-Key header).
+function setActive(ep) {
+  BACKEND = ep.url;
+  API_KEY = ep.key;
+  HEADERS = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
 let drivingRunId = null;
@@ -207,11 +227,22 @@ async function fetchJson(url, init = {}) {
   return r.json();
 }
 
-async function postHeartbeat({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }) {
-  await fetchJson(`${BACKEND}/v1/daemon/heartbeat`, {
+// Heartbeat to a SPECIFIC endpoint (explicit url+key, so it doesn't disturb the
+// active pointer). The headers override sets X-API-Key to ep.key for this call only.
+async function postHeartbeat(ep, { worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }) {
+  await fetchJson(`${ep.url}/v1/daemon/heartbeat`, {
     method: "POST",
+    headers: { "X-API-Key": ep.key },
     body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until, operator_id: OPERATOR_ID }),
   });
+}
+
+// While idle, heartbeat EVERY endpoint (so each backend's /daemon/status sees this
+// worker); while driving a run, heartbeat only that run's backend (the active one).
+async function heartbeatAll() {
+  const payload = { worker_id: WORKER_ID, polling: drivingRunId === null, driving_run_id: drivingRunId, ...circuitInfo() };
+  const targets = drivingRunId === null ? ENDPOINTS : [{ url: BACKEND, key: API_KEY }];
+  await Promise.allSettled(targets.map((ep) => postHeartbeat(ep, payload)));
 }
 
 // Pause a run on the backend (mirrors the extension's apiClient.pauseRun). Used
@@ -1879,7 +1910,7 @@ async function driveRun(run, behavior) {
 // lives in the hot-loaded behavior module (keepAliveTick) so its cadence + the future
 // reply-scan can be tuned by `scp`. The host applies its returned deltas below.
 
-console.log(`[daemon] polling ${BACKEND}/v1/runs every ${POLL_INTERVAL_MS}ms`);
+console.log(`[daemon] polling ${ENDPOINTS.map((e) => e.url).join(", ")}/v1/runs every ${POLL_INTERVAL_MS}ms`);
 if (RECRUITER_KEEPALIVE) console.log(`[daemon] Recruiter keep-alive ON (ping /talent every ${RECRUITER_PING_MIN_MS / 60000}-${RECRUITER_PING_MAX_MS / 60000}m while idle)`);
 console.log(`[daemon] watching for runs with origin.event_kind in {new_job_position, linkedin_lead_search}`);
 if (DISABLE_INTER_RUN_COOLDOWN) {
@@ -1887,12 +1918,7 @@ if (DISABLE_INTER_RUN_COOLDOWN) {
 }
 
 setInterval(() => {
-  postHeartbeat({
-    worker_id: WORKER_ID,
-    polling: drivingRunId === null,
-    driving_run_id: drivingRunId,
-    ...circuitInfo(),
-  }).catch((err) => {
+  heartbeatAll().catch((err) => {
     console.error("[daemon] heartbeat error:", err.message);
   });
 }, POLL_INTERVAL_MS);
@@ -1902,25 +1928,39 @@ const skipLog = (msg) => { if (msg !== lastSkipLog) { console.log(`[daemon] ${ms
 
 while (true) {
   try {
-    await postHeartbeat({
-      worker_id: WORKER_ID,
-      polling: drivingRunId === null,
-      driving_run_id: drivingRunId,
-      ...circuitInfo(),
-    });
+    await heartbeatAll();
 
     // STRICT fail-safe: load the hot behavior module first. If it's broken/missing/
     // export-drifted, do NOT claim/drive/keepalive this tick — only poll + heartbeat
     // (already done above) + log loudly; self-heals when a good file is synced.
     const behavior = await loadBehaviorModule();
     if (!behavior) { await sleep(POLL_INTERVAL_MS); continue; }
+
+    // Poll EVERY endpoint (dev + prod) for a claimable run. setActive() binds BACKEND/
+    // HEADERS to the endpoint being polled; the FIRST endpoint that yields a run keeps
+    // the binding so the whole run (claim → drive → terminal) reports back there. Build
+    // the behavior api fresh AFTER each setActive so api.config.BACKEND matches.
+    let run = null;
+    for (const ep of ENDPOINTS) {
+      setActive(ep);
+      let candidates;
+      try {
+        candidates = await fetchPendingRunCandidates();
+      } catch (err) {
+        console.error(`[daemon] poll ${ep.url} error:`, err.message);
+        continue;
+      }
+      const picked = behavior.pickPendingRun(candidates, buildBehaviorApi());
+      if (picked) { run = picked; break; }
+    }
+    // No run anywhere → bind to the primary for the idle keep-alive / reply-scan.
+    if (!run) setActive(ENDPOINTS[0]);
     const api = buildBehaviorApi();
 
-    // Pick the pending run first so a user-initiated GENERIC daemon run (dashboard
-    // "Run") can bypass the account-wide anti-bot gates — circuit / working-hours /
-    // cooldown / budget exist to protect the shared LinkedIn account, NOT generic
-    // non-LinkedIn runs the user explicitly launched.
-    const run = behavior.pickPendingRun(await fetchPendingRunCandidates(), api);
+    // (run already picked above, across all endpoints) A user-initiated GENERIC daemon
+    // run (dashboard "Run") can bypass the account-wide anti-bot gates — circuit /
+    // working-hours / cooldown / budget exist to protect the shared LinkedIn account,
+    // NOT generic non-LinkedIn runs the user explicitly launched.
     const o = (run && run.origin) || {};
     const isUserGeneric = !!run
       && o.execution_target === "daemon"
