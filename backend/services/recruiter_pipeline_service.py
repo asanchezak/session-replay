@@ -309,6 +309,7 @@ class RecruiterPipelineService:
                     built = await BooleanQueryBuilder().build(
                         corpus, fallback_title=title or position,
                         start_tightness=settings.recruiter_search_start_tightness,
+                        location=job_location,
                     )
                 except BooleanBuildError as exc:
                     logger.error(
@@ -598,6 +599,7 @@ class RecruiterPipelineService:
                     built = await BooleanQueryBuilder().build(
                         corpus, fallback_title=title or pipeline.get("position", ""),
                         start_tightness=settings.recruiter_search_start_tightness,
+                        location=job_location,
                     )
                 except BooleanBuildError as exc:
                     logger.error(

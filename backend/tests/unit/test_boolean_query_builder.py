@@ -83,6 +83,51 @@ def test_ai_failure_raises_instead_of_title_only(monkeypatch):
         asyncio.run(b.build("Data Engineer; Kafka, Airflow, AWS", fallback_title="Data Engineer"))
 
 
+def test_location_strictness_mapping():
+    assert bqb._location_strictness("global")["level"] == "global"
+    assert bqb._location_strictness("")["level"] == "global"        # unknown/empty → strictest
+    assert bqb._location_strictness("latam")["level"] == "region"
+    assert bqb._location_strictness("Latin America")["level"] == "region"
+    assert bqb._location_strictness("cr")["level"] == "country"
+    assert bqb._location_strictness("Costa Rica")["level"] == "country"
+
+
+def test_assemble_caps_or_terms_per_group():
+    spec = {
+        "title_variants": ["Data Engineer"],
+        "must_have_skills": [["Kafka", "Airflow", "Spark"], ["AWS", "GCP", "Azure"]],
+        "optional_skills": [],
+    }
+    q = BooleanQueryBuilder().assemble(spec, tightness=2, max_terms_per_group=2)
+    # each AND group trimmed to its top-2 OR terms; the title group is NOT capped
+    assert q == '("Data Engineer") AND ("Kafka" OR "Airflow") AND ("AWS" OR "GCP")'
+
+
+def test_build_location_drives_strictness(monkeypatch):
+    import json as _json
+    spec_json = _json.dumps({
+        "title_variants": ["Data Engineer", "ML Engineer"],
+        "must_have_skills": [["Kafka", "Airflow", "Spark"], ["AWS", "GCP"],
+                             ["Kubernetes", "Docker"], ["MLOps", "model serving"]],
+        "optional_skills": [],
+        "recommended_tightness": 2,
+    })
+
+    class _P:
+        async def generate(self, *a, **k):
+            return type("R", (), {"content": spec_json})()
+
+    monkeypatch.setattr(bqb, "get_ai_provider", lambda: _P())
+    b = BooleanQueryBuilder()
+    g = asyncio.run(b.build("corpus", location="global"))
+    c = asyncio.run(b.build("corpus", location="cr"))
+    # GLOBAL: AND every must-have group (overrides the AI's rec=2) + cap ORs to 2 → strictest
+    assert g["tightness"] == 4 and g["max_terms_per_group"] == 2 and g["location_level"] == "global"
+    # COUNTRY (cr): loose — ≤2 groups, full OR recall (the location facet narrows)
+    assert c["tightness"] <= 2 and c["max_terms_per_group"] == 5 and c["location_level"] == "country"
+    assert g["tightness"] > c["tightness"]
+
+
 def test_clean_groups_normalizes_and_strips_versions():
     groups = _clean_groups(
         [["Next.js 15", "Next.js"], "AWS", ["", "  "], ["Kafka", "Kafka"]], cap_groups=6

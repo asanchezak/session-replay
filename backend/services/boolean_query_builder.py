@@ -125,6 +125,23 @@ def _clean_groups(items, cap_groups):
     return out
 
 
+def _location_strictness(location: str | None) -> dict:
+    """Map the job's location to a boolean-strictness profile. The MORE SPECIFIC the
+    location, the LESS strict the boolean needs to be — the location facet does the
+    narrowing (a city/country search of millions drops to thousands/hundreds). A GLOBAL
+    search has NO location facet, so the boolean must carry ALL the selectivity → strictest.
+
+    Returns a tightness band (lo/hi = how many must-have skill GROUPS to AND) + `max_terms`
+    (how many OR alternatives to keep per group — fewer = stricter ANDs, higher precision).
+    `lo=hi=99` means "use every must-have group" (clamped to what the AI returned)."""
+    loc = (location or "").strip().lower()
+    if loc in ("", "global", "worldwide", "anywhere", "remote"):
+        return {"lo": 99, "hi": 99, "max_terms": 2, "level": "global"}     # strictest
+    if loc in ("latam", "latin america", "latinoamérica", "latinoamerica", "region", "región"):
+        return {"lo": 2, "hi": 4, "max_terms": 3, "level": "region"}       # medium
+    return {"lo": 1, "hi": 2, "max_terms": 5, "level": "country"}          # loosest (specific country)
+
+
 class BooleanQueryBuilder:
     """Stateless: corpus → spec (AI) → boolean (deterministic). The orchestrator
     keeps the spec + the current tightness in origin.pipeline for re-tuning."""
@@ -176,13 +193,16 @@ class BooleanQueryBuilder:
         except json.JSONDecodeError:
             return {}
 
-    def assemble(self, spec: dict, tightness: int) -> str:
+    def assemble(self, spec: dict, tightness: int, max_terms_per_group: int | None = None) -> str:
         """Boolean = (title OR variants) AND (g1a OR g1b ...) AND (g2a OR ...) ... [NOT (excl)].
         Each AND clause is a GROUP of interchangeable terms (OR'd), so a candidate matches a
         clause with ANY of its terms — much better recall than AND'ing every exact tool.
         ONLY must-have groups are AND'd (`tightness` = how many); 0 = title-only. optional_skills
         are nice-to-haves and NEVER gate the search (a hard AND on a nice-to-have over-narrows,
-        and LinkedIn boolean has no soft/ranking operator) — they're extracted for context only."""
+        and LinkedIn boolean has no soft/ranking operator) — they're extracted for context only.
+        `max_terms_per_group` caps the OR alternatives kept per group (the AI ranks them
+        most→least important): fewer = stricter ANDs (used for global/no-location searches).
+        The TITLE group is never capped — title stays inclusive (match on skills, not the title)."""
         titles = [f'"{t}"' for t in spec.get("title_variants", [])]
         groups = list(spec.get("must_have_skills", []))[:_MAX_GROUPS]
         t = max(0, min(int(tightness), len(groups)))
@@ -193,6 +213,8 @@ class BooleanQueryBuilder:
             if isinstance(g, str):  # tolerate a legacy flat spec
                 g = [g]
             terms = [f'"{x}"' for x in g if x]
+            if max_terms_per_group and max_terms_per_group > 0:
+                terms = terms[:max_terms_per_group]
             if not terms:
                 continue
             parts.append(terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")")
@@ -206,18 +228,26 @@ class BooleanQueryBuilder:
         # Only must-have groups are AND'd, so the strictness ceiling is the # of must groups.
         return min(_MAX_GROUPS, len(spec.get("must_have_skills", [])))
 
-    async def build(self, corpus: str, fallback_title: str = "", start_tightness: int = 2) -> dict:
+    async def build(self, corpus: str, fallback_title: str = "", start_tightness: int = 2,
+                    location: str | None = None) -> dict:
         """One-shot: corpus → {query, spec, tightness}.
 
-        The AI decides the STRICTNESS via spec.recommended_tightness (how many of its
-        own ranked skills to AND). `start_tightness` is an operator FLOOR (minimum
-        strictness) — the AI may go stricter but not below it. Both are clamped to the
-        number of skills the AI actually returned (max_tightness). Calibration can still
-        adjust ±1 from here."""
+        STRICTNESS is driven by the job LOCATION (see _location_strictness): global → the
+        boolean carries all selectivity (AND every must-have group + narrow each group's
+        ORs); a specific country → loose boolean (the location facet narrows). The AI's
+        spec.recommended_tightness nudges WITHIN the location band [lo, hi]. When `location`
+        is None (unknown), fall back to the operator floor `start_tightness`. All clamped to
+        the number of skill groups the AI returned (max_tightness)."""
         spec = await self.extract_spec(corpus, fallback_title)
         mx = self.max_tightness(spec)
-        floor = max(0, min(int(start_tightness), mx))
+        strict = _location_strictness(location)
+        lo, hi = min(strict["lo"], mx), min(strict["hi"], mx)
+        if location is None:
+            # no location info → respect the legacy operator floor; allow up to all groups
+            lo, hi = max(lo, min(int(start_tightness), mx)), mx
         ai_t = spec.get("recommended_tightness")
-        t = floor if ai_t is None else max(floor, min(int(ai_t), mx))
-        return {"query": self.assemble(spec, t), "spec": spec, "tightness": t,
-                "ai_tightness": ai_t, "tightness_floor": floor}
+        t = hi if ai_t is None else max(lo, min(int(ai_t), hi))
+        query = self.assemble(spec, t, max_terms_per_group=strict["max_terms"])
+        return {"query": query, "spec": spec, "tightness": t, "ai_tightness": ai_t,
+                "tightness_band": [lo, hi], "location_level": strict["level"],
+                "max_terms_per_group": strict["max_terms"]}
