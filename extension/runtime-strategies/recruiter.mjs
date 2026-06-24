@@ -160,6 +160,20 @@ function readNoteComposeOptions(step) {
   };
 }
 
+function readCandidateNoteAddOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_candidate_note_add",
+  ) || {};
+  const save = method.save;
+  return {
+    projectUrl: String(method.project_url ?? "").trim(),
+    candidateName: String(method.candidate_name ?? step?.value ?? "").trim(),
+    noteText: String(method.note_text ?? "").trim(),
+    save: save === true || save === "true" || save === 1 || save === "1",
+  };
+}
+
 function readArchiveProjectOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
   const method = methods.find(
@@ -181,6 +195,7 @@ export function handlesStrategy(strategy) {
     || strategy === "recruiter_add_profile"
     || strategy === "recruiter_message_compose"
     || strategy === "recruiter_note_compose"
+    || strategy === "recruiter_candidate_note_add"
     || strategy === "recruiter_archive_project"
     || strategy === "recruiter_hot_reload_probe";
 }
@@ -307,6 +322,15 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     };
   }
 
+  if (strategy === "recruiter_candidate_note_add") {
+    const r = await addNoteToCandidate(page, readCandidateNoteAddOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { candidate_note_add_result: r },
+      log: `recruiter_candidate_note_add ok=${r.ok} saved=${r.saved} selected=${r.selected_count} name="${r.candidate_name || ""}" reason="${r.reason || ""}"`,
+    };
+  }
+
   if (strategy === "recruiter_archive_project") {
     const r = await archiveRecruiterProject(page, readArchiveProjectOptions(step), orand, runtime);
     return {
@@ -389,6 +413,12 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
       // gates on whether the note actually persisted.
       const r = ex.note_compose_result || {};
       return r.ok ? ok() : fail(r.reason || "note_failed");
+    }
+    case "recruiter_candidate_note_add": {
+      // Per-candidate note push. save=false (preview) returns ok:true (typed, not saved).
+      // save=true gates on the note actually persisting (toast/modal-gone).
+      const r = ex.candidate_note_add_result || {};
+      return r.ok ? ok() : fail(r.reason || "candidate_note_failed");
     }
     // read-only / probe / unknown strategies → never gate
     case "recruiter_read_project":
@@ -1926,6 +1956,220 @@ async function composeRecruiterNote(page, options, orand, runtime) {
              ...(anyNoteSaved ? {} : { reason: "note_save_unverified" }), manage_url: manageUrl };
   } catch (e) {
     return { ok: false, saved: false, reason: `error:${(e && e.message) || e}`, diag };
+  }
+}
+
+// Push ONE candidate's note to LinkedIn (push-only sync of an Odoo linkedin.candidate.note).
+// Reuses the PROVEN bulk add-note interaction (toolbar data-test-action='add-note' →
+// textarea[data-test-mentions-edit-textarea] → submit) from composeRecruiterNote, but scopes
+// it to a SINGLE candidate (selected by NAME, paginating to find them) and does NOT move the
+// pipeline stage. LinkedIn notes are GLOBAL to the candidate, so a note added here shows on the
+// candidate across projects (which is exactly what the Odoo global note wants). GATED: save=false
+// types + STOPS (preview, no mutation); save=true saves + verifies via the success toast.
+// Params: project_url (any project the candidate is in), candidate_name, note_text, save.
+async function addNoteToCandidate(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
+  const typeHumanLike = runtimeValue(runtime, "typeHumanLike", null);
+  const resolveLocatorWithWait = runtimeValue(runtime, "resolveLocatorWithWait", null);
+  const clickResolved = runtimeValue(runtime, "clickResolved", null);
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const noteText = String(options.noteText || "");
+  const candidateName = String(options.candidateName || "").trim();
+  const save = !!options.save;
+  const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
+  if (!m) return { ok: false, saved: false, reason: "missing_project_id" };
+  if (!noteText) return { ok: false, saved: false, reason: "missing_note_text" };
+  if (!candidateName) return { ok: false, saved: false, reason: "missing_candidate_name" };
+  const manageUrl = `https://www.linkedin.com/talent/hire/${m[1]}/manage/all`;
+  const NOTE_FIELD = "textarea[data-test-mentions-edit-textarea], textarea.mentions-edit__text-box";
+  const NEXT_PAGE = "[data-test-pagination-next], [data-live-test-pagination-next], [data-test-mini-pagination-next], [data-live-test-mini-pagination-next]";
+
+  const clickSel = async (sel) => {
+    if (resolveLocatorWithWait && clickResolved) {
+      const t = await resolveLocatorWithWait(page, [{ type: "css", value: sel }], { timeoutMs: 8000 });
+      if (t) { try { if (await clickResolved(page, t, { moveMouseAlongBezier, orand })) return true; } finally { await t.handle?.dispose?.().catch(() => {}); } }
+    }
+    const pt = await page.evaluate((s) => {
+      const el = document.querySelector(s); if (!el) return null;
+      el.scrollIntoView({ block: "center" }); const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    }, sel).catch(() => null);
+    if (!pt) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+  const clickPoint = async (pt) => {
+    if (!pt || pt.x == null) return false;
+    await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+    await sleep(110 + Math.floor(orand() * 160));
+    await page.mouse.click(pt.x, pt.y).catch(() => {});
+    return true;
+  };
+  const readSelectedCount = () => page.evaluate(() => {
+    const t = document.body.innerText || "";
+    const mm = t.match(/(\d+)\s*(?:SELECCIONAD\w*|seleccionad\w*|selected)/i);
+    return mm ? parseInt(mm[1], 10) : null;
+  }).catch(() => null);
+
+  // Select the ONE candidate matching `name` on the current page (click their row checkbox).
+  // Returns {found, selected, reason}. Name match: exact / prefix either way (handles
+  // truncated/diacritic variants conservatively — biased to the FIRST exact-ish match).
+  const selectByName = async (name) => {
+    const res = await page.evaluate((target) => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const norm = (s) => clean(s).toLowerCase();
+      const want = norm(target);
+      const rows = Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"));
+      for (const row of rows) {
+        const link = row.querySelector('a[href*="/talent/profile/"]');
+        const nm = norm(link && (link.innerText || link.textContent));
+        if (!nm) continue;
+        if (nm === want || nm.startsWith(want) || want.startsWith(nm)) {
+          // The row checkbox <input.small-input> is visually hidden (custom checkbox); the
+          // real click target is its <label for=select-item-…> (a11y-text "Seleccionar a <Name>").
+          const cb = row.querySelector("span.profile-list-item__selector input[type='checkbox'], input.small-input[type='checkbox'], input[type='checkbox']");
+          let clickEl = cb;
+          if (cb && cb.id) {
+            const lbl = row.querySelector(`label[for='${cb.id}']`) || document.querySelector(`label[for='${cb.id}']`);
+            if (lbl) clickEl = lbl;
+          }
+          if (!clickEl) return { found: true, point: null };
+          clickEl.scrollIntoView({ block: "center" });
+          const r = clickEl.getBoundingClientRect();
+          return r.width > 0 ? { found: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 }, matched_name: clean(link.innerText || link.textContent) } : { found: true, point: null };
+        }
+      }
+      return { found: false };
+    }, name).catch(() => ({ found: false }));
+    if (!res.found) return { found: false, selected: false };
+    if (!res.point) return { found: true, selected: false, reason: "checkbox_not_found" };
+    await clickPoint(res.point);
+    await sleep(800 + Math.floor(orand() * 300));
+    const sel = await readSelectedCount();
+    return { found: true, selected: (sel || 0) >= 1, selected_count: sel, matched_name: res.matched_name };
+  };
+
+  const nextPage = async () => {
+    const enabled = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      if (!b) return false;
+      return !(b.disabled || b.getAttribute("aria-disabled") === "true" || b.matches("[disabled]") || getComputedStyle(b).pointerEvents === "none");
+    }, NEXT_PAGE).catch(() => false);
+    if (!enabled) return false;
+    if (!await clickSel(NEXT_PAGE)) return false;
+    await sleep(2400 + Math.floor(orand() * 700));
+    await page.waitForSelector("[data-test-profile-list-view-list-row], .profile-list-item", { timeout: 10000 }).catch(() => {});
+    return true;
+  };
+
+  // --- add-note composer (identical proven interaction as composeRecruiterNote) ---
+  const addNoteState = () => page.evaluate(() => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+    const all = Array.from(document.querySelectorAll("[data-test-action='add-note'], [data-live-test-action='add-note']"));
+    const visEl = all.find(vis);
+    if (!all.length) return { present: false, visible: false, point: null };
+    if (!visEl) return { present: true, visible: false, point: null };
+    const r = visEl.getBoundingClientRect();
+    return { present: true, visible: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+  }).catch(() => ({ present: false, visible: false, point: null }));
+  const openAddNote = async () => {
+    let st = await addNoteState();
+    if (st.present && !st.visible) {
+      const expandPt = await page.evaluate(() => {
+        const bar = document.querySelector("[data-test-profile-list-bulk-actions], .profile-list-bulk-actions");
+        const cand = bar && bar.querySelector("button.collapsible-toolbar__dropdown-trigger");
+        if (!cand) return null;
+        cand.scrollIntoView({ block: "center" });
+        const r = cand.getBoundingClientRect();
+        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      }).catch(() => null);
+      if (expandPt) { await clickPoint(expandPt); await sleep(1300 + Math.floor(orand() * 500)); }
+      st = await addNoteState();
+    }
+    if (!st.present) return { present: false, opened: false, fieldFound: false };
+    if (!st.point) return { present: true, opened: false, fieldFound: false };
+    await clickPoint(st.point);
+    await sleep(1500 + Math.floor(orand() * 500));
+    const fieldFound = await page.evaluate((sel) => !!document.querySelector(sel), NOTE_FIELD).catch(() => false);
+    return { present: true, opened: true, fieldFound };
+  };
+  const fillNote = async () => {
+    await clickSel(NOTE_FIELD);
+    await sleep(300);
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await sleep(200);
+    if (typeHumanLike) await typeHumanLike(page, noteText, orand);
+    else await page.keyboard.type(noteText, { delay: 24 });
+    await sleep(600 + Math.floor(orand() * 300));
+    return await page.evaluate(() => {
+      const input = document.querySelector("input[visibility-value='HIRING_CONTEXT'], [id$='-note-visbility-option-HIRING_CONTEXT']");
+      if (!input) return false;
+      const label = input.id ? document.querySelector(`label[for='${input.id}']`) : null;
+      (label || input).click();
+      return true;
+    }).catch(() => false);
+  };
+  const saveNote = async () => {
+    const clicked = await clickSel("button[data-test-create-edit-note-submit-btn]");
+    await sleep(1900 + Math.floor(orand() * 600));
+    const v = await page.evaluate(() => {
+      const modalGone = !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]");
+      const toastEl = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+      const t = toastEl ? (toastEl.innerText || toastEl.textContent || "") : "";
+      const isNote = /(nota|note)/i.test(t) && /(a[ñn]adid|agregad|added|guardad|saved)/i.test(t);
+      return { modalGone, toast: isNote, toast_text: t.replace(/\s+/g, " ").trim().slice(0, 120) };
+    }).catch(() => ({ modalGone: false, toast: false, toast_text: "" }));
+    return { ok: clicked && (v.toast || v.modalGone), ...v };
+  };
+
+  try {
+    await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForSelector("[data-test-profile-list-view-list-row], .profile-list-item, [data-live-test-select-all]", { timeout: 20000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+    await sleep(1800 + Math.floor(orand() * 600));
+
+    // Find + select the candidate by name, paginating up to MAX_PAGES.
+    const MAX_PAGES = 8;
+    let picked = null, pagesScanned = 0;
+    for (let p = 0; p < MAX_PAGES; p++) {
+      pagesScanned = p + 1;
+      const r = await selectByName(candidateName);
+      if (r.found) { picked = r; break; }
+      if (!await nextPage()) break;
+    }
+    if (!picked || !picked.found) {
+      return { ok: false, saved: false, candidate_name: candidateName, reason: "candidate_not_found", pages_scanned: pagesScanned, manage_url: manageUrl };
+    }
+    if (!picked.selected) {
+      return { ok: false, saved: false, candidate_name: candidateName, reason: picked.reason || "select_failed", selected_count: picked.selected_count ?? 0, manage_url: manageUrl };
+    }
+    await shot(`nota-candidato: "${picked.matched_name || candidateName}" seleccionado (${picked.selected_count})`).catch(() => {});
+
+    const open = await openAddNote();
+    if (!open.opened) {
+      return { ok: false, saved: false, candidate_name: candidateName, selected_count: picked.selected_count,
+               reason: open.present ? "add_note_did_not_open" : "add_note_not_found", manage_url: manageUrl };
+    }
+    const visSet = await fillNote();
+    await shot(`nota-candidato: texto+visibilidad(empresa=${visSet}) — ${save ? "guardando" : "preview"}`).catch(() => {});
+
+    if (!save) {
+      await sleep(1200);
+      return { ok: true, saved: false, gated: true, candidate_name: candidateName,
+               matched_name: picked.matched_name, selected_count: picked.selected_count,
+               note_field_found: open.fieldFound, manage_url: manageUrl };
+    }
+    const s = await saveNote();
+    await shot(`nota-candidato: guardada=${s.ok}`).catch(() => {});
+    return { ok: s.ok, saved: s.ok, candidate_name: candidateName, matched_name: picked.matched_name,
+             selected_count: picked.selected_count, toast_text: s.toast_text,
+             ...(s.ok ? {} : { reason: "note_save_unverified" }), manage_url: manageUrl };
+  } catch (e) {
+    return { ok: false, saved: false, candidate_name: candidateName, reason: `error:${(e && e.message) || e}` };
   }
 }
 
