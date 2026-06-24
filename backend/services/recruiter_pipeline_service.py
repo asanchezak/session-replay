@@ -21,6 +21,7 @@ See docs/recruiter-odoo-integration-design.md for the full contract.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -45,18 +46,22 @@ EVENT_RECOMMENDATIONS = "recruiter_recommendations"
 # Add a "Contactado para <posición>" NOTE (bulk) + move to the native "contacted" stage.
 # Standalone (POST .../add-note + Odoo button) and chained after a real message send.
 EVENT_NOTE = "recruiter_note"
+# Sync a candidate's GLOBAL notes with LinkedIn (read + add on the profile notes panel).
+# Standalone, candidate-centric (POST .../candidates/sync-notes + Odoo candidate button).
+EVENT_NOTES_SYNC = "recruiter_notes_sync"
 # DEMO button chain (Odoo "Demo"): reset the project to ONLY the demo profile, then
 # optionally message it. archive-all (looped) → add-profile → (send → recruiter_message).
 EVENT_DEMO_ARCHIVE = "recruiter_demo_archive"
 EVENT_DEMO_ADD = "recruiter_demo_add"
 PIPELINE_EVENT_KINDS = {
     EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
-    EVENT_RECOMMENDATIONS, EVENT_NOTE, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
+    EVENT_RECOMMENDATIONS, EVENT_NOTE, EVENT_NOTES_SYNC, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
 }
 
 # Recruiter event kinds whose FAILURE should NOT raise a position-level alarm in Odoo:
 # the demo chain (a deliberate test tool) and the cheap count-only preview probe.
-SILENT_FLOW_EVENT_KINDS = {EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD, "recruiter_preview_count"}
+SILENT_FLOW_EVENT_KINDS = {EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD, EVENT_NOTES_SYNC,
+                           "recruiter_preview_count"}
 
 # Human-readable stage labels for the Odoo chatter note / status field (English, to
 # match the recruiter UI).
@@ -421,6 +426,8 @@ class RecruiterPipelineService:
             return await self._after_recommendations(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_NOTE:
             return await self._after_note(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_NOTES_SYNC:
+            return await self._after_notes_sync(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_DEMO_ARCHIVE:
             return await self._after_demo_archive(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_DEMO_ADD:
@@ -1025,6 +1032,21 @@ class RecruiterPipelineService:
         # GATED: only record outreach in Odoo when the message was actually SENT.
         # A gated preview (send=false) types + stops — nothing was sent, so don't mark.
         compose = await self.push.read_message_compose_result(run.id)
+        # Idempotent re-send: the strategy messages ONLY not-yet-contacted candidates. If
+        # everyone in the project was already contacted, nothing is sent — surface that
+        # clearly (no Odoo outreach update, no add-note chain) instead of "preview".
+        if compose.get("reason") == "no_uncontacted":
+            logger.info(
+                "recruiter pipeline: job %s — all candidates already contacted (%s), no messages sent",
+                job_id, compose.get("contacted_count"),
+            )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_MESSAGE, run_id=run.id,
+                message=f"✅ Todos los candidatos del proyecto ya fueron contactados "
+                        f"({compose.get('contacted_count', 0)}) — no se enviaron mensajes nuevos.",
+            )
+            return {"stage": "message", "sent": False, "no_uncontacted": True}
         if not pipeline.get("send") or not compose.get("sent"):
             logger.info(
                 "recruiter pipeline: message preview for job %s (send=%s sent=%s) — "
@@ -1146,6 +1168,48 @@ class RecruiterPipelineService:
             project_name=ctx.get("project_name"), note_text=note_text, save=save,
         )
 
+    async def sync_candidate_notes(self, *, profile_url: str, candidate_id=None,
+                                   name: str | None = None, connector_id=None,
+                                   odoo_notes: list[dict] | None = None) -> dict:
+        """Standalone (Odoo candidate button) trigger: sync a candidate's GLOBAL notes
+        with LinkedIn Recruiter. Enqueues ONE daemon run on the candidate's profile that
+        (1) ADDS the unsynced Odoo notes and (2) READS LinkedIn's notes back; the terminal
+        hook reconciles them in Odoo. Returns {status:'queued', run_id} or a clear
+        {status:'not_configured'} until the Phase-2 notes strategy / workflow ships.
+        Notes are GLOBAL to the candidate, so there's no job/project context."""
+        if not profile_url:
+            return {"status": "error", "reason": "profile_url required"}
+        if not settings.recruiter_notes_sync_workflow_id:
+            logger.warning("recruiter pipeline: recruiter_notes_sync_workflow_id unset — "
+                           "candidate notes sync not available yet (Phase 2)")
+            return {"status": "not_configured",
+                    "reason": "notes-sync workflow not configured (pending Phase 2)"}
+        connector_id = connector_id or await self._latest_recruiter_connector()
+        odoo_notes = odoo_notes or []
+        pipeline_ctx = {
+            "profile_url": profile_url,
+            "candidate_id": candidate_id,
+            "candidate_name": name,
+            "connector_id": connector_id,
+            "odoo_notes": odoo_notes,
+        }
+        run = await self._create_pipeline_run(
+            workflow_id=settings.recruiter_notes_sync_workflow_id,
+            event_kind=EVENT_NOTES_SYNC,
+            runtime_params={
+                "profile_url": profile_url,
+                # The strategy reads the notes to ADD from here (JSON string of bodies).
+                "notes_to_add": json.dumps([n.get("body", "") for n in odoo_notes]),
+            },
+            pipeline=pipeline_ctx,
+            connector_id=connector_id,
+        )
+        logger.info(
+            "recruiter pipeline: started notes-sync run %s for candidate %s (push %d note(s))",
+            run.id, profile_url, len(odoo_notes),
+        )
+        return {"status": "queued", "run_id": str(run.id)}
+
     async def _after_note(self, run, pipeline, connector_id, job_id) -> dict:
         """An add-note run completed. The note + "contacted" stage are LinkedIn-side
         markers (Odoo's outreach_status is set by the message flow), so this only reports
@@ -1170,7 +1234,50 @@ class RecruiterPipelineService:
             message=(f"📝 Nota de contacto agregada a {noted} candidato(s)"
                      + (f" + {movedN} movidos a 'contacted'." if moved else ".")),
         )
+        # The note is now on LinkedIn (global to each candidate) — mirror it as a
+        # linkedin.candidate.note in Odoo so the candidate view reflects it. Best-effort,
+        # idempotent (deduped per candidate by a stable linkedin_key). Recipients carry
+        # profile_url+name; notes are GLOBAL, so one note per recipient candidate.
+        recipients = note.get("recipients") or []
+        note_text = pipeline.get("note_text") or ""
+        if note_text and recipients:
+            lkey = f"contact-note:job{job_id}"
+            for r in recipients:
+                purl = (r.get("profile_url") or "").strip() if isinstance(r, dict) else ""
+                if not purl:
+                    continue
+                try:
+                    await self.push.push_candidate_notes(
+                        run_id=run.id, connector_id=connector_id, profile_url=purl,
+                        notes=[{"body": note_text, "key": lkey}], pushed=[],
+                    )
+                except Exception:
+                    logger.exception("recruiter pipeline: failed to mirror contact note "
+                                     "for %s (run %s)", purl, run.id)
         return {"stage": "note", "saved": True, "noted_count": noted, "moved_count": movedN, "stage_moved": moved}
+
+    async def _after_notes_sync(self, run, pipeline, connector_id, job_id) -> dict:
+        """A candidate notes-sync run completed. The strategy READ the candidate's
+        LinkedIn notes and ADDED our unsynced Odoo notes; push both to Odoo
+        (/akcr/api/candidate_notes) which dedups by linkedin_key + marks pushed notes
+        synced. Candidate-centric (no job_id); notes are GLOBAL to the candidate."""
+        profile_url = pipeline.get("profile_url")
+        res = await self.push.read_notes_sync_result(run.id)
+        notes = res.get("notes") or []
+        # Fall back to the ids we asked the strategy to push when it doesn't echo them.
+        pushed = res.get("pushed")
+        if pushed is None:
+            pushed = [n.get("id") for n in (pipeline.get("odoo_notes") or []) if n.get("id")]
+        odoo = await self.push.push_candidate_notes(
+            run_id=run.id, connector_id=connector_id,
+            profile_url=profile_url or res.get("profile_url"),
+            notes=notes, pushed=pushed,
+        )
+        logger.info(
+            "recruiter pipeline: notes-sync complete for candidate %s — read=%d pushed=%d odoo=%s",
+            profile_url, len(notes), len(pushed), odoo,
+        )
+        return {"stage": "notes_sync", "read": len(notes), "pushed": len(pushed), "odoo": odoo}
 
     async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
         """An archive (remove-from-project) run completed. Only when the strategy

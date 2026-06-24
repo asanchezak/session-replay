@@ -375,6 +375,46 @@ class RecruiterPushService:
                 out = nc
         return out
 
+    async def read_notes_sync_result(self, run_id) -> dict:
+        """Read a recruiter_candidate_notes_sync run's result →
+        {profile_url, notes:[{body, author?, date?, key?}], pushed:[odoo_note_id,...]}.
+        `notes` = the notes READ from the candidate's LinkedIn profile (pull); `pushed`
+        = the Odoo note ids the strategy successfully added to LinkedIn. Last non-empty
+        wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            ns = rec.get("notes_sync_result")
+            if isinstance(ns, dict):
+                out = ns
+        return out
+
+    async def push_candidate_notes(self, *, run_id, connector_id, profile_url: str | None,
+                                   notes: list[dict] | None = None,
+                                   pushed: list | None = None) -> dict:
+        """Reconcile a candidate's notes in Odoo after a notes-sync run, via
+        POST /akcr/api/candidate_notes. `notes` = pulled from LinkedIn (dedup +
+        create source='linkedin'); `pushed` = Odoo note ids now on LinkedIn (mark
+        synced). Notes are GLOBAL to the candidate (matched by profile_url)."""
+        if not profile_url:
+            return {"pushed": 0, "skipped": "no_profile_url"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "profile_url": canonical_profile_url(profile_url),
+            "source_run_id": str(run_id),
+            "notes": notes or [],
+            "pushed": pushed or [],
+        }
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/candidate_notes", payload)
+            logger.info("candidate notes push: url=%s odoo=%s", profile_url, res)
+            return {"pushed": 1, **res}
+        except Exception:
+            logger.exception("candidate notes push: POST failed for run %s", run_id)
+            return {"pushed": 0, "error": True}
+
     async def push_lead_removed(self, *, run_id, job_id, connector_id,
                                 profile_url: str | None, name: str | None = None) -> dict:
         """Confirmed removal: the candidate is archived/gone in LinkedIn, so delete

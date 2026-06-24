@@ -170,6 +170,44 @@ async def add_note(
     return {"status": "queued", "job_id": job_id, "run_id": run_id, "save": (req.save if req else False)}
 
 
+class OdooNote(BaseModel):
+    id: int | None = None
+    body: str = ""
+    position: str | None = None
+    author: str | None = None
+
+
+class SyncNotesRequest(BaseModel):
+    profile_url: str
+    candidate_id: int | None = None
+    name: str | None = None
+    connector_id: str | None = None
+    # The Odoo-authored notes not yet on LinkedIn (to PUSH); the run reads LinkedIn's back.
+    odoo_notes: list[OdooNote] = []
+
+
+@router.post("/candidates/sync-notes")
+async def sync_candidate_notes(
+    req: SyncNotesRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync a candidate's GLOBAL notes with LinkedIn Recruiter (on-demand, candidate-
+    centric). Enqueues ONE daemon run on the candidate's profile that ADDS the unsynced
+    Odoo notes and READS LinkedIn's notes back; the terminal hook reconciles them in Odoo
+    (/akcr/api/candidate_notes). Returns {status:'queued', run_id} or 'not_configured'
+    until the Phase-2 notes strategy/workflow ships."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.sync_candidate_notes(
+        profile_url=req.profile_url,
+        candidate_id=req.candidate_id,
+        name=req.name,
+        connector_id=req.connector_id,
+        odoo_notes=[n.model_dump() for n in req.odoo_notes],
+    )
+    await db.commit()
+    return res
+
+
 @router.post("/request-inbox-scan")
 async def request_inbox_scan():
     """Ask the daemon to run an inbox reply-scan on its next warm tick (the Odoo
