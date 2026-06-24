@@ -1170,45 +1170,58 @@ class RecruiterPipelineService:
 
     async def sync_candidate_notes(self, *, profile_url: str, candidate_id=None,
                                    name: str | None = None, connector_id=None,
-                                   odoo_notes: list[dict] | None = None) -> dict:
-        """Standalone (Odoo candidate button) trigger: sync a candidate's GLOBAL notes
-        with LinkedIn Recruiter. Enqueues ONE daemon run on the candidate's profile that
-        (1) ADDS the unsynced Odoo notes and (2) READS LinkedIn's notes back; the terminal
-        hook reconciles them in Odoo. Returns {status:'queued', run_id} or a clear
-        {status:'not_configured'} until the Phase-2 notes strategy / workflow ships.
-        Notes are GLOBAL to the candidate, so there's no job/project context."""
+                                   odoo_notes: list[dict] | None = None,
+                                   project_url: str | None = None) -> dict:
+        """Standalone (Odoo candidate button) trigger: PUSH a candidate's unsynced Odoo
+        notes to LinkedIn (push-only — we don't pull LinkedIn's notes). LinkedIn notes are
+        GLOBAL to the candidate, added by selecting the candidate (by NAME) inside a project
+        pipeline and adding the note there (strategy recruiter_candidate_note_add). Enqueues
+        ONE daemon run PER unsynced note (the composer takes one note at a time); each run's
+        terminal hook marks that note synced in Odoo. `project_url` = any LinkedIn project the
+        candidate is in (akcr resolves it from the candidate's leads). Returns
+        {status:'queued', run_ids} / 'not_configured' / 'error'."""
         if not profile_url:
             return {"status": "error", "reason": "profile_url required"}
+        if not name:
+            return {"status": "error", "reason": "candidate_name required"}
         if not settings.recruiter_notes_sync_workflow_id:
-            logger.warning("recruiter pipeline: recruiter_notes_sync_workflow_id unset — "
-                           "candidate notes sync not available yet (Phase 2)")
-            return {"status": "not_configured",
-                    "reason": "notes-sync workflow not configured (pending Phase 2)"}
+            logger.warning("recruiter pipeline: recruiter_notes_sync_workflow_id unset")
+            return {"status": "not_configured", "reason": "notes-sync workflow not configured"}
+        if not project_url:
+            # Push requires a project to select the candidate in (notes are global, but the
+            # add-note UI lives in a project pipeline). akcr sends the candidate's project.
+            return {"status": "error", "reason": "no_project_url — candidate is not in any LinkedIn project"}
         connector_id = connector_id or await self._latest_recruiter_connector()
-        odoo_notes = odoo_notes or []
-        pipeline_ctx = {
-            "profile_url": profile_url,
-            "candidate_id": candidate_id,
-            "candidate_name": name,
-            "connector_id": connector_id,
-            "odoo_notes": odoo_notes,
-        }
-        run = await self._create_pipeline_run(
-            workflow_id=settings.recruiter_notes_sync_workflow_id,
-            event_kind=EVENT_NOTES_SYNC,
-            runtime_params={
-                "profile_url": profile_url,
-                # The strategy reads the notes to ADD from here (JSON string of bodies).
-                "notes_to_add": json.dumps([n.get("body", "") for n in odoo_notes]),
-            },
-            pipeline=pipeline_ctx,
-            connector_id=connector_id,
-        )
+        pending = [n for n in (odoo_notes or []) if (n.get("body") or "").strip()]
+        if not pending:
+            return {"status": "noop", "reason": "no_unsynced_notes"}
+        run_ids = []
+        for note in pending:
+            run = await self._create_pipeline_run(
+                workflow_id=settings.recruiter_notes_sync_workflow_id,
+                event_kind=EVENT_NOTES_SYNC,
+                runtime_params={
+                    "project_url": project_url,
+                    "candidate_name": name,
+                    "note_text": note.get("body", ""),
+                    "save": "true",
+                },
+                pipeline={
+                    "profile_url": profile_url,
+                    "candidate_id": candidate_id,
+                    "candidate_name": name,
+                    "connector_id": connector_id,
+                    "project_url": project_url,
+                    "note_id": note.get("id"),
+                },
+                connector_id=connector_id,
+            )
+            run_ids.append(str(run.id))
         logger.info(
-            "recruiter pipeline: started notes-sync run %s for candidate %s (push %d note(s))",
-            run.id, profile_url, len(odoo_notes),
+            "recruiter pipeline: enqueued %d notes-sync run(s) for candidate %r (push)",
+            len(run_ids), name,
         )
-        return {"status": "queued", "run_id": str(run.id)}
+        return {"status": "queued", "run_ids": run_ids, "count": len(run_ids)}
 
     async def _after_note(self, run, pipeline, connector_id, job_id) -> dict:
         """An add-note run completed. The note + "contacted" stage are LinkedIn-side
@@ -1257,27 +1270,31 @@ class RecruiterPipelineService:
         return {"stage": "note", "saved": True, "noted_count": noted, "moved_count": movedN, "stage_moved": moved}
 
     async def _after_notes_sync(self, run, pipeline, connector_id, job_id) -> dict:
-        """A candidate notes-sync run completed. The strategy READ the candidate's
-        LinkedIn notes and ADDED our unsynced Odoo notes; push both to Odoo
-        (/akcr/api/candidate_notes) which dedups by linkedin_key + marks pushed notes
-        synced. Candidate-centric (no job_id); notes are GLOBAL to the candidate."""
+        """A candidate notes-PUSH run completed (one Odoo note → LinkedIn). If the strategy
+        SAVED the note, mark that Odoo note synced via /akcr/api/candidate_notes (pushed=[id]).
+        Push-only; candidate-centric (no job_id). LinkedIn notes are global to the candidate."""
         profile_url = pipeline.get("profile_url")
-        res = await self.push.read_notes_sync_result(run.id)
-        notes = res.get("notes") or []
-        # Fall back to the ids we asked the strategy to push when it doesn't echo them.
-        pushed = res.get("pushed")
-        if pushed is None:
-            pushed = [n.get("id") for n in (pipeline.get("odoo_notes") or []) if n.get("id")]
-        odoo = await self.push.push_candidate_notes(
-            run_id=run.id, connector_id=connector_id,
-            profile_url=profile_url or res.get("profile_url"),
-            notes=notes, pushed=pushed,
-        )
+        note_id = pipeline.get("note_id")
+        res = await self.push.read_candidate_note_add_result(run.id)
+        saved = bool(res.get("saved") or res.get("ok"))
+        if not saved:
+            logger.warning(
+                "recruiter pipeline: notes-push run %s for %r NOT saved (reason=%r) — "
+                "leaving Odoo note %s unsynced",
+                run.id, pipeline.get("candidate_name"), res.get("reason"), note_id,
+            )
+            return {"stage": "notes_sync", "saved": False, "note_id": note_id, "reason": res.get("reason")}
+        odoo = {}
+        if note_id and profile_url:
+            odoo = await self.push.push_candidate_notes(
+                run_id=run.id, connector_id=connector_id, profile_url=profile_url,
+                notes=[], pushed=[note_id],
+            )
         logger.info(
-            "recruiter pipeline: notes-sync complete for candidate %s — read=%d pushed=%d odoo=%s",
-            profile_url, len(notes), len(pushed), odoo,
+            "recruiter pipeline: notes-push complete for %r — note %s saved on LinkedIn, odoo=%s",
+            pipeline.get("candidate_name"), note_id, odoo,
         )
-        return {"stage": "notes_sync", "read": len(notes), "pushed": len(pushed), "odoo": odoo}
+        return {"stage": "notes_sync", "saved": True, "note_id": note_id, "odoo": odoo}
 
     async def _after_archive(self, run, pipeline, connector_id, job_id) -> dict:
         """An archive (remove-from-project) run completed. Only when the strategy

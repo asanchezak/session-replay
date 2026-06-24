@@ -1,11 +1,11 @@
-"""Candidate notes-sync orchestration in RecruiterPipelineService.
+"""Candidate notes PUSH orchestration in RecruiterPipelineService (push-only).
 
-A candidate's GLOBAL notes round-trip with LinkedIn Recruiter notes on-demand. These tests
-pin the backend orchestration (the LinkedIn DOM strategy is Phase 2, seat-gated):
-  - sync_candidate_notes gates on the workflow id (not_configured) and otherwise enqueues a
-    notes-sync run with the right event_kind + params
-  - _after_notes_sync reads the run's notes_sync_result and pushes both the pulled notes and
-    the pushed-note ids to akcr, falling back to the requested ids when the strategy is silent
+The recruiter writes notes on a linkedin.candidate in Odoo; "Sync notes" pushes each unsynced
+note to LinkedIn by selecting the candidate (by name) in a project pipeline and adding the note
+(strategy recruiter_candidate_note_add). These tests pin the backend orchestration (the seat
+interaction is covered live):
+  - sync_candidate_notes gates on workflow id / name / project_url and enqueues ONE run per note
+  - _after_notes_sync marks the Odoo note synced (push_candidate_notes pushed=[id]) only on save
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,6 +17,7 @@ from core.config import settings
 from services.recruiter_pipeline_service import EVENT_NOTES_SYNC, RecruiterPipelineService
 
 PURL = "https://www.linkedin.com/in/jane-doe-123"
+PROJ = "https://www.linkedin.com/talent/hire/999/manage/all"
 
 
 @pytest.mark.asyncio
@@ -24,73 +25,77 @@ async def test_sync_notes_skips_when_unconfigured(db_session: AsyncSession, monk
     monkeypatch.setattr(settings, "recruiter_notes_sync_workflow_id", "")
     svc = RecruiterPipelineService(db_session)
     svc._create_pipeline_run = AsyncMock()
-    res = await svc.sync_candidate_notes(profile_url=PURL, candidate_id=649, name="Jane")
+    res = await svc.sync_candidate_notes(profile_url=PURL, name="Jane", project_url=PROJ,
+                                         odoo_notes=[{"id": 1, "body": "x"}])
     assert res["status"] == "not_configured"
     svc._create_pipeline_run.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_sync_notes_requires_profile_url(db_session: AsyncSession, monkeypatch):
+async def test_sync_notes_requires_project_url(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr(settings, "recruiter_notes_sync_workflow_id", "notes-wf")
     svc = RecruiterPipelineService(db_session)
     svc._create_pipeline_run = AsyncMock()
-    res = await svc.sync_candidate_notes(profile_url="", candidate_id=1)
-    assert res["status"] == "error"
+    res = await svc.sync_candidate_notes(profile_url=PURL, name="Jane", project_url=None,
+                                         odoo_notes=[{"id": 1, "body": "x"}])
+    assert res["status"] == "error" and "project" in res["reason"]
     svc._create_pipeline_run.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_sync_notes_enqueues_run(db_session: AsyncSession, monkeypatch):
+async def test_sync_notes_noop_without_unsynced(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr(settings, "recruiter_notes_sync_workflow_id", "notes-wf")
     svc = RecruiterPipelineService(db_session)
-    svc._create_pipeline_run = AsyncMock(return_value=SimpleNamespace(id="notes-run"))
+    svc._latest_recruiter_connector = AsyncMock(return_value="c1")
+    svc._create_pipeline_run = AsyncMock()
+    res = await svc.sync_candidate_notes(profile_url=PURL, name="Jane", project_url=PROJ, odoo_notes=[])
+    assert res["status"] == "noop"
+    svc._create_pipeline_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_notes_enqueues_one_run_per_note(db_session: AsyncSession, monkeypatch):
+    monkeypatch.setattr(settings, "recruiter_notes_sync_workflow_id", "notes-wf")
+    svc = RecruiterPipelineService(db_session)
+    svc._create_pipeline_run = AsyncMock(side_effect=[
+        SimpleNamespace(id="r1"), SimpleNamespace(id="r2"),
+    ])
     res = await svc.sync_candidate_notes(
-        profile_url=PURL, candidate_id=649, name="Jane", connector_id="c1",
-        odoo_notes=[{"id": 7, "body": "great fit"}, {"id": 8, "body": "follow up"}],
+        profile_url=PURL, candidate_id=7, name="Jane Doe", connector_id="c1", project_url=PROJ,
+        odoo_notes=[{"id": 11, "body": "great fit"}, {"id": 12, "body": "follow up"}, {"id": 13, "body": "  "}],
     )
-    assert res == {"status": "queued", "run_id": "notes-run"}
-    kwargs = svc._create_pipeline_run.await_args.kwargs
-    assert kwargs["event_kind"] == EVENT_NOTES_SYNC
-    assert kwargs["workflow_id"] == "notes-wf"
-    assert kwargs["runtime_params"]["profile_url"] == PURL
-    # the bodies to add are threaded to the strategy as a JSON string
-    assert "great fit" in kwargs["runtime_params"]["notes_to_add"]
-    assert kwargs["pipeline"]["odoo_notes"][0]["id"] == 7
+    assert res == {"status": "queued", "run_ids": ["r1", "r2"], "count": 2}  # blank-body note skipped
+    first = svc._create_pipeline_run.await_args_list[0].kwargs
+    assert first["event_kind"] == EVENT_NOTES_SYNC
+    assert first["runtime_params"] == {
+        "project_url": PROJ, "candidate_name": "Jane Doe", "note_text": "great fit", "save": "true",
+    }
+    assert first["pipeline"]["note_id"] == 11
 
 
 @pytest.mark.asyncio
-async def test_after_notes_sync_pushes_read_and_pushed(db_session: AsyncSession, monkeypatch):
+async def test_after_notes_sync_marks_synced_on_save(db_session: AsyncSession, monkeypatch):
     svc = RecruiterPipelineService(db_session)
-    pulled = [{"body": "LinkedIn note", "key": "k1"}]
     svc.push = SimpleNamespace(
-        read_notes_sync_result=AsyncMock(
-            return_value={"profile_url": PURL, "notes": pulled, "pushed": [7]}
-        ),
-        push_candidate_notes=AsyncMock(return_value={"pushed": 1, "created": 1, "matched": 0}),
+        read_candidate_note_add_result=AsyncMock(return_value={"ok": True, "saved": True}),
+        push_candidate_notes=AsyncMock(return_value={"pushed": 1}),
     )
-    run = SimpleNamespace(id="notes-run")
-    pipeline = {"profile_url": PURL, "odoo_notes": [{"id": 7, "body": "x"}]}
+    run = SimpleNamespace(id="r1")
+    pipeline = {"profile_url": PURL, "note_id": 11, "candidate_name": "Jane"}
     out = await svc._after_notes_sync(run, pipeline, "c1", None)
-    assert out["stage"] == "notes_sync"
-    assert out["read"] == 1 and out["pushed"] == 1
-    kwargs = svc.push.push_candidate_notes.await_args.kwargs
-    assert kwargs["profile_url"] == PURL
-    assert kwargs["notes"] == pulled
-    assert kwargs["pushed"] == [7]
+    assert out["saved"] is True and out["note_id"] == 11
+    kw = svc.push.push_candidate_notes.await_args.kwargs
+    assert kw["pushed"] == [11] and kw["notes"] == [] and kw["profile_url"] == PURL
 
 
 @pytest.mark.asyncio
-async def test_after_notes_sync_falls_back_to_requested_pushed_ids(
-    db_session: AsyncSession, monkeypatch
-):
-    """When the strategy doesn't echo which notes it pushed, mark the ones we asked it to."""
+async def test_after_notes_sync_leaves_unsynced_when_not_saved(db_session: AsyncSession, monkeypatch):
     svc = RecruiterPipelineService(db_session)
     svc.push = SimpleNamespace(
-        read_notes_sync_result=AsyncMock(return_value={"notes": []}),  # no 'pushed' key
-        push_candidate_notes=AsyncMock(return_value={"pushed": 2}),
+        read_candidate_note_add_result=AsyncMock(return_value={"ok": False, "reason": "candidate_not_found"}),
+        push_candidate_notes=AsyncMock(),
     )
-    run = SimpleNamespace(id="notes-run")
-    pipeline = {"profile_url": PURL, "odoo_notes": [{"id": 7}, {"id": 8}, {"body": "no id"}]}
-    out = await svc._after_notes_sync(run, pipeline, "c1", None)
-    assert out["pushed"] == 2
-    assert svc.push.push_candidate_notes.await_args.kwargs["pushed"] == [7, 8]
+    run = SimpleNamespace(id="r1")
+    out = await svc._after_notes_sync(run, {"profile_url": PURL, "note_id": 11}, "c1", None)
+    assert out["saved"] is False and out["reason"] == "candidate_not_found"
+    svc.push.push_candidate_notes.assert_not_called()

@@ -375,6 +375,17 @@ class RecruiterPushService:
                 out = nc
         return out
 
+    async def read_candidate_note_add_result(self, run_id) -> dict:
+        """Read a recruiter_candidate_note_add run's result →
+        {ok, saved, candidate_name, matched_name, selected_count, toast_text, reason}.
+        Last non-empty wins."""
+        out: dict = {}
+        for rec in await self._extraction_rows(run_id):
+            r = rec.get("candidate_note_add_result")
+            if isinstance(r, dict):
+                out = r
+        return out
+
     async def read_notes_sync_result(self, run_id) -> dict:
         """Read a recruiter_candidate_notes_sync run's result →
         {profile_url, notes:[{body, author?, date?, key?}], pushed:[odoo_note_id,...]}.

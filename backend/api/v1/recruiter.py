@@ -182,7 +182,10 @@ class SyncNotesRequest(BaseModel):
     candidate_id: int | None = None
     name: str | None = None
     connector_id: str | None = None
-    # The Odoo-authored notes not yet on LinkedIn (to PUSH); the run reads LinkedIn's back.
+    # A LinkedIn project the candidate is in (akcr resolves it from the candidate's leads) —
+    # the add-note UI lives in a project pipeline even though notes are global.
+    project_url: str | None = None
+    # The Odoo-authored notes not yet on LinkedIn (to PUSH). One daemon run per note.
     odoo_notes: list[OdooNote] = []
 
 
@@ -202,6 +205,7 @@ async def sync_candidate_notes(
         candidate_id=req.candidate_id,
         name=req.name,
         connector_id=req.connector_id,
+        project_url=req.project_url,
         odoo_notes=[n.model_dump() for n in req.odoo_notes],
     )
     await db.commit()

@@ -59,13 +59,13 @@ class Settings(BaseSettings):
     # Triggered via POST /v1/recruiter/jobs/{id}/save-recommendations; the terminal hook
     # pushes the added candidates as linkedin.lead. Env: RECRUITER_RECOMMENDATIONS_WORKFLOW_ID.
     recruiter_recommendations_workflow_id: str = ""
-    # Sync a candidate's GLOBAL notes with LinkedIn Recruiter (read + add on the
-    # candidate profile's notes panel). Triggered via POST /v1/recruiter/candidates/
-    # sync-notes (Odoo candidate button). The run pushes Odoo's unsynced notes and
-    # reads LinkedIn's notes back; the terminal hook posts them to /akcr/api/
-    # candidate_notes for dedup. Empty until the Phase-2 notes strategies ship (needs
-    # a warm seat). Env: RECRUITER_NOTES_SYNC_WORKFLOW_ID.
-    recruiter_notes_sync_workflow_id: str = ""
+    # PUSH a candidate's GLOBAL notes to LinkedIn (push-only — we don't pull LinkedIn's).
+    # Triggered via POST /v1/recruiter/candidates/sync-notes (Odoo candidate button). Adds
+    # each unsynced Odoo note by selecting the candidate (by name) in a project pipeline and
+    # adding the note there (strategy recruiter_candidate_note_add); the terminal hook marks
+    # the Odoo note synced. Params: project_url, candidate_name, note_text, save.
+    # Live-verified 2026-06-24. Env: RECRUITER_NOTES_SYNC_WORKFLOW_ID.
+    recruiter_notes_sync_workflow_id: str = "1f17ab64-8e2b-4046-a11b-9034b1e8818a"
     # DEMO button (Odoo "Demo" on hr.job): reset the LinkedIn project to ONLY the demo
     # profile (archive ALL → add the profile), then optionally send the templated InMail.
     # Reuses the standalone archive-all / add-profile sub-workflows; defaulted to their
