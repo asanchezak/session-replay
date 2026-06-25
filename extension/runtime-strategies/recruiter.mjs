@@ -2132,6 +2132,24 @@ async function addNoteToCandidate(page, options, orand, runtime) {
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(1800 + Math.floor(orand() * 600));
 
+    // Narrow the pipeline by NAME via the project keyword-search facet BEFORE paginating, so
+    // the target lands on page 1 even when the project is huge (e.g. ballooned by auto-
+    // recommendations). Best-effort — falls back to plain pagination if the box isn't found.
+    const KW = "[data-test-pipeline-keyword-search], input.actions-bar-filters__search-input-box, input[type='search'][placeholder*='Buscar en la lista' i], input[placeholder*='Buscar en la lista' i]";
+    try {
+      if (await clickSel(KW)) {
+        await sleep(300);
+        await page.keyboard.press("Control+A").catch(() => {});
+        await page.keyboard.press("Backspace").catch(() => {});
+        if (typeHumanLike) await typeHumanLike(page, candidateName, orand);
+        else await page.keyboard.type(candidateName, { delay: 22 });
+        await sleep(400);
+        await page.keyboard.press("Enter").catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+        await sleep(1600 + Math.floor(orand() * 500));
+      }
+    } catch (e) { /* fall back to pagination below */ }
+
     // Find + select the candidate by name, paginating up to MAX_PAGES.
     const MAX_PAGES = 8;
     let picked = null, pagesScanned = 0;
