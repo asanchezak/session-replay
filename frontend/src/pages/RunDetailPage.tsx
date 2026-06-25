@@ -1141,11 +1141,11 @@ export default function RunDetailPage() {
                     const scoreColor =
                       scoreNum == null
                         ? "var(--color-text-gray)"
-                        : scoreNum >= 8
+                        : scoreNum >= 80
                         ? "var(--color-success)"
-                        : scoreNum >= 6
+                        : scoreNum >= 60
                         ? "var(--color-info)"
-                        : scoreNum >= 4
+                        : scoreNum >= 40
                         ? "var(--color-warning)"
                         : "var(--color-error)";
                     return (
@@ -1161,7 +1161,7 @@ export default function RunDetailPage() {
                         <td className="py-2 pr-3">
                           {scoreNum != null ? (
                             <span className="font-mono font-medium" style={{ color: scoreColor }}>
-                              {scoreNum}/10
+                              {scoreNum}/100
                             </span>
                           ) : (
                             <span className="text-text-gray text-xs">—</span>
@@ -1262,13 +1262,13 @@ export default function RunDetailPage() {
                             className="text-[11px] font-mono"
                             style={{
                               color:
-                                t.score >= 8 ? "var(--color-success)" :
-                                t.score >= 6 ? "var(--color-info)" :
-                                t.score >= 4 ? "var(--color-warning)" :
+                                t.score >= 80 ? "var(--color-success)" :
+                                t.score >= 60 ? "var(--color-info)" :
+                                t.score >= 40 ? "var(--color-warning)" :
                                 "var(--color-error)",
                             }}
                           >
-                            {t.score}/10
+                            {t.score}/100
                           </span>
                         )}
                         {t.recommendation && (
