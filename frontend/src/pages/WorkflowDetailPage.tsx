@@ -97,7 +97,7 @@ const MESSAGE_TEMPLATE_VARIABLES = [
 const PREVIEW_CTX_SAMPLE: Record<string, string> = {
   candidate_name: "María Pérez",
   candidate_headline: "Senior .NET Developer at Acme",
-  candidate_score: "7/10",
+  candidate_score: "70/100",
   job_title: ".Net/Azure Developer",
   company: "Akurey",
   job_url: "https://example.com/jobs/76",
