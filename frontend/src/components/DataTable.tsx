@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { ReactNode, KeyboardEvent } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 export interface Column<T> {
   key: string;
@@ -13,20 +15,32 @@ interface DataTableProps<T> {
   keyExtractor: (item: T) => string;
   emptyState?: ReactNode;
   onRowClick?: (item: T) => void;
+  /** Rows per page; classic Prev/Next pagination appears once data exceeds it. */
+  pageSize?: number;
 }
 
-const VISIBLE_LIMIT = 100;
+const DEFAULT_PAGE_SIZE = 50;
 
 export default function DataTable<T>({
-  columns, data, keyExtractor, emptyState, onRowClick,
+  columns, data, keyExtractor, emptyState, onRowClick, pageSize = DEFAULT_PAGE_SIZE,
 }: DataTableProps<T>) {
+  const [page, setPage] = useState(0);
+
+  const total = data.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  // Snap back into range when the dataset shrinks/changes (e.g. after a delete or refetch).
+  useEffect(() => {
+    setPage((p) => Math.min(p, pageCount - 1));
+  }, [pageCount]);
+
   if (data.length === 0 && emptyState) {
     return <>{emptyState}</>;
   }
 
-  const showAll = data.length <= VISIBLE_LIMIT;
-  const visible = data.slice(0, VISIBLE_LIMIT);
-  const hiddenCount = data.length - VISIBLE_LIMIT;
+  const paginated = total > pageSize;
+  const start = page * pageSize;
+  const visible = data.slice(start, start + pageSize);
 
   return (
     <div className="overflow-x-auto">
@@ -68,9 +82,30 @@ export default function DataTable<T>({
           ))}
         </tbody>
       </table>
-      {!showAll && (
-        <div className="py-3 px-3 text-text-gray text-xs text-center border-t border-border">
-          Showing {VISIBLE_LIMIT} of {data.length} rows
+      {paginated && (
+        <div className="flex items-center justify-between gap-3 py-3 px-3 text-text-gray text-xs border-t border-border">
+          <span>
+            {start + 1}–{Math.min(start + pageSize, total)} of {total}
+          </span>
+          <div className="flex items-center gap-2">
+            <span>Page {page + 1} of {pageCount}</span>
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="flex items-center gap-1 px-2 py-1 rounded-md border border-border text-text-secondary hover:bg-bg-elevated transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label="Previous page"
+            >
+              <ChevronLeft size={13} /> Prev
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              disabled={page >= pageCount - 1}
+              className="flex items-center gap-1 px-2 py-1 rounded-md border border-border text-text-secondary hover:bg-bg-elevated transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label="Next page"
+            >
+              Next <ChevronRight size={13} />
+            </button>
+          </div>
         </div>
       )}
     </div>

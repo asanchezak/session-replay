@@ -1,17 +1,18 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { LayoutDashboard, GitBranch, Play, ScrollText, Cable, Settings, Search, X } from "lucide-react";
+import { GitBranch, Play, ScrollText, Settings, Search, X, Briefcase } from "lucide-react";
 import ErrorBoundary from "./components/ErrorBoundary";
 import InterventionModal from "./components/InterventionModal";
 import Breadcrumbs from "./components/Breadcrumbs";
 import DaemonStatusPill from "./components/DaemonStatusPill";
 import { useApi } from "./hooks/useApi";
+import { runPosition, runJobId } from "./hooks/useRuns";
 import { logger } from "./lib/logger";
 
 interface SearchResult {
   id: string;
   label: string;
-  type: "workflow" | "run";
+  type: "workflow" | "run" | "position";
   path: string;
 }
 
@@ -137,11 +138,10 @@ export default function AppShell() {
 }
 
 const navItems = [
-  { label: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
   { label: "Workflows", path: "/workflows", icon: GitBranch },
+  { label: "Positions", path: "/positions", icon: Briefcase },
   { label: "Runs", path: "/runs", icon: Play },
   { label: "Audit", path: "/audit", icon: ScrollText },
-  { label: "Connectors", path: "/connectors", icon: Cable },
   { label: "Settings", path: "/settings", icon: Settings },
 ];
 
@@ -233,11 +233,28 @@ function TopBar({ waitingRun }: { waitingRun: boolean }) {
       try {
         const [workflows, runs] = await Promise.all([
           request<any[]>("GET", "/workflows"),
-          request<any[]>("GET", "/runs?limit=100"),
+          request<any[]>("GET", "/runs?limit=1000"),
         ]);
         if (cancelled) return;
         const q = query.toLowerCase();
+
+        // Deduped job-id → position name, so a position appears once even with many runs.
+        const positions = new Map<string, string>();
+        for (const r of runs) {
+          const jobId = runJobId(r.origin);
+          const name = runPosition(r.origin);
+          if (jobId && name && !positions.has(jobId)) positions.set(jobId, name);
+        }
+
         const filtered: SearchResult[] = [
+          ...[...positions.entries()]
+            .filter(([, name]) => name.toLowerCase().includes(q))
+            .map(([jobId, name]) => ({
+              id: jobId,
+              label: name,
+              type: "position" as const,
+              path: `/positions/${jobId}`,
+            })),
           ...workflows
             .filter((w: any) => w.name?.toLowerCase().includes(q) || w.description?.toLowerCase().includes(q))
             .map((w: any) => ({ id: w.id, label: w.name, type: "workflow" as const, path: `/workflows/${w.id}` })),
@@ -324,7 +341,7 @@ function TopBar({ waitingRun }: { waitingRun: boolean }) {
                     className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8EAED] hover:bg-[#242836] transition-colors text-left"
                     role="option"
                   >
-                    <span className={`text-xs font-medium uppercase ${r.type === "workflow" ? "text-[#74B9FF]" : "text-[#00B894]"}`}>
+                    <span className={`text-xs font-medium uppercase ${r.type === "workflow" ? "text-[#74B9FF]" : r.type === "position" ? "text-[#FDCB6E]" : "text-[#00B894]"}`}>
                       {r.type}
                     </span>
                     <span className="truncate">{r.label}</span>
