@@ -22,16 +22,15 @@ export default function Breadcrumbs() {
 
   const crumbs: { label: string; href?: string }[] = [];
 
-  if (segments.length === 0 || segments[0] === "dashboard") {
-    crumbs.push({ label: "Dashboard" });
-  } else {
-    crumbs.push({ label: "Dashboard", href: "/dashboard" });
-  }
-
   if (segments[0] === "workflows") {
     crumbs.push({ label: "Workflows", href: "/workflows" });
     if (segments[1]) {
       crumbs.push({ label: workflowName || segments[1].slice(0, 8) });
+    }
+  } else if (segments[0] === "positions") {
+    crumbs.push({ label: "Positions", href: "/positions" });
+    if (segments[1]) {
+      crumbs.push({ label: `Job ${segments[1]}` });
     }
   } else if (segments[0] === "runs") {
     crumbs.push({ label: "Runs", href: "/runs" });
@@ -40,8 +39,6 @@ export default function Breadcrumbs() {
     }
   } else if (segments[0] === "audit") {
     crumbs.push({ label: "Audit" });
-  } else if (segments[0] === "connectors") {
-    crumbs.push({ label: "Connectors" });
   } else if (segments[0] === "settings") {
     crumbs.push({ label: "Settings" });
   }

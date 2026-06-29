@@ -8,6 +8,13 @@ export interface RunOrigin {
     position?: string;
     project_name?: string;
   };
+  // Direct webhook runs (new_job_position / linkedin_lead_search) carry the position
+  // in job_payload rather than a pipeline object. job_id may arrive as a number from Odoo.
+  job_payload?: {
+    job_id?: string | number;
+    job_title?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface RunSummary {
@@ -53,6 +60,21 @@ export function pipelineJobId(origin?: RunOrigin | null): string | null {
 /** The LinkedIn project a pipeline run targets (the "-EZ <position>" name), or null. */
 export function pipelineProjectName(origin?: RunOrigin | null): string | null {
   return origin?.pipeline?.project_name?.trim() || null;
+}
+
+/**
+ * The bare position (Odoo hr.job) name a run belongs to, covering BOTH recruiter-pipeline
+ * runs (origin.pipeline.position) and direct webhook runs (origin.job_payload.job_title).
+ * Returns "" when the run isn't tied to a position.
+ */
+export function runPosition(origin?: RunOrigin | null): string {
+  return (origin?.pipeline?.position || origin?.job_payload?.job_title || "").trim();
+}
+
+/** The Odoo job id a run belongs to (pipeline or webhook), or null. */
+export function runJobId(origin?: RunOrigin | null): string | null {
+  const id = origin?.pipeline?.job_id || origin?.job_payload?.job_id;
+  return id ? String(id) : null;
 }
 
 export function useRuns(workflowId?: string) {

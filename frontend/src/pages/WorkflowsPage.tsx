@@ -8,7 +8,7 @@ import ExecutionModeBadge from "../components/ExecutionModeBadge";
 import { useWorkflows, type WorkflowSummary } from "../hooks/useWorkflows";
 import { logger } from "../lib/logger";
 import { formatTime } from "../lib/formatTime";
-import { GitBranch, Plus, Trash2, Settings2, User } from "lucide-react";
+import { GitBranch, Trash2, Settings2, User } from "lucide-react";
 
 type TabType = "system" | "user";
 
@@ -90,12 +90,6 @@ export default function WorkflowsPage() {
               <Trash2 size={14} /> {deleting ? "Deleting…" : `Delete all (${workflows.length})`}
             </button>
           )}
-          <button
-            onClick={() => navigate("/dashboard")}
-            className="flex items-center gap-2 px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
-          >
-            <Plus size={14} /> New
-          </button>
         </div>
       </div>
 
@@ -132,7 +126,6 @@ export default function WorkflowsPage() {
             { key: "mode", label: "Mode", render: (w: WorkflowSummary) => (
               <ExecutionModeBadge mode={w.execution_mode} />
             )},
-            { key: "connector", label: "Connector", render: () => "—" },
             { key: "version", label: "Version", render: (w: WorkflowSummary) => (
               <span className="text-text-secondary">v{w.version}</span>
             )},
@@ -164,20 +157,12 @@ export default function WorkflowsPage() {
               description={emptyMessages[activeTab].description}
               actions={
                 activeTab === "user" ? (
-                  <>
-                    <button
-                      onClick={() => navigate("/settings")}
-                      className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
-                    >
-                      Install Extension
-                    </button>
-                    <button
-                      onClick={() => navigate("/dashboard")}
-                      className="px-3 py-2 bg-bg-elevated text-text-primary text-sm rounded-md hover:bg-bg-input transition-colors"
-                    >
-                      Open Dashboard
-                    </button>
-                  </>
+                  <button
+                    onClick={() => navigate("/settings")}
+                    className="px-3 py-2 bg-accent text-white text-sm rounded-md hover:bg-accent-hover transition-colors"
+                  >
+                    Install Extension
+                  </button>
                 ) : (
                   <button
                     onClick={() => setActiveTab("user")}
