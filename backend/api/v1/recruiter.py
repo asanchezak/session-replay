@@ -271,6 +271,21 @@ async def run_demo(
             "send": (req.send if req else False)}
 
 
+@router.post("/jobs/{job_id}/reset")
+async def reset_pipeline(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Reset orchestration for the Odoo "Reset & re-buscar" button: archive the WHOLE
+    current LinkedIn project, then restart the sourcing pipeline from scratch (create a
+    fresh project → AI boolean search from the current JD → save), as if the "search
+    candidates" checkbox had just been ticked. Chains via the terminal hook. The Odoo
+    linkedin.lead rows are hard-deleted in Odoo by the button before this call. Returns
+    the first queued run id (the archive, or the create-project when there's no project
+    to archive)."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.reset_and_research(job_id)
+    await db.commit()
+    return res
+
+
 @router.post("/jobs/{job_id}/save-recommendations")
 async def save_recommendations(
     job_id: str,
