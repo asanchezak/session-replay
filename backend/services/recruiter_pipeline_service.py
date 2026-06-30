@@ -93,11 +93,12 @@ PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
 _PROJECT_DESC_MAX = 2000
 # Default outreach copy for req B (send_messages); overridable per call.
-DEFAULT_MESSAGE_SUBJECT = "Oportunidad en Akurey"
+DEFAULT_MESSAGE_SUBJECT = "Opportunity at AKUREY"
 DEFAULT_MESSAGE_BODY = (
-    "Hola, ¡espero que estés muy bien! Te escribo desde Akurey porque tu perfil "
-    "nos llamó la atención para una posición que tenemos abierta. ¿Te interesaría "
-    "que conversemos? ¡Saludos!"
+    "Hi {Name},\n\n"
+    "I'm reaching out from AKUREY — your profile really caught our attention for an "
+    "opening we currently have. If you're interested, we'd love to connect and tell "
+    "you more about the role. I look forward to hearing from you!"
 )
 # "Add contact note" copy; overridable per call. The note records WHAT position they were
 # contacted for, WHO contacted them (the automation, by default), and a deep-link back to
