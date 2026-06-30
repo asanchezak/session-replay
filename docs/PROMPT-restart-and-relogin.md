@@ -5,6 +5,16 @@
 > (which dies on the restart). This is the exact sequence that worked on 2026-06-09. After this
 > succeeds, hand off to the task in `docs/PROMPT-next-ai-extract-save.md`.
 
+> **⚡ NEW (2026-06-30) — one-click re-login for the operator.** When the seat is just *walled*
+> (not a code deploy), the human no longer needs the manual SSH dance below. They double-click
+> **`login-talent.bat`** on the `linkedin-bot` Desktop → click **Yes** on the UAC prompt → Chrome
+> opens → sign in (+ pick the **Morsoft SRL - Recruiter** contract if asked) → the window closes
+> itself → the daemon is restarted automatically with the fresh seat. That `.bat` now self-elevates
+> and runs `extension/relogin-talent.ps1`, which encodes §1 (disable+stop task, kill node/wrapper/
+> Chrome, clear `Singleton*` locks) → §2 (the human login via `login-talent.mjs`, which now waits
+> past `/talent/contract-chooser`) → §3 (enable+start the task). The manual sequence below stays as
+> the fallback / for code-deploy restarts (where you re-sync `extension/` before starting).
+
 ---
 
 ## Why this is needed (read first)

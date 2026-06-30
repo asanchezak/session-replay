@@ -1388,9 +1388,10 @@ async function addProfileToProject(page, options, orand, runtime) {
 }
 
 // Compose a bulk InMail to a project's ACTIVE candidates using a template body. The
-// literal `{Nombre}` token in the body is inserted as the LinkedIn VARIABLE CHIP (via
-// the composer's "Insert variables / Insertar variables" button) — typing it literally
-// would send the text "{Nombre}" to everyone. GATED: with send=false (default) it types
+// literal first-name token in the body — `{Name}` (English default) or `{Nombre}`
+// (legacy Spanish) — is inserted as the LinkedIn VARIABLE CHIP (via the composer's
+// "Insert variables / Insertar variables" button) — typing it literally would send the
+// text "{Name}" to everyone. GATED: with send=false (default) it types
 // everything and STOPS (the per-step snapshot proves recipients + message); send=true
 // clicks Send. Params: project_url, body, subject, send.
 async function composeRecruiterMessage(page, options, orand, runtime) {
@@ -1526,8 +1527,9 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
     await page.keyboard.press("Backspace").catch(() => {});
     await sleep(500);
 
-    // Type the body; replace each literal {Nombre} with the variable chip.
-    const parts = body.split("{Nombre}");
+    // Type the body; replace each literal first-name token with the variable chip.
+    // Accept {Name} (English default) and {Nombre} (legacy Spanish), case-insensitive.
+    const parts = body.split(/\{(?:name|nombre)\}/gi);
     let variableInserted = false;
     for (let i = 0; i < parts.length; i++) {
       const seg = parts[i];

@@ -59,12 +59,18 @@ console.log("");
 console.log("=".repeat(70));
 console.log("Sign in to LinkedIn Talent Solutions (Recruiter) in the Chrome window.");
 console.log("The email should be pre-filled — enter the password, solve any");
-console.log("challenge. Watching until a real /talent/ page loads (max 25 min)...");
+console.log("challenge. If a CONTRACT picker appears, choose 'Morsoft SRL - Recruiter'.");
+console.log("Watching until a real /talent/ page loads (max 25 min)...");
 console.log("=".repeat(70));
 
+// "Done" = on a real /talent/ page, NOT on a login wall AND NOT still sitting on the
+// contract chooser. The seat has multiple contracts; if we closed on the chooser the
+// captured session would have no contract selected and the recruiter surfaces (projects/
+// search) would wall. So wait until the operator picks the Morsoft Recruiter contract and
+// lands on an actual recruiter page.
 const onTalent = (u) =>
   /linkedin\.com\/talent\//.test(u) &&
-  !/\/uas\/login|login-cap|\/checkpoint\/|\/login\b|authwall|\/challenge/i.test(u);
+  !/\/uas\/login|login-cap|\/checkpoint\/|\/login\b|authwall|\/challenge|\/contract-chooser/i.test(u);
 
 const deadline = Date.now() + 25 * 60_000;
 let last = "";

@@ -53,9 +53,14 @@ EVENT_NOTES_SYNC = "recruiter_notes_sync"
 # optionally message it. archive-all (looped) → add-profile → (send → recruiter_message).
 EVENT_DEMO_ARCHIVE = "recruiter_demo_archive"
 EVENT_DEMO_ADD = "recruiter_demo_add"
+# RESET button chain (Odoo "Reset & re-buscar"): archive the WHOLE LinkedIn project, then
+# restart the sourcing pipeline from scratch (create project → search → save), as if the
+# "search candidates" checkbox had just been ticked. archive-project → start().
+EVENT_RESET_ARCHIVE = "recruiter_reset_archive"
 PIPELINE_EVENT_KINDS = {
     EVENT_CREATE_PROJECT, EVENT_SEARCH, EVENT_SAVE, EVENT_MESSAGE, EVENT_ARCHIVE,
     EVENT_RECOMMENDATIONS, EVENT_NOTE, EVENT_NOTES_SYNC, EVENT_DEMO_ARCHIVE, EVENT_DEMO_ADD,
+    EVENT_RESET_ARCHIVE,
 }
 
 # Recruiter event kinds whose FAILURE should NOT raise a position-level alarm in Odoo:
@@ -73,6 +78,7 @@ _FLOW_STAGE_LABELS = {
     EVENT_ARCHIVE: "archive candidate",
     EVENT_RECOMMENDATIONS: "add recommended",
     EVENT_NOTE: "add contact note",
+    EVENT_RESET_ARCHIVE: "reset (archive project)",
 }
 
 _NON_TERMINAL = (
@@ -87,11 +93,12 @@ PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
 _PROJECT_DESC_MAX = 2000
 # Default outreach copy for req B (send_messages); overridable per call.
-DEFAULT_MESSAGE_SUBJECT = "Oportunidad en Akurey"
+DEFAULT_MESSAGE_SUBJECT = "Opportunity at AKUREY"
 DEFAULT_MESSAGE_BODY = (
-    "Hola, ¡espero que estés muy bien! Te escribo desde Akurey porque tu perfil "
-    "nos llamó la atención para una posición que tenemos abierta. ¿Te interesaría "
-    "que conversemos? ¡Saludos!"
+    "Hi {Name},\n\n"
+    "I'm reaching out from AKUREY — your profile really caught our attention for an "
+    "opening we currently have. If you're interested, we'd love to connect and tell "
+    "you more about the role. I look forward to hearing from you!"
 )
 # "Add contact note" copy; overridable per call. The note records WHAT position they were
 # contacted for, WHO contacted them (the automation, by default), and a deep-link back to
@@ -432,6 +439,8 @@ class RecruiterPipelineService:
             return await self._after_demo_archive(run, pipeline, connector_id, job_id)
         if event_kind == EVENT_DEMO_ADD:
             return await self._after_demo_add(run, pipeline, connector_id, job_id)
+        if event_kind == EVENT_RESET_ARCHIVE:
+            return await self._after_reset_archive(run, pipeline, connector_id, job_id)
         return {"skipped": "unknown_event_kind", "event_kind": event_kind}
 
     async def _after_recommendations(self, run, pipeline, connector_id, job_id) -> dict:
@@ -574,6 +583,91 @@ class RecruiterPipelineService:
             "recruiter demo: profile added → message-send run %s (job %s)", msg_run, job_id
         )
         return {"stage": "demo_add", "next_run": msg_run, "sent": bool(msg_run)}
+
+    # ---------------------------------------------------------------- reset button
+    async def reset_and_research(self, job_id) -> dict:
+        """Odoo "Reset & re-buscar" button: wipe the LinkedIn side and re-run sourcing
+        from scratch. Chains via the terminal hook (no polling): archive the WHOLE
+        current project → start() the normal pipeline (create a fresh project → AI
+        boolean search from the current JD → save). The Odoo linkedin.lead rows are
+        hard-deleted IN Odoo by the akcr button BEFORE this call, so no Odoo write-back
+        happens here. Returns {run_id} or {skipped/error}.
+
+        Falls back to starting the pipeline directly (no archive) when the job has no
+        known project or the archive-project workflow is unconfigured."""
+        job_id = str(job_id)
+        ctx = await self._gather_job_context(job_id)
+        connector_id = ctx.get("connector_id") or await self._latest_recruiter_connector()
+        if not connector_id:
+            return {"error": "could not resolve a connector for this job"}
+        # Title for the project name / position — prefer Odoo (no AI), fall back to context.
+        position = ""
+        try:
+            _, title, _ = await self._fetch_job_corpus(job_id, connector_id)
+            position = title or ""
+        except Exception:  # noqa: BLE001
+            pass
+        position = position or ctx.get("position") or ""
+        if not position:
+            return {"error": "could not resolve the job title/position"}
+        if await self._has_active_pipeline_run(job_id):
+            return {"skipped": "active pipeline run already exists for this job"}
+        job_payload = {"job_id": job_id, "name": position, "job_title": position}
+
+        project_url = ctx.get("project_url")
+        if not project_url and ctx.get("project_id"):
+            project_url = (
+                f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
+            )
+        arch_wf = settings.recruiter_archive_project_workflow_id
+        if project_url and arch_wf:
+            pipeline = {
+                "job_id": job_id,
+                "connector_id": connector_id,
+                "position": position,
+                "project_url": project_url,
+                "project_name": ctx.get("project_name"),
+                "job_payload": job_payload,
+            }
+            run = await self._create_pipeline_run(
+                workflow_id=arch_wf, event_kind=EVENT_RESET_ARCHIVE,
+                runtime_params={
+                    "project_url": project_url,
+                    "project_name": ctx.get("project_name") or "",
+                },
+                pipeline=pipeline, connector_id=connector_id,
+            )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_RESET_ARCHIVE, run_id=run.id,
+                message="🔄 Reinicio: archivando el proyecto actual de LinkedIn…",
+            )
+            logger.info(
+                "recruiter reset: archiving project for job %s → run %s", job_id, run.id
+            )
+            return {"run_id": str(run.id), "stage": "reset_archive", "position": position}
+
+        # No project to archive (or archive workflow unset) → just (re)start the pipeline.
+        logger.info(
+            "recruiter reset: no project to archive for job %s (project_url=%r, wf=%r) "
+            "— starting pipeline directly", job_id, project_url, bool(arch_wf),
+        )
+        run_id = await self.start(connector_id, job_payload)
+        if not run_id:
+            return {"error": "pipeline did not start (see logs)"}
+        return {"run_id": run_id, "stage": "create_project", "position": position}
+
+    async def _after_reset_archive(self, run, pipeline, connector_id, job_id) -> dict:
+        """Reset: the whole project was archived — now restart the normal sourcing
+        pipeline (create a fresh project → search → save). The archive run is already
+        terminal (COMPLETED) by the time this fresh-session hook runs, so start()'s
+        own _has_active_pipeline_run guard passes."""
+        job_payload = pipeline.get("job_payload") or {"job_id": job_id}
+        run_id = await self.start(connector_id, job_payload)
+        logger.info(
+            "recruiter reset: project archived for job %s → restart run %s", job_id, run_id
+        )
+        return {"stage": "reset_archive", "restarted": bool(run_id), "next_run": run_id}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
         # Requirement C: push the new project URL to hr.job.recruiter_project_url.
