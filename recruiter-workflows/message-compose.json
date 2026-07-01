@@ -1,6 +1,6 @@
 {
   "name": "Recruiter: compose bulk InMail from a template ({Nombre} chip) — gated",
-  "description": "Selects a project's ACTIVE candidates, opens the bulk InMail composer, clears the AI draft, and types the template {{body}} — replacing each literal {Nombre} token with the LinkedIn variable CHIP (via 'Insert variables'/'Insertar variables'). Sets the subject (handles the subject-reveal quirk). If send=false (default) it STOPS so the per-step snapshot proves recipients + message; if send=true it clicks Send (REAL InMail). Params: project_url, body, subject, send.",
+  "description": "Messages a project's candidates with a template {{body}} — replacing each literal {Name}/{Nombre} token with the LinkedIn variable CHIP. If target_profile_url/target_name is given, selects ONLY that one candidate (single-send, next-uncontacted); otherwise select-all (bulk). Sets the subject (handles the subject-reveal quirk). send=false (default) STOPS for a snapshot preview; send=true clicks Send (REAL InMail). Params: project_url, body, subject, send, target_profile_url, target_name.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
     {
@@ -25,7 +25,9 @@
           "project_url": "{{project_url}}",
           "body": "{{body}}",
           "subject": "{{subject}}",
-          "send": "{{send}}"
+          "send": "{{send}}",
+          "target_profile_url": "{{target_profile_url}}",
+          "target_name": "{{target_name}}"
         }
       ]
     }

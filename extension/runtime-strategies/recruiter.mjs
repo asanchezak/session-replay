@@ -1407,6 +1407,14 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   const body = String(options.body || "");
   const subject = String(options.subject || "").trim();
   const send = !!options.send;
+  // Single-send mode: when a target candidate is given, message ONLY that one (the next
+  // uncontacted, picked by akcr from linkedin.lead.outreach_status). Empty / unsubstituted
+  // "{{…}}" placeholders → bulk select-all (the preserved legacy behavior).
+  const _tUrl = String(options.targetProfileUrl || options.target_profile_url || "");
+  const _tName = String(options.targetName || options.target_name || "");
+  const targetUrl = _tUrl.startsWith("{{") ? "" : _tUrl.trim();
+  const targetName = _tName.startsWith("{{") ? "" : _tName.trim();
+  const singleMode = !!(targetUrl || targetName);
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, sent: false, reason: "missing_project_id" };
   if (!body) return { ok: false, sent: false, reason: "missing_body" };
@@ -1495,7 +1503,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
 
     // Capture the active candidates we're about to message (profile_url + name), so the
     // backend can mark exactly these as messaged in Odoo.
-    const recipients = await page.evaluate(() => {
+    let recipients = await page.evaluate(() => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
       const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
       const out = []; const seen = new Set();
@@ -1509,7 +1517,34 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       return out;
     }).catch(() => []);
 
-    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
+    if (singleMode) {
+      // SINGLE-SEND: select ONLY the target candidate's row checkbox (match by profile URL,
+      // fall back to name), instead of select-all. Tag the checkbox then trusted-click it.
+      const match = await page.evaluate(({ turl, tname }) => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const norm = (s) => clean(s).toLowerCase();
+        const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+        const tp = canon(turl); const tn = norm(tname);
+        for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
+          const link = row.querySelector('a[href*="/talent/profile/"]');
+          const url = canon(link && link.getAttribute("href"));
+          const nm = norm(link && (link.innerText || link.textContent));
+          const hit = (tp && url === tp) || (tn && nm && (nm === tn || nm.startsWith(tn) || tn.startsWith(nm)));
+          if (!hit) continue;
+          const cb = row.querySelector("input.small-input[type='checkbox'], input[type='checkbox'], input.small-input");
+          if (cb) { cb.setAttribute("data-sr-msg-target", "1"); return { matched: true, url, name: clean(link.innerText || link.textContent) }; }
+        }
+        return { matched: false };
+      }, { turl: targetUrl, tname: targetName }).catch(() => ({ matched: false }));
+      if (!match.matched) {
+        return { ok: false, sent: false, recipient_count: recipientCount, reason: "target_not_found", target_url: targetUrl, target_name: targetName };
+      }
+      if (!await clickSel("input[data-sr-msg-target='1']")) {
+        return { ok: false, sent: false, recipient_count: recipientCount, reason: "target_checkbox_click_failed", target_name: match.name };
+      }
+      // Report ONLY the one candidate we messaged (so the backend marks exactly this lead).
+      recipients = [{ profile_url: match.url, name: match.name }];
+    } else if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
       return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
     }
     await sleep(900 + Math.floor(orand() * 400));
