@@ -103,7 +103,7 @@ DEFAULT_MESSAGE_BODY = (
 # "Add contact note" copy; overridable per call. The note records WHAT position they were
 # contacted for, WHO contacted them (the automation, by default), and a deep-link back to
 # the Odoo position — composed in _default_note_text from the job context + connector URL.
-DEFAULT_NOTE_PREFIX = "Contactado - "
+DEFAULT_NOTE_PREFIX = "Contacted - "
 DEFAULT_CONTACTED_BY = "Automation"
 
 
@@ -331,10 +331,10 @@ class RecruiterPipelineService:
                     await self._push_flow_status(
                         job_id=job_id, connector_id=connector_id, status="failed",
                         event_kind=EVENT_CREATE_PROJECT, error_summary=str(exc),
-                        message="❌ No se pudo generar la búsqueda booleana: la IA no está "
-                                "disponible (sin cuota de OpenAI). Proceso detenido — no se "
-                                "creó el proyecto ni se ejecutó la búsqueda. Reintentar cuando "
-                                "haya cuota.",
+                        message="❌ Couldn't build the boolean search: the AI is unavailable "
+                                "(no OpenAI quota). Process stopped — the project was not "
+                                "created and the search did not run. Retry when quota is "
+                                "available.",
                     )
                     return None
                 if location is not None:
@@ -461,7 +461,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
-                message="✨ No hay recomendaciones nuevas por ahora — LinkedIn no sugirió más candidatos para esta posición.",
+                message="✨ No new recommendations right now — LinkedIn didn't suggest more candidates for this position.",
             )
             return {"stage": "recommendations", "done": True, "no_recommendations": True, "leads": 0}
         lead_res = await self.push.push_recruiter_leads(
@@ -640,7 +640,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="running",
                 event_kind=EVENT_RESET_ARCHIVE, run_id=run.id,
-                message="🔄 Reinicio: archivando el proyecto actual de LinkedIn…",
+                message="🔄 Reset: archiving the current LinkedIn project…",
             )
             logger.info(
                 "recruiter reset: archiving project for job %s → run %s", job_id, run.id
@@ -710,8 +710,8 @@ class RecruiterPipelineService:
                     await self._push_flow_status(
                         job_id=job_id, connector_id=connector_id, status="failed",
                         event_kind=EVENT_SEARCH, error_summary=str(exc),
-                        message="❌ No se pudo generar la búsqueda booleana: la IA no está "
-                                "disponible (sin cuota de OpenAI). Búsqueda no ejecutada.",
+                        message="❌ Couldn't build the boolean search: the AI is unavailable "
+                                "(no OpenAI quota). Search not run.",
                     )
                     return {"stage": "create_project", "boolean_failed": True}
                 pipeline["search_spec"] = built["spec"]
@@ -1137,8 +1137,8 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
-                message=f"✅ Todos los candidatos del proyecto ya fueron contactados "
-                        f"({compose.get('contacted_count', 0)}) — no se enviaron mensajes nuevos.",
+                message=f"✅ All candidates in the project were already contacted "
+                        f"({compose.get('contacted_count', 0)}) — no new messages were sent.",
             )
             return {"stage": "message", "sent": False, "no_uncontacted": True}
         if not pipeline.get("send") or not compose.get("sent"):
@@ -1190,12 +1190,12 @@ class RecruiterPipelineService:
 
     async def _default_note_text(self, job_id, position: str | None,
                                  connector_id, contacted_by: str = DEFAULT_CONTACTED_BY) -> str:
-        """Compose the LinkedIn note: "Contactado - <posición> · por: <quién> · <link Odoo>".
+        """Compose the LinkedIn note: "Contacted - <position> · by: <who> · <Odoo link>".
         The Odoo deep-link (classic web client form URL) is built from the connector's base
         URL + job_id; if the connector is unconfigured the link is omitted (graceful)."""
         pos = (position or "").strip()
-        parts = [f"{DEFAULT_NOTE_PREFIX}{pos}".strip(" -") if pos else "Contactado",
-                 f"por: {contacted_by}"]
+        parts = [f"{DEFAULT_NOTE_PREFIX}{pos}".strip(" -") if pos else "Contacted",
+                 f"by: {contacted_by}"]
         ep = await self.push._connector_endpoint(connector_id)
         if ep:
             base, _key = ep
@@ -1338,8 +1338,8 @@ class RecruiterPipelineService:
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_NOTE, run_id=run.id,
-            message=(f"📝 Nota de contacto agregada a {noted} candidato(s)"
-                     + (f" + {movedN} movidos a 'contacted'." if moved else ".")),
+            message=(f"📝 Contact note added to {noted} candidate(s)"
+                     + (f" + {movedN} moved to 'contacted'." if moved else ".")),
         )
         # The note is now on LinkedIn (global to each candidate) — mirror it as a
         # linkedin.candidate.note in Odoo so the candidate view reflects it. Best-effort,
