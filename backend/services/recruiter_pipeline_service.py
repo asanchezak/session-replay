@@ -1488,7 +1488,9 @@ class RecruiterPipelineService:
         return {"status": "ok", "received": len(replies), **res}
 
     async def send_messages(self, job_id, subject: str | None = None,
-                            body: str | None = None, send: bool = False) -> str | None:
+                            body: str | None = None, send: bool = False,
+                            target_profile_url: str | None = None,
+                            target_name: str | None = None) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
         candidates with a template body. Fires the recruiter_message_compose run
         (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
@@ -1513,6 +1515,8 @@ class RecruiterPipelineService:
         project_url = (
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
+        target_profile_url = (target_profile_url or "").strip()
+        target_name = (target_name or "").strip()
         pipeline_ctx = {
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
@@ -1521,16 +1525,24 @@ class RecruiterPipelineService:
             "project_name": ctx.get("project_name"),
             "subject": subject,
             "send": bool(send),
+            "target_profile_url": target_profile_url,
+            "target_name": target_name,
+        }
+        # Single-send mode: when a target is given, message ONLY that one candidate; else the
+        # strategy falls back to bulk select-all. ALWAYS pass the keys (empty in bulk mode) so
+        # the snapshot substitution never leaves a literal "{{target_profile_url}}" behind.
+        runtime_params = {
+            "project_url": project_url,
+            "subject": subject,
+            "body": body,
+            "send": "true" if send else "false",
+            "target_profile_url": target_profile_url,
+            "target_name": target_name,
         }
         run = await self._create_pipeline_run(
             workflow_id=wf,
             event_kind=EVENT_MESSAGE,
-            runtime_params={
-                "project_url": project_url,
-                "subject": subject,
-                "body": body,
-                "send": "true" if send else "false",
-            },
+            runtime_params=runtime_params,
             pipeline=pipeline_ctx,
             connector_id=ctx.get("connector_id"),
         )

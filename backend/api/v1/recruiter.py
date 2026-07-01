@@ -30,6 +30,11 @@ class SendMessagesRequest(BaseModel):
     # Gated: false (default) = compose + STOP for a snapshot preview (no real send);
     # true = actually send InMail. The Odoo wizard sends false first, then true.
     send: bool = False
+    # Single-send mode: when set, message ONLY this one candidate (the next uncontacted,
+    # chosen by akcr from linkedin.lead.outreach_status) instead of the whole project.
+    # Absent → the legacy bulk select-all behavior.
+    target_profile_url: str | None = None
+    target_name: str | None = None
 
 
 class AddNoteRequest(BaseModel):
@@ -131,6 +136,8 @@ async def send_messages(
         subject=(req.subject if req else None),
         body=(req.body if req else None),
         send=(req.send if req else False),
+        target_profile_url=(req.target_profile_url if req else None),
+        target_name=(req.target_name if req else None),
     )
     await db.commit()
     if not run_id:
