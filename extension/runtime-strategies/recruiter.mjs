@@ -144,9 +144,6 @@ function readMessageComposeOptions(step) {
     body: String(method.body ?? "").trim(),
     subject: String(method.subject ?? "").trim(),
     send: send === true || send === "true" || send === 1 || send === "1",
-    // Single-send: message only this candidate (empty → bulk select-all).
-    targetProfileUrl: String(method.target_profile_url ?? "").trim(),
-    targetName: String(method.target_name ?? "").trim(),
   };
 }
 
@@ -1410,14 +1407,6 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   const body = String(options.body || "");
   const subject = String(options.subject || "").trim();
   const send = !!options.send;
-  // Single-send mode: when a target candidate is given, message ONLY that one (the next
-  // uncontacted, picked by akcr from linkedin.lead.outreach_status). Empty / unsubstituted
-  // "{{…}}" placeholders → bulk select-all (the preserved legacy behavior).
-  const _tUrl = String(options.targetProfileUrl || options.target_profile_url || "");
-  const _tName = String(options.targetName || options.target_name || "");
-  const targetUrl = _tUrl.startsWith("{{") ? "" : _tUrl.trim();
-  const targetName = _tName.startsWith("{{") ? "" : _tName.trim();
-  const singleMode = !!(targetUrl || targetName);
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, sent: false, reason: "missing_project_id" };
   if (!body) return { ok: false, sent: false, reason: "missing_body" };
@@ -1501,10 +1490,43 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
     await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(1800 + Math.floor(orand() * 600));
-    const recipientCount = await readPipelineCounts(page).then((c) => c.active);
+
+    // Message only the UNCONTACTED candidates: switch from "All candidates" to the native
+    // "uncontacted" pipeline stage so contacted/replied candidates are never re-messaged.
+    // The stage links are locale-independent (the seat flips ES↔EN): the first/uncontacted
+    // stage is data-live-test-pipeline-state="SHORTLISTED" (labeled "uncontacted"), with an
+    // href to /talent/hire/<proj>/manage/<stageId>. Select-all on that view then scopes to
+    // uncontacted only — no fragile per-candidate matching.
+    const stage = await page.evaluate(() => {
+      const node = document.querySelector('[data-live-test-pipeline-state="SHORTLISTED"], [data-test-pipeline-state][data-live-test-pipeline-state="SHORTLISTED"]');
+      if (!node) return { found: false };
+      const a = node.tagName === "A" ? node : (node.closest("a") || node.querySelector("a"));
+      const href = (a && a.getAttribute("href")) || node.getAttribute("href") || "";
+      const cnt = node.querySelector("[data-test-pipeline-profile-count], [data-live-test-pipeline-profile-count]");
+      const mm = String((cnt && cnt.textContent) || node.textContent || "").match(/(\d[\d.,]*)/);
+      return { found: true, href, count: mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null };
+    }).catch(() => ({ found: false }));
+
+    // Nobody uncontacted → nothing to send. The backend maps reason "no_uncontacted" to a
+    // clean "all candidates already contacted" outcome (no Odoo update, no re-message).
+    if (stage.found && stage.count === 0) {
+      const contactedTotal = await readPipelineCounts(page).then((c) => c.active).catch(() => null);
+      return { ok: false, sent: false, recipient_count: 0, reason: "no_uncontacted", contacted_count: contactedTotal };
+    }
+    if (stage.found && stage.href) {
+      await page.goto("https://www.linkedin.com" + stage.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await sleep(1500 + Math.floor(orand() * 500));
+    }
+    // else: SHORTLISTED stage link not found (DOM drift) → stay on /manage/all (messages all
+    // active). Fallback only; the stage nav above is the normal path.
+    const recipientCount = stage.found && stage.count != null
+      ? stage.count
+      : await readPipelineCounts(page).then((c) => c.active);
     if (recipientCount === 0) return { ok: false, sent: false, recipient_count: 0, reason: "no_active_candidates" };
 
-    // Capture the active candidates we're about to message (profile_url + name), so the
+    // Capture the (uncontacted) candidates we're about to message (profile_url + name), so the
     // backend can mark exactly these as messaged in Odoo.
     let recipients = await page.evaluate(() => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
@@ -1520,69 +1542,9 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       return out;
     }).catch(() => []);
 
-    if (singleMode) {
-      // SINGLE-SEND: select ONLY the target candidate's row checkbox (match by profile URL,
-      // fall back to name), instead of select-all. Use the SAME proven mechanism as the
-      // save flow: coordinate-click the checkbox's visible selector box (clicking the raw
-      // hidden input doesn't toggle LinkedIn's selection → the bulk toolbar never appears).
-      const match = await page.evaluate(({ turl, tname }) => {
-        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-        const norm = (s) => clean(s).toLowerCase();
-        const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
-        const tp = canon(turl); const tn = norm(tname);
-        for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
-          const link = row.querySelector('a[href*="/talent/profile/"]');
-          const url = canon(link && link.getAttribute("href"));
-          const nm = norm(link && (link.innerText || link.textContent));
-          const hit = (tp && url === tp) || (tn && nm && (nm === tn || nm.startsWith(tn) || tn.startsWith(nm)));
-          if (!hit) continue;
-          const input = row.querySelector('input.small-input[type="checkbox"], input.small-input, input[type="checkbox"]');
-          if (!input) continue;
-          const label = input.id ? Array.from(row.querySelectorAll("label")).find((c) => c.getAttribute("for") === input.id) : null;
-          let box = null;
-          for (const c of [input.closest(".profile-list-item__selector"), input.closest("label"), label, input].filter(Boolean)) {
-            const r = c.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) { box = r; break; }
-          }
-          if (!box) continue;
-          return { matched: true, url, name: clean(link.innerText || link.textContent), inputId: input.id || "", already: !!input.checked, x: box.left + box.width / 2, y: box.top + box.height / 2 };
-        }
-        return { matched: false };
-      }, { turl: targetUrl, tname: targetName }).catch(() => ({ matched: false }));
-      if (!match.matched) {
-        return { ok: false, sent: false, recipient_count: recipientCount, reason: "target_not_found", target_url: targetUrl, target_name: targetName };
-      }
-      const isChecked = () => page.evaluate((id) => { if (!id) return true; const el = document.getElementById(id); return Boolean(el && el.checked); }, match.inputId).catch(() => true);
-      if (!match.already && match.inputId) {
-        // Scroll the row into view, THEN read fresh coords (the initial box can be
-        // off-screen → a stale coordinate click misses). Coordinate-click; on miss, fall
-        // back to a direct input.click() (same as the save flow).
-        const coord = await page.evaluate((id) => {
-          const el = document.getElementById(id);
-          if (!el) return null;
-          el.scrollIntoView({ block: "center", inline: "center" });
-          const t = el.closest(".profile-list-item__selector") || el.closest("label") || el;
-          const r = t.getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-        }, match.inputId).catch(() => null);
-        await sleep(300 + Math.floor(orand() * 200));
-        if (coord) {
-          await moveMouseAlongBezier(page, { x: coord.x, y: coord.y }, orand).catch(() => {});
-          await sleep(120 + Math.floor(orand() * 160));
-          await page.mouse.click(coord.x, coord.y).catch(() => {});
-          await sleep(240 + Math.floor(orand() * 220));
-        }
-        if (!await isChecked()) {
-          await page.evaluate((id) => { const el = document.getElementById(id); if (el && !el.checked) el.click(); }, match.inputId).catch(() => {});
-          await sleep(240 + Math.floor(orand() * 220));
-        }
-        if (!await isChecked()) {
-          return { ok: false, sent: false, recipient_count: recipientCount, reason: "target_checkbox_not_checked", target_name: match.name };
-        }
-      }
-      // Report ONLY the one candidate we messaged (so the backend marks exactly this lead).
-      recipients = [{ profile_url: match.url, name: match.name }];
-    } else if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
+    // Select every candidate in the (uncontacted) view. LinkedIn's "select all" spans pages
+    // via its "select all N" banner, so this covers all uncontacted candidates.
+    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
       return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
     }
     await sleep(900 + Math.floor(orand() * 400));
