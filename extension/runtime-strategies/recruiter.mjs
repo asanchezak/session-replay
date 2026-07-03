@@ -42,6 +42,67 @@ async function readPipelineCounts(page) {
   }).catch(() => ({ active: null, archived: null }));
 }
 
+// Safety backstop: an ungated bulk InMail/note run must never blast an unbounded set on this
+// sensitive account. A recipient count beyond this FAILS the run loudly (never sends). Realistic
+// per-position uncontacted counts are well under this; hot-reload (scp) to tune.
+const MAX_BULK_RECIPIENTS = 200;
+
+// Enumerate a Recruiter profile-list's rows (profile_url + name) across VIRTUALIZATION. The list
+// only renders the rows currently in the viewport (~2-3), so a one-shot scrape under-captures
+// badly — the root cause of the "marked 2 of 18 messaged" bug (select-all sent to all N, but the
+// captured recipients array held only the ~2 visible rows). Scroll the list's scrollable
+// container in steps, collecting rows until we reach `expected` or the set stops growing. Bounded
+// by iterations + a soft time budget so it never hangs a daemon step; returns to the top after.
+async function collectListRows(page, sleep, expected, orand) {
+  const rnd = () => (typeof orand === "function" ? orand() : Math.random());
+  const ROWS = "[data-test-profile-list-view-list-row], .profile-list-item";
+  const collected = new Map();
+  let stable = 0;
+  const t0 = Date.now();
+  for (let i = 0; i < 80 && Date.now() - t0 < 60000; i++) {
+    const batch = await page.evaluate((rowSel) => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+      const out = [];
+      for (const row of Array.from(document.querySelectorAll(rowSel))) {
+        const link = row.querySelector('a[href*="/talent/profile/"]');
+        const url = canon(link && link.getAttribute("href"));
+        if (!url) continue;
+        out.push({ profile_url: url, name: clean(link.innerText || link.textContent) });
+      }
+      return out;
+    }, ROWS).catch(() => []);
+    const before = collected.size;
+    for (const r of batch) if (!collected.has(r.profile_url)) collected.set(r.profile_url, r);
+    if (expected && collected.size >= expected) break;
+    if (collected.size === before) { if (++stable >= 3) break; } else { stable = 0; }
+    // Scroll the rows' nearest scrollable ancestor (and the window) down to render the next batch.
+    await page.evaluate((rowSel) => {
+      const rows = document.querySelectorAll(rowSel);
+      const last = rows[rows.length - 1];
+      if (last) last.scrollIntoView({ block: "end" });
+      let el = last;
+      while (el) {
+        const cs = getComputedStyle(el);
+        if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) {
+          el.scrollTop = Math.min(el.scrollTop + Math.max(el.clientHeight * 0.8, 400), el.scrollHeight);
+          break;
+        }
+        el = el.parentElement;
+      }
+      window.scrollBy(0, 500);
+    }, ROWS).catch(() => {});
+    await sleep(450 + Math.floor(rnd() * 300));
+  }
+  // Return to the top so a subsequent select-all / header interaction is unaffected.
+  await page.evaluate((rowSel) => {
+    let el = document.querySelector(rowSel);
+    while (el) { const cs = getComputedStyle(el); if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) { el.scrollTop = 0; break; } el = el.parentElement; }
+    window.scrollTo(0, 0);
+  }, ROWS).catch(() => {});
+  return Array.from(collected.values());
+}
+
 function readSearchOptions(step) {
   const methods = Array.isArray(step?.methods) ? step.methods : [];
   const method = methods.find(
@@ -1525,22 +1586,16 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       ? stage.count
       : await readPipelineCounts(page).then((c) => c.active);
     if (recipientCount === 0) return { ok: false, sent: false, recipient_count: 0, reason: "no_active_candidates" };
+    // Safety backstop (ungated run on a sensitive account): never bulk-send beyond the cap.
+    if (recipientCount != null && recipientCount > MAX_BULK_RECIPIENTS) {
+      return { ok: false, sent: false, recipient_count: recipientCount, reason: "exceeds_max_recipients" };
+    }
 
     // Capture the (uncontacted) candidates we're about to message (profile_url + name), so the
-    // backend can mark exactly these as messaged in Odoo.
-    let recipients = await page.evaluate(() => {
-      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-      const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
-      const out = []; const seen = new Set();
-      for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
-        const link = row.querySelector('a[href*="/talent/profile/"]');
-        const url = canon(link && link.getAttribute("href"));
-        if (!url || seen.has(url)) continue;
-        seen.add(url);
-        out.push({ profile_url: url, name: clean(link.innerText || link.textContent) });
-      }
-      return out;
-    }).catch(() => []);
+    // backend marks EXACTLY these as messaged in Odoo. The list is VIRTUALIZED — a one-shot scrape
+    // only sees the ~2 rows in the viewport, which silently marked 2 of N messaged while select-all
+    // sent to all N. collectListRows scrolls to enumerate the full set.
+    let recipients = await collectListRows(page, sleep, recipientCount, orand);
 
     // Select every candidate in the (uncontacted) view. LinkedIn's "select all" spans pages
     // via its "select all N" banner, so this covers all uncontacted candidates.
@@ -1903,33 +1958,65 @@ async function composeRecruiterNote(page, options, orand, runtime) {
 
   const diag = { bulk_bar: null, note_candidates: [], note_field: null, overflow_tried: false, opened_via: null, pages: [] };
 
-  try {
+    // Read the SHORTLISTED ("uncontacted") stage count off the pipeline nav — locale-independent.
+    const readUncontactedCount = () => page.evaluate(() => {
+      const node = document.querySelector('[data-live-test-pipeline-state="SHORTLISTED"], [data-test-pipeline-state][data-live-test-pipeline-state="SHORTLISTED"]');
+      if (!node) return null;
+      const cnt = node.querySelector("[data-test-pipeline-profile-count], [data-live-test-pipeline-profile-count]");
+      const mm = String((cnt && cnt.textContent) || node.textContent || "").match(/(\d[\d.,]*)/);
+      return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+    }).catch(() => null);
+
+    try {
     await page.goto(manageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
     await sleep(1800 + Math.floor(orand() * 600));
-    const recipientCount = await readPipelineCounts(page).then((c) => c.active);
+
+    // Scope to the SAME native "uncontacted" (SHORTLISTED) stage the message flow targets, so we
+    // note + move EXACTLY the just-messaged set — not every active candidate (which re-notes and
+    // over-"contacts" already-contacted people, the "2 messaged / most contacted" divergence).
+    const stage = await page.evaluate(() => {
+      const node = document.querySelector('[data-live-test-pipeline-state="SHORTLISTED"], [data-test-pipeline-state][data-live-test-pipeline-state="SHORTLISTED"]');
+      if (!node) return { found: false };
+      const a = node.tagName === "A" ? node : (node.closest("a") || node.querySelector("a"));
+      const href = (a && a.getAttribute("href")) || node.getAttribute("href") || "";
+      const cnt = node.querySelector("[data-test-pipeline-profile-count], [data-live-test-pipeline-profile-count]");
+      const mm = String((cnt && cnt.textContent) || node.textContent || "").match(/(\d[\d.,]*)/);
+      return { found: true, href, count: mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null };
+    }).catch(() => ({ found: false }));
+    if (stage.found && stage.count === 0) {
+      // Nothing uncontacted to note — a clean no-op, NOT a failure (don't alarm Odoo). Only
+      // reachable via a standalone note run; the post-send chain always has uncontacted > 0.
+      return { ok: true, saved: false, noted_count: 0, moved_count: 0, recipient_count: 0,
+               reason: "no_uncontacted", recipients: [], manage_url: manageUrl };
+    }
+    if (stage.found && stage.href) {
+      await page.goto("https://www.linkedin.com" + stage.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await sleep(1500 + Math.floor(orand() * 500));
+    }
+    // else: SHORTLISTED link not found (DOM drift) → fall back to /manage/all (notes all active).
+    const recipientCount = stage.found && stage.count != null
+      ? stage.count
+      : await readPipelineCounts(page).then((c) => c.active);
     if (recipientCount === 0) return { ok: false, saved: false, recipient_count: 0, reason: "no_active_candidates" };
+    if (recipientCount != null && recipientCount > MAX_BULK_RECIPIENTS) {
+      return { ok: false, saved: false, recipient_count: recipientCount, reason: "exceeds_max_recipients" };
+    }
 
-    // Capture the active candidates we'd note (so the backend can mark them later).
-    const recipients = await page.evaluate(() => {
-      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-      const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
-      const out = []; const seen = new Set();
-      for (const row of Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"))) {
-        const link = row.querySelector('a[href*="/talent/profile/"]');
-        const url = canon(link && link.getAttribute("href"));
-        if (!url || seen.has(url)) continue;
-        seen.add(url);
-        out.push({ profile_url: url, name: clean(link.innerText || link.textContent) });
-      }
-      return out;
-    }).catch(() => []);
+    // Capture the candidates we'd note (VIRTUALIZED list → scroll to enumerate ALL, not just the
+    // ~2 visible rows) so the backend mirrors the note for exactly this set.
+    const recipients = await collectListRows(page, sleep, recipientCount, orand);
 
-    // Recruiter's project list selects only the VISIBLE PAGE (~25) — there is NO across-pages
-    // select and NO page-size control (confirmed via snapshot). So to cover EVERY active
-    // candidate we PAGINATE: per page → select → add note → move to "contacted" → next page.
-    const MAX_PAGES = 6;
+    // Recruiter's project list selects only the VISIBLE PAGE (~25) and has no across-pages select.
+    // In a stage-filtered view, moving a page to "contacted" REMOVES it from the view, so instead
+    // of paginating we LOOP: select the visible page → note → move to "contacted" → repeat until
+    // the uncontacted stage is empty (bounded by a time + round budget, like archive-all).
+    const MAX_ROUNDS = 12;
+    const BUDGET_MS = 175000;
+    const tStart = Date.now();
 
     // Page 1: select + open the note composer (shared by the preview and the save path).
     const page1Sel = await selectPage();
@@ -1974,14 +2061,20 @@ async function composeRecruiterNote(page, options, orand, runtime) {
     };
 
     await saveStageAndRecord(page1Sel);
-    while (pagesDone < MAX_PAGES) {
-      if (!await nextPage()) break;
+    let rounds = 1;
+    while (rounds < MAX_ROUNDS && Date.now() - tStart < BUDGET_MS - 20000) {
+      // Moving a page to "contacted" removes it from the uncontacted stage view; wait for the
+      // list to refresh, then stop once no uncontacted candidates remain.
+      await sleep(1800 + Math.floor(orand() * 600));
+      const remaining = await readUncontactedCount();
+      if (remaining != null && remaining <= 0) break;
       const ps = await selectPage();
       if (!ps) break;
       const op = await openAddNote();
       if (!op.opened) break;
       await fillNote();
       await saveStageAndRecord(ps);
+      rounds++;
     }
 
     diag.stage_moved = movedTotal > 0;
