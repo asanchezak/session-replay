@@ -59,6 +59,21 @@ Watch `daemon.task.log` for sustained `[keepalive] /talent OK … warm`.
 If it walls every few min DESPITE the open browser → contention (Fernanda using Recruiter in
 parallel), not idle. See memory `project_recruiter_seat_keepalive`.
 
+**Why the seat used to wall "overnight" (root-caused 2026-07-03):** the host laptop is
+**powered off every night** (evening shutdowns ~17:15, sometimes a 03:15 Windows-Update
+restart; boot ~08:08 — see the System event log, id 1074/6005). The shutdown kills the
+daemon's Chrome, and the seat cookies are SESSION-scoped — our Playwright-launched profile
+never wrote them to disk, so every boot started walled at `/uas/login-cap`. Fernanda's own
+Chrome survives the same shutdown because a normal browser restores session cookies.
+**Fix:** `persistSeatCookies` in `runtime-strategies/daemon-behavior.mjs` — after every warm
+keepalive ping, the LinkedIn session cookies are re-written WITH a 7-day expiry so they
+persist in the cookie DB and survive restarts (`login-talent.mjs` does the same right after
+a successful sign-in). Local storage attribute only — nothing changes on the wire. Note:
+the `session.restore_on_startup=1` Preferences approach does NOT work under
+Playwright-launched Chrome (verified on throwaway profiles) — don't retry it.
+Watch for `[keepalive] persisted N session cookie(s)` in `daemon.task.log`; after a nightly
+shutdown the first morning ping should now be `OK — Recruiter seat warm`.
+
 **Activation from a walled state (human-only):** the daemon must be DOWN during login
 (its open browser holds the profile lock).
 1. Physical screen → switch-user to `linkedin-bot`

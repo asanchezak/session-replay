@@ -46,6 +46,7 @@ const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=ChromeWhatsNewUI",
+    "--hide-crash-restore-bubble",
     "--profile-directory=Default",
   ],
   ignoreDefaultArgs: ["--enable-automation"],
@@ -80,6 +81,22 @@ while (Date.now() < deadline) {
   if (cur !== last) { console.log("  url ->", cur); last = cur; }
   if (onTalent(cur)) {
     console.log("Recruiter session established. URL:", cur);
+    // The seat lives in SESSION-scoped cookies that Chromium drops on close —
+    // re-write them with an expiry so they persist to disk and the daemon (and
+    // the next boot after a host shutdown) inherits a warm seat. Same logic as
+    // persistSeatCookies in runtime-strategies/daemon-behavior.mjs.
+    try {
+      const sess = (await ctx.cookies()).filter((c) =>
+        c.expires === -1 && !c.partitionKey && String(c.domain || "").includes("linkedin.com"));
+      if (sess.length) {
+        const exp = Math.floor(Date.now() / 1000) + 7 * 86400;
+        await ctx.addCookies(sess.map((c) => ({
+          name: c.name, value: c.value, domain: c.domain, path: c.path,
+          httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite, expires: exp,
+        })));
+        console.log(`Persisted ${sess.length} session cookie(s) — seat survives browser restarts.`);
+      }
+    } catch (e) { console.log("Cookie persist skipped:", (e && e.message) || e); }
     await new Promise((r) => setTimeout(r, 5000)); // let cookies flush to disk
     break;
   }
