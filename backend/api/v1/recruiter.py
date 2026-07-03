@@ -27,17 +27,17 @@ _inbox_scan_requested_at: float = 0.0
 class SendMessagesRequest(BaseModel):
     subject: str | None = None
     body: str | None = None
-    # Gated: false (default) = compose + STOP for a snapshot preview (no real send);
-    # true = actually send InMail. The Odoo wizard sends false first, then true.
-    send: bool = False
+    # UNGATED: default true = actually send InMail (the Odoo button click is the confirmation;
+    # no preview pre-step). Pass send=false explicitly only for a deliberate dry-run preview.
+    send: bool = True
 
 
 class AddNoteRequest(BaseModel):
     # Defaults to "Contactado para <posición>" (from the job context) when omitted.
     note_text: str | None = None
-    # Gated: false (default) = open the note composer + type + STOP for a snapshot preview
-    # (no save); true = save the note AND move the candidates to the "contacted" stage.
-    save: bool = False
+    # UNGATED: default true = save the note AND move the candidates to the "contacted" stage.
+    # Pass save=false explicitly only for a deliberate dry-run preview.
+    save: bool = True
 
 
 class StartPipelineRequest(BaseModel):

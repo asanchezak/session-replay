@@ -69,6 +69,23 @@ test("message: gated preview & sent pass; blocked/rate-limited fail with reason"
     { message_compose_result: { ok: false, blocked: true, reason: "rate_limited_24h" } });
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, "rate_limited_24h");
+  // Safety cap: an over-large uncontacted set FAILS the run loudly (never sends unbounded).
+  const capped = v("recruiter_message_compose", "recruiter_message",
+    { message_compose_result: { ok: false, sent: false, reason: "exceeds_max_recipients", recipient_count: 500 } });
+  assert.equal(capped.ok, false);
+  assert.equal(capped.reason, "exceeds_max_recipients");
+});
+
+test("note: saved passes; nothing-uncontacted is a clean pass (not a failure); cap fails", () => {
+  assert.equal(v("recruiter_note_compose", "recruiter_note",
+    { note_compose_result: { ok: true, saved: true, noted_count: 18, moved_count: 18 } }).ok, true);
+  // no_uncontacted → ok:true so a legitimately-empty note run never alarms Odoo as "failed"
+  assert.equal(v("recruiter_note_compose", "recruiter_note",
+    { note_compose_result: { ok: true, saved: false, reason: "no_uncontacted", noted_count: 0 } }).ok, true);
+  const capped = v("recruiter_note_compose", "recruiter_note",
+    { note_compose_result: { ok: false, saved: false, reason: "exceeds_max_recipients" } });
+  assert.equal(capped.ok, false);
+  assert.equal(capped.reason, "exceeds_max_recipients");
 });
 
 test("read-only / probe / unknown strategies are never gated", () => {
