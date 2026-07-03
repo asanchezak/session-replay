@@ -142,6 +142,9 @@ const PROFILE_LAUNCH_ARGS = [
   "--disable-background-timer-throttling",
   "--disable-renderer-backgrounding",
   "--disable-backgrounding-occluded-windows",
+  // A hard host shutdown (nightly power-off) marks the profile as crashed and
+  // would pop the "Restore pages?" bubble on the next launch — suppress it.
+  "--hide-crash-restore-bubble",
   "--profile-directory=Default",
 ];
 let profileCtx = null;   // shared persistent context on PROFILE_DIR — kept OPEN

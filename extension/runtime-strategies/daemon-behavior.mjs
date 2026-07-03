@@ -211,6 +211,29 @@ export async function driveGenericStep({ step, page, idx, action, value, orand, 
   return { acted, critFail };
 }
 
+// ── seat-cookie persistence ──────────────────────────────────────────────────
+// The Recruiter /talent seat is held by SESSION-scoped cookies, which Chromium
+// never writes to disk in our Playwright-launched profile — so every browser
+// close (nightly host power-off, daemon restart) silently dropped the seat and
+// the next boot was walled, while Fernanda's own Chrome (session-restore on)
+// kept hers for weeks. Fix: after each warm ping, re-write the LinkedIn session
+// cookies WITH an expiry so they live in the cookie DB as persistent cookies
+// and survive restarts. Local-only storage attribute — nothing changes on the
+// wire, so no fingerprint/anti-bot impact.
+const SEAT_COOKIE_TTL_S = 7 * 86400;
+async function persistSeatCookies(ctx) {
+  const all = await ctx.cookies();
+  const sess = all.filter((c) =>
+    c.expires === -1 && !c.partitionKey && String(c.domain || "").includes("linkedin.com"));
+  if (!sess.length) return 0;
+  const exp = Math.floor(Date.now() / 1000) + SEAT_COOKIE_TTL_S;
+  await ctx.addCookies(sess.map((c) => ({
+    name: c.name, value: c.value, domain: c.domain, path: c.path,
+    httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite, expires: exp,
+  })));
+  return sess.length;
+}
+
 // ── keepAliveTick ────────────────────────────────────────────────────────────
 // Read-only /talent/home ping that refreshes the Recruiter session so it doesn't
 // lapse between runs. NEVER opens a fresh browser — reuses the parked /talent tab
@@ -252,6 +275,11 @@ export async function keepAliveTick(api) {
       await h.moveMouseAlongBezier(warmPage, { x: 400 + Math.random() * 400, y: 250 + Math.random() * 200 }, Math.random).catch(() => {});
       await h.humanScrollSeeded(warmPage, 1 + Math.floor(Math.random() * 2), Math.random).catch(() => {});
       console.log(`[keepalive] /talent OK — Recruiter seat warm (browser kept open)`);
+      // Make the warm seat survive a browser restart (nightly host shutdown).
+      try {
+        const n = await persistSeatCookies(ctx);
+        if (n) console.log(`[keepalive] persisted ${n} session cookie(s) → seat survives browser restarts`);
+      } catch (e) { console.log(`[keepalive] cookie persist skipped: ${(e && e.message) || e}`); }
       // Reply-scan: on its own slow cadence (REPLY_SCAN_MS) OR on-demand when the Odoo
       // "Escanear respuestas" button requested one (newer than our last scan). Reuses
       // the warm tab; the next ping re-navigates to /talent/home.
