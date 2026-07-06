@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Archive (remove) a candidate from a project — parameterized",
+  "name": "LinkedIn Recruiter: Archive (remove) a candidate from a project — parameterized",
   "description": "Remove ONE candidate from a project pipeline (Recruiter has no hard-delete → archive). Daemon-only recruiter_archive_candidate strategy: navigates the project's /manage/all (derived from {{project_url}}), locates the candidate by NAME (paginating if needed), clicks the per-row archive button (handles an overflow menu + a confirm modal), then VERIFIES the candidate is no longer in the active pipeline. Params: project_url, candidate_name (optionally profile_url). Fired by POST /v1/recruiter/leads/remove when an Odoo linkedin.lead is deleted; on verified removal the backend deletes the Odoo lead (/akcr/api/lead_removed). The verify gate makes an unconfirmed run safe (lead stays pending, re-runnable).",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

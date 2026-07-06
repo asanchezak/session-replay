@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Archive a PROJECT (testing tool)",
+  "name": "LinkedIn Recruiter: Archive a PROJECT (testing tool)",
   "description": "Testing-only: archives an entire LinkedIn Recruiter project. Navigates /talent/projects, locates the project by id (its /talent/hire/<id> link) or name, opens its overflow '…' menu, clicks 'Archivar proyecto'/'Archive project', confirms, and verifies it left the active projects list. Params: project_url (and/or project_name).",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

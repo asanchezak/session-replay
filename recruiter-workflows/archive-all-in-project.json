@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Archive ALL candidates in a project (remove all)",
+  "name": "LinkedIn Recruiter: Archive ALL candidates in a project (remove all)",
   "description": "DEMO/bulk action: removes every candidate from a project by archiving (Recruiter has no hard-delete). Daemon-only recruiter_archive_all_in_project strategy: on the project /manage/all it clicks select-all, fires the bulk archive action, confirms in the modal footer, and loops page by page until the 'Candidatos archivados' counter reaches the saved total. Param: project_url. VERIFIES via the archived counter (archived_after > archived_before).",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

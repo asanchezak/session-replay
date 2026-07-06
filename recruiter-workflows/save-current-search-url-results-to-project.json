@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: save current search URL results to project",
+  "name": "LinkedIn Recruiter: save current search URL results to project",
   "description": "Saves candidates from an already-built Recruiter search URL. Use this after a focused search/extract has produced a concrete /talent/search URL, to avoid re-driving the advanced-search facet form. Params: search_url, project_name, target_count.",
   "target_url": "https://www.linkedin.com/talent/search",
   "steps": [

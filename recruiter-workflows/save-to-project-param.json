@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Save candidate to project (parameterized)",
+  "name": "LinkedIn Recruiter: Save candidate to project (parameterized)",
   "description": "PARAMETERIZED save-to-project for the Odoo→Recruiter pipeline. Step 2 navigates {{candidate_url}} (a /talent/profile/ URL from the search), step 5 types {{project_name}} into the typeahead, step 8 clicks the option by exact text {{project_name}}. backend create_run substitutes runtime_params.{candidate_url,project_name}. The orchestrator fires one of these per candidate (project_name = '-EZ <position>'). Selectors locked offline 2026-06-08. Params: candidate_url, project_name.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

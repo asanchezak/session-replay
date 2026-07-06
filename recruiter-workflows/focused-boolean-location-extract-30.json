@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: FOCUSED boolean + location search -> extract 30",
+  "name": "LinkedIn Recruiter: FOCUSED boolean + location search -> extract 30",
   "description": "Focused Recruiter advanced search plus recruiter_search_people extraction capped at 30 candidates. Use this to verify lazy-load scrolling + pagination from /talent/search without saving anything. Params: boolean_query, location. The boolean facet commits on Enter; the location facet commits by selecting the top typeahead suggestion.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
@@ -35,7 +35,7 @@
         },
         {
           "type": "css",
-          "value": "button[aria-label=\"A\u00f1adir Palabras clave del perfil u operadores booleanos\"]"
+          "value": "button[aria-label=\"Añadir Palabras clave del perfil u operadores booleanos\"]"
         }
       ],
       "success_condition": {
@@ -81,7 +81,7 @@
         },
         {
           "type": "css",
-          "value": "button[aria-label=\"A\u00f1adir ubicaci\u00f3n del candidato\"]"
+          "value": "button[aria-label=\"Añadir ubicación del candidato\"]"
         }
       ],
       "success_condition": {
@@ -112,7 +112,7 @@
         },
         {
           "type": "css",
-          "value": "input[placeholder^=\"Introducir una ubicaci\u00f3n\"]"
+          "value": "input[placeholder^=\"Introducir una ubicación\"]"
         }
       ],
       "value": "{{location}}"

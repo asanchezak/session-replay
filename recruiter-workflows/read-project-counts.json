@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Read a project's candidate counts (read-only)",
+  "name": "LinkedIn Recruiter: Read a project's candidate counts (read-only)",
   "description": "READ-ONLY verification: navigates the project /manage/all and reports the active ('Todos los candidatos', excludes archived) + archived ('Candidatos archivados') counters and the visible active candidate names. Modifies nothing. Param: project_url.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
