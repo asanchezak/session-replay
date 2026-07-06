@@ -455,6 +455,29 @@ class RecruiterPushService:
             logger.exception("lead removed push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
 
+    async def push_reset_leads(self, *, run_id, job_id, connector_id) -> dict:
+        """RESET: hard-delete ALL of a job's Odoo linkedin.lead rows via
+        POST /akcr/api/reset_leads. Called from the reset terminal hook AFTER the LinkedIn
+        project is archived and BEFORE the fresh search repopulates. Best-effort (never
+        raises); returns {"deleted": N} on success or {"error": True} / a skip reason.
+        Degrades gracefully (no-op) if the akcr endpoint isn't deployed yet."""
+        if not job_id:
+            return {"skipped": "no_job_id"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {"job_id": job_id, "source_run_id": str(run_id)}
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/reset_leads", payload)
+            logger.info("reset leads push: job=%s odoo=%s", job_id, res)
+            odoo = res.get("odoo") if isinstance(res, dict) else None
+            deleted = odoo.get("deleted") if isinstance(odoo, dict) else None
+            return {"deleted": deleted, **res}
+        except Exception:
+            logger.exception("reset leads push: POST failed for run %s", run_id)
+            return {"error": True}
+
     async def push_flow_status(self, *, connector_id, job_id, status: str,
                                stage: str = "", error_kind: str = "",
                                error_summary: str = "", message: str = "",
