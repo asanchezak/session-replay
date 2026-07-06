@@ -590,8 +590,10 @@ class RecruiterPipelineService:
         from scratch. Chains via the terminal hook (no polling): archive the WHOLE
         current project → start() the normal pipeline (create a fresh project → AI
         boolean search from the current JD → save). The Odoo linkedin.lead rows are
-        hard-deleted IN Odoo by the akcr button BEFORE this call, so no Odoo write-back
-        happens here. Returns {run_id} or {skipped/error}.
+        hard-deleted authoritatively by the backend in _after_reset_archive (once the
+        project is archived, before repopulation) via POST /akcr/api/reset_leads — NOT by
+        the button (whose delete is skipped while a run is active). Returns {run_id} or
+        {skipped/error}.
 
         Falls back to starting the pipeline directly (no archive) when the job has no
         known project or the archive-project workflow is unconfigured."""
@@ -658,16 +660,40 @@ class RecruiterPipelineService:
         return {"run_id": run_id, "stage": "create_project", "position": position}
 
     async def _after_reset_archive(self, run, pipeline, connector_id, job_id) -> dict:
-        """Reset: the whole project was archived — now restart the normal sourcing
-        pipeline (create a fresh project → search → save). The archive run is already
-        terminal (COMPLETED) by the time this fresh-session hook runs, so start()'s
-        own _has_active_pipeline_run guard passes."""
+        """Reset: the whole project was archived — WIPE the job's Odoo leads to match the
+        now-empty project, then restart the normal sourcing pipeline (create a fresh
+        project → search → save). The archive run is already terminal (COMPLETED) by the
+        time this fresh-session hook runs, so start()'s own _has_active_pipeline_run guard
+        passes.
+
+        The lead wipe is authoritative here (NOT in the Odoo reset button, whose delete is
+        skipped whenever a run is active): it runs only once the project is genuinely
+        archived and strictly BEFORE start() repopulates, so we never wipe fresh leads and
+        never wipe a reset that didn't proceed. Best-effort — a wipe failure must not block
+        the restart."""
+        wipe = {}
+        try:
+            wipe = await self.push.push_reset_leads(
+                run_id=run.id, job_id=job_id, connector_id=connector_id,
+            )
+        except Exception:  # noqa: BLE001 — wipe is best-effort; never block the restart
+            logger.exception("recruiter reset: lead wipe failed (job %s)", job_id)
+        # Only claim a removal count when the wipe actually reported one (honest chatter).
+        deleted = wipe.get("deleted") if isinstance(wipe, dict) else None
+        if isinstance(deleted, int):
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_RESET_ARCHIVE, run_id=run.id,
+                message=f"🔄 Reset: removed {deleted} old lead(s) in Odoo; re-searching…",
+            )
         job_payload = pipeline.get("job_payload") or {"job_id": job_id}
         run_id = await self.start(connector_id, job_payload)
         logger.info(
-            "recruiter reset: project archived for job %s → restart run %s", job_id, run_id
+            "recruiter reset: project archived for job %s → wiped=%s → restart run %s",
+            job_id, deleted, run_id,
         )
-        return {"stage": "reset_archive", "restarted": bool(run_id), "next_run": run_id}
+        return {"stage": "reset_archive", "wiped": deleted,
+                "restarted": bool(run_id), "next_run": run_id}
 
     async def _after_create_project(self, run, pipeline, connector_id, job_id) -> dict:
         # Requirement C: push the new project URL to hr.job.recruiter_project_url.

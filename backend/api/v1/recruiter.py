@@ -277,9 +277,10 @@ async def reset_pipeline(job_id: str, db: AsyncSession = Depends(get_db)):
     current LinkedIn project, then restart the sourcing pipeline from scratch (create a
     fresh project → AI boolean search from the current JD → save), as if the "search
     candidates" checkbox had just been ticked. Chains via the terminal hook. The Odoo
-    linkedin.lead rows are hard-deleted in Odoo by the button before this call. Returns
-    the first queued run id (the archive, or the create-project when there's no project
-    to archive)."""
+    linkedin.lead rows are hard-deleted by the backend after the project is archived and
+    before repopulation (_after_reset_archive → POST /akcr/api/reset_leads). Returns the
+    first queued run id (the archive, or the create-project when there's no project to
+    archive)."""
     svc = RecruiterPipelineService(db)
     res = await svc.reset_and_research(job_id)
     await db.commit()
