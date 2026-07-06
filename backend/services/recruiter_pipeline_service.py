@@ -187,6 +187,25 @@ class RecruiterPipelineService:
                     return True
         return False
 
+    async def _active_send_run_id(self, job_id) -> str | None:
+        """Return the id of a non-terminal REAL message-SEND run for this job (a run whose
+        origin.pipeline.send is truthy), else None. Used to dedup double-clicked sends
+        WITHOUT blocking a preview (send=false) or a later re-send (previous send terminal)."""
+        result = await self.session.execute(
+            select(ExecutionRun)
+            .where(ExecutionRun.status.in_(_NON_TERMINAL))
+            .order_by(ExecutionRun.created_at.desc())
+            .limit(300)
+        )
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_MESSAGE:
+                continue
+            pl = o.get("pipeline") or {}
+            if str(pl.get("job_id")) == str(job_id) and pl.get("send"):
+                return str(r.id)
+        return None
+
     # ------------------------------------------------------------- flow status
     @staticmethod
     def _flow_stage_label(event_kind: str | None) -> str:
@@ -705,6 +724,19 @@ class RecruiterPipelineService:
             pipeline["project_url"] = project_url
             m = _PROJECT_URL_RE.search(project_url)
             pipeline["project_id"] = m.group(1) if m else None
+        else:
+            # Push skipped/failed (no /talent/hire/<id> captured, connector unconfigured, or
+            # POST error) → the Odoo link stays blank (a reset cleared it). Surface it LOUDLY
+            # instead of only logging, so it's not a silent blank/stale link.
+            logger.warning(
+                "recruiter pipeline: project link NOT updated for job %s (%s)", job_id, link_res,
+            )
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_CREATE_PROJECT, run_id=run.id,
+                message="⚠️ Couldn't update the Recruiter project link (new project URL not "
+                        "captured). The project exists on LinkedIn; retry the reset to refresh it.",
+            )
 
         # Prefer the BOOLEAN advanced search built from the JD content; fall back to
         # the legacy title-only Copilot search when not configured.
@@ -1260,11 +1292,11 @@ class RecruiterPipelineService:
             "recruiter pipeline: started add-note run %s for job %s (save=%s note=%r)",
             run.id, job_id, save, note_text,
         )
+        # Flip the status only (empty message = no chatter line): the note's single visible
+        # line is its completion in _after_note, so the send→note sequence stays one line each.
         await self._push_flow_status(
             job_id=str(job_id), connector_id=connector_id, status="running",
-            event_kind=EVENT_NOTE, run_id=run.id,
-            message=("📝 Agregando la nota de contacto + marcando 'contacted'…"
-                     if save else "📝 Preparando la nota de contacto (preview)…"),
+            event_kind=EVENT_NOTE, run_id=run.id, message="",
         )
         return str(run.id)
 
@@ -1358,7 +1390,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_NOTE, run_id=run.id,
-                message="📝 Vista previa de la nota lista (no guardada).",
+                message="📝 Note preview ready (not saved).",
             )
             return {"stage": "note", "saved": False, "preview": True}
         await self._push_flow_status(
@@ -1535,6 +1567,17 @@ class RecruiterPipelineService:
         if not ctx.get("project_id"):
             logger.warning("recruiter pipeline: no project for job %s — can't message", job_id)
             return None
+        # Dedup: if a REAL send is already in flight for this job, don't create a second one
+        # (double-click / retry) — return the existing run so the caller sees "queued", not a
+        # duplicate InMail. A preview (send=false) never blocks; a completed send never blocks.
+        if send:
+            in_flight = await self._active_send_run_id(job_id)
+            if in_flight:
+                logger.info(
+                    "recruiter pipeline: send already in flight for job %s (run %s) — skip dup",
+                    job_id, in_flight,
+                )
+                return in_flight
         subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
         body = (body or DEFAULT_MESSAGE_BODY).strip()
         project_url = (
@@ -1566,11 +1609,12 @@ class RecruiterPipelineService:
             "recruiter pipeline: started message-compose run %s for job %s (send=%s)",
             run.id, job_id, send,
         )
+        # Flip the status only (empty message = no chatter line): the send's single visible
+        # line is its completion in _after_message ("✉️ Message sent to N…"), so one send is
+        # one chatter line, not a running+done pair.
         await self._push_flow_status(
             job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
-            event_kind=EVENT_MESSAGE, run_id=run.id,
-            message=("✉️ Sending the outreach message to the project's candidates…"
-                     if send else "✉️ Preparing the outreach message (preview)…"),
+            event_kind=EVENT_MESSAGE, run_id=run.id, message="",
         )
         return str(run.id)
 
