@@ -118,6 +118,12 @@ class RecoverySupervisor:
         if run.pause_reason == "tab_closed":
             logger.info("Supervisor: skipping tab_closed run %s — tab was closed, human must re-run", run_id)
             return False
+        # C.2: a recruiter/seat run stuck RUNNING because its daemon host powered off
+        # mid-run can't be resumed in place — requeue it (clone→QUEUED) so the seat
+        # gate drains it when the host is back. Only when the daemon is confirmed
+        # OFFLINE (else it may still be driving the run → don't double-drive).
+        if await self._maybe_requeue_orphan(run):
+            return True
         prior = _auto_resume_count.get(run_id, 0)
         if not forced and prior >= MAX_AUTO_RESUMES_PER_RUN:
             logger.info("Run %s already at auto-resume cap (%d)", run_id, prior)
@@ -262,6 +268,43 @@ class RecoverySupervisor:
             run_id=run_id,
         ))
         logger.info("Supervisor auto-resumed run %s (attempt %d)", run_id, prior + 1)
+        return True
+
+    async def _maybe_requeue_orphan(self, run: ExecutionRun) -> bool:
+        """Requeue a recruiter/seat run orphaned by a host power-off (C.2).
+
+        A run stuck RUNNING whose target-operator daemon has NO live heartbeat is an
+        orphan: the host vanished mid-run (the daemon watchdog couldn't fire because
+        the process is gone). Clone it back to QUEUED (via ExecutionService.auto_relaunch,
+        capped + shared counter) so the seat gate drains it on wake, then cancel the
+        orphaned original. Returns True if handled. Skips when the daemon is still up
+        (an online-but-stuck run is handled by the watchdog → FAILED → C.1)."""
+        if run.status != RunStatus.RUNNING.value:
+            return False
+        origin = run.origin or {}
+        kind = str(origin.get("event_kind") or "")
+        is_seat = (
+            (kind.startswith("recruiter_")
+             or kind in ("new_job_position", "linkedin_lead_search"))
+            and origin.get("execution_target") == "daemon"
+        )
+        if not is_seat:
+            return False
+        operator = origin.get("target_operator") or origin.get("operator_id")
+        from api.v1.daemon import operator_online
+        if operator and operator_online(str(operator)):
+            return False  # daemon still alive → not an orphan; leave to watchdog/AI
+
+        from services.execution_service import ExecutionService
+        new_run = await ExecutionService(self.session).auto_relaunch(run)
+        if new_run is None:
+            return False  # hit the relaunch cap → let it fail normally
+        with contextlib.suppress(Exception):
+            await self.agent.execution.transition(str(run.id), RunStatus.CANCELED)
+        logger.info(
+            "Supervisor requeued orphaned run %s → %s (daemon '%s' offline)",
+            run.id, new_run.id, operator,
+        )
         return True
 
     async def _complete_empty_run(self, run: ExecutionRun, *, forced: bool = False) -> None:

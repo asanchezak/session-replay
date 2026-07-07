@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: add 'Contactado para <posición>' note (bulk) + move to 'contacted' stage — gated save",
+  "name": "LinkedIn Recruiter: add 'Contactado para <posición>' note (bulk) + move to 'contacted' stage — gated save",
   "description": "Selects a project's ACTIVE candidates, opens the bulk 'Añadir nota' composer (in the collapsible-toolbar overflow 'Más elementos'), types {{note_text}}, sets visibility to the whole company (HIRING_CONTEXT). GATED by save: save=false (default) STOPS for a snapshot preview (and discovers the 'Cambiar fase' options) — NEVER saves; save=true clicks 'Añadir' to save the note, then moves the candidates to the native 'contacted' pipeline stage (data-test-move-to-state=CONTACTED) and verifies via the success toast. Params: project_url, note_text, save.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

@@ -1,0 +1,1487 @@
+{
+  "_comment": "Full backup of the 15 LinkedIn Recruiter system workflows (complete GET /v1/workflows/{id} incl. all steps/fields). Snapshot from PROD 54-211-23-18; DEV verified identical. Restore with scripts/restore_system_workflows.py.",
+  "captured_from": "https://54-211-23-18.sslip.io",
+  "captured_date": "2026-07-06",
+  "workflows": [
+    {
+      "id": "1bc44128-6755-437e-b41c-2cc65d135454",
+      "name": "LinkedIn Recruiter: FOCUSED boolean + location search -> extract 30",
+      "description": "Focused Recruiter advanced search plus recruiter_search_people extraction capped at 30 candidates. Use this to verify lazy-load scrolling + pagination from /talent/search without saving anything. Params: boolean_query, location. The boolean facet commits on Enter; the location facet commits by selecting the top typeahead suggestion.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-09T18:35:19.325586+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "navigate",
+          "intent": "Advanced search",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/search/advanced",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "load 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "scroll",
+          "intent": "load 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 4,
+          "action_type": "click",
+          "intent": "Open keyword/boolean facet",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "[data-test-facet-keywords] button[data-test-facet-edit]"
+            },
+            {
+              "type": "css",
+              "value": "button[aria-label=\"Add Profile keywords or boolean\"]"
+            },
+            {
+              "type": "css",
+              "value": "button[aria-label=\"Añadir Palabras clave del perfil u operadores booleanos\"]"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": {
+            "type": "selector_exists",
+            "selector": "textarea[data-test-free-text-single-value-facet-textarea]"
+          },
+          "checkpoint": true,
+          "dom_context": null
+        },
+        {
+          "step_index": 5,
+          "action_type": "scroll",
+          "intent": "delay keyword textarea 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 6,
+          "action_type": "scroll",
+          "intent": "delay keyword textarea 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 7,
+          "action_type": "type",
+          "intent": "Boolean keywords + Enter to commit",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "textarea[data-test-free-text-single-value-facet-textarea]"
+            }
+          ],
+          "value": "{{boolean_query}}\n",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 8,
+          "action_type": "scroll",
+          "intent": "settle keyword commit",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 9,
+          "action_type": "click",
+          "intent": "Open location facet",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "[data-test-facet-geo-locations] button[data-test-facet-edit]"
+            },
+            {
+              "type": "css",
+              "value": "button[aria-label=\"Add a Candidate geographic location\"]"
+            },
+            {
+              "type": "css",
+              "value": "button[aria-label=\"Añadir ubicación del candidato\"]"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": {
+            "type": "selector_exists",
+            "selector": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
+          },
+          "checkpoint": true,
+          "dom_context": null
+        },
+        {
+          "step_index": 10,
+          "action_type": "scroll",
+          "intent": "delay location input 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 11,
+          "action_type": "scroll",
+          "intent": "delay location input 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 12,
+          "action_type": "type",
+          "intent": "Type location into typeahead",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
+            },
+            {
+              "type": "css",
+              "value": "[data-test-facet-locations] input.ts-common-typeahead__input"
+            },
+            {
+              "type": "css",
+              "value": "input[placeholder^=\"Introducir una ubicación\"]"
+            }
+          ],
+          "value": "{{location}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 13,
+          "action_type": "scroll",
+          "intent": "delay suggestions dropdown 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 14,
+          "action_type": "scroll",
+          "intent": "delay suggestions dropdown 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 15,
+          "action_type": "click",
+          "intent": "Select top location suggestion",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "li[data-live-test-result=\"0\"]"
+            },
+            {
+              "type": "css",
+              "value": "[data-test-typeahead-results] li[role=\"option\"]"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 16,
+          "action_type": "scroll",
+          "intent": "settle location applied 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 17,
+          "action_type": "scroll",
+          "intent": "settle location applied 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 18,
+          "action_type": "click",
+          "intent": "Run the advanced search",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "button[data-test-save-advanced-button]"
+            },
+            {
+              "type": "css",
+              "value": "button.advanced-search__header--actions-primary"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 19,
+          "action_type": "scroll",
+          "intent": "results load 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 20,
+          "action_type": "scroll",
+          "intent": "results load 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 21,
+          "action_type": "extract",
+          "intent": "Extract 30 candidates + total count",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_search_people",
+              "target_count": 6,
+              "max_pages": 4,
+              "max_scroll_passes": 18
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "7f11deb6-0d44-4298-b047-4fadb71ba559",
+      "name": "LinkedIn Recruiter: save current search URL results to project",
+      "description": "Saves candidates from an already-built Recruiter search URL. Use this after a focused search/extract has produced a concrete /talent/search URL, to avoid re-driving the advanced-search facet form. Params: search_url, project_name, target_count.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/search",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-09T20:12:55.544175+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Open existing Recruiter search results URL",
+          "selector_chain": null,
+          "value": "{{search_url}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "results load 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "results load 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "extract",
+          "intent": "Select result cards and save them to project",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_save_results_to_project"
+            },
+            {
+              "kind": "recruiter_save_results_to_project",
+              "mode": "bulk",
+              "project_name": "{{project_name}}",
+              "target_count": "{{target_count}}",
+              "max_scroll_passes": 12,
+              "project_url": "{{project_url}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "29ec1891-201f-448f-8263-4d2248eba292",
+      "name": "LinkedIn Recruiter: Create project (EasyRecruit, parameterized)",
+      "description": "PARAMETERIZED create-project for the Odoo→Recruiter pipeline. Step 5 name = 'EasyRecruit - {{position}}' (backend create_run substitutes runtime_params.position). Final extract step captures the new project URL (/talent/hire/<id>) into extracted_data so the job_project_link push can set hr.job.recruiter_project_url (req C). recruiter_search_people is graceful on the project landing page (waitForSelector .catch → returns [] but still posts {url}). Param: position.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-08T22:22:53.584836+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "navigate",
+          "intent": "Create-project wizard",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/create/get-started",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "form load 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "scroll",
+          "intent": "form load 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 4,
+          "action_type": "type",
+          "intent": "Project name (= EasyRecruit - + position)",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "input[data-test-project-name-input]"
+            }
+          ],
+          "value": "EasyRecruit - {{position}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 5,
+          "action_type": "type",
+          "intent": "Project description (= Odoo job description)",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "textarea[data-test-project-description-input]"
+            }
+          ],
+          "value": "{{job_description}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 6,
+          "action_type": "scroll",
+          "intent": "settle after name",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 7,
+          "action_type": "click",
+          "intent": "Create project",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "button[data-test-create-button]"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 8,
+          "action_type": "scroll",
+          "intent": "creating / navigating 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 9,
+          "action_type": "scroll",
+          "intent": "creating / navigating 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 10,
+          "action_type": "extract",
+          "intent": "Capture new project URL (/talent/hire/<id>)",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_search_people"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "f6f99011-8cab-43ca-b5a9-ed74bcbd6d75",
+      "name": "LinkedIn Recruiter: AI search by position (parameterized)",
+      "description": "PARAMETERIZED AI-Copilot search for the Odoo→Recruiter pipeline. Step 5 types 'Buscar candidatos para: {{position}}' into textarea.copilot-chat-input__textbox + submit (\\n) → AI builds & runs the search → extract candidate cards (recruiter_search_people → name + /talent/profile/ URL + headline). backend create_run substitutes runtime_params.position. The AI Copilot is the recording's real search entry (steps 13-15) — far more reliable than the advanced facets. Param: position.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-08T22:22:56.789879+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "navigate",
+          "intent": "Search (AI copilot lives here)",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/search",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "load 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "scroll",
+          "intent": "load 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 4,
+          "action_type": "type",
+          "intent": "AI request (= position) + submit",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "textarea.copilot-chat-input__textbox"
+            }
+          ],
+          "value": "Buscar candidatos para: {{position}}\n",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 5,
+          "action_type": "scroll",
+          "intent": "AI builds search 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 6,
+          "action_type": "scroll",
+          "intent": "AI builds search 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 7,
+          "action_type": "scroll",
+          "intent": "AI builds search 3",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 8,
+          "action_type": "scroll",
+          "intent": "AI builds search 4",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 9,
+          "action_type": "scroll",
+          "intent": "results settle 5",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 10,
+          "action_type": "extract",
+          "intent": "Extract candidate cards",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_search_people"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "a352e1e4-4536-4746-bcd4-9a588275b6c5",
+      "name": "LinkedIn Recruiter: Save candidate to project (parameterized)",
+      "description": "PARAMETERIZED save-to-project for the Odoo→Recruiter pipeline. Step 2 navigates {{candidate_url}} (a /talent/profile/ URL from the search), step 5 types {{project_name}} into the typeahead, step 8 clicks the option by exact text {{project_name}}. backend create_run substitutes runtime_params.{candidate_url,project_name}. The orchestrator fires one of these per candidate (project_name = '-EZ <position>'). Selectors locked offline 2026-06-08. Params: candidate_url, project_name.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-08T22:23:00.210761+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "navigate",
+          "intent": "Open candidate profile",
+          "selector_chain": null,
+          "value": "{{candidate_url}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "click",
+          "intent": "Open Save-to-project panel",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "[data-test-action='save-to-project']"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "click",
+          "intent": "Switch to existing-project mode",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "label[for='choose-existing-projects']"
+            },
+            {
+              "type": "css",
+              "value": "#choose-existing-projects"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 4,
+          "action_type": "type",
+          "intent": "Type project name to filter",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "#save-to-projects-typeahead"
+            }
+          ],
+          "value": "{{project_name}}",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 5,
+          "action_type": "scroll",
+          "intent": "delay: let typeahead load (1)",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 6,
+          "action_type": "scroll",
+          "intent": "delay: let typeahead load (2)",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 7,
+          "action_type": "click",
+          "intent": "Pick the project by exact name",
+          "selector_chain": [
+            {
+              "type": "text",
+              "value": "{{project_name}}"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 8,
+          "action_type": "scroll",
+          "intent": "delay: let Save enable",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 9,
+          "action_type": "click",
+          "intent": "Save to project",
+          "selector_chain": [
+            {
+              "type": "css",
+              "value": "button[data-test-action='save']"
+            }
+          ],
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "511ceaab-34c2-4d8b-9241-725a61e1cc32",
+      "name": "LinkedIn Recruiter: Archive ALL candidates in a project (remove all)",
+      "description": "DEMO/bulk action: removes every candidate from a project by archiving (Recruiter has no hard-delete). Daemon-only recruiter_archive_all_in_project strategy: on the project /manage/all it clicks select-all, fires the bulk archive action, confirms in the modal footer, and loops page by page until the 'Candidatos archivados' counter reaches the saved total. Param: project_url. VERIFIES via the archived counter (archived_after > archived_before).",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T17:35:30.914185+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "settle 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "extract",
+          "intent": "Archive every candidate in the project and verify",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_archive_all_in_project"
+            },
+            {
+              "kind": "recruiter_archive_all_in_project",
+              "project_url": "{{project_url}}",
+              "max_rounds": 15
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "f003f090-d74a-41bc-90a9-67f5fd603a5d",
+      "name": "LinkedIn Recruiter: Add a profile to a project (public /in/ or /talent/profile/) — robust",
+      "description": "Adds ONE profile to a project as an active candidate. Daemon-only recruiter_add_profile strategy: navigates {{candidate_url}} (a public /in/<slug> bridges via 'View in Recruiter' to /talent/profile/), opens Save-to-project, switches to existing-project mode, types {{project_name}}, CLICKS the exact dropdown option (typing alone leaves Save disabled — the known gotcha), waits for Save to enable, saves, and VERIFIES via the project's active count ({{project_url}}). Params: candidate_url, project_name, project_url.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T18:38:13.408604+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Add the profile to the project and verify",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_add_profile"
+            },
+            {
+              "kind": "recruiter_add_profile",
+              "candidate_url": "{{candidate_url}}",
+              "project_name": "{{project_name}}",
+              "project_url": "{{project_url}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "b5e3d433-fa33-4795-881a-40d3125c773f",
+      "name": "LinkedIn Recruiter: Read a project's candidate counts (read-only)",
+      "description": "READ-ONLY verification: navigates the project /manage/all and reports the active ('Todos los candidatos', excludes archived) + archived ('Candidatos archivados') counters and the visible active candidate names. Modifies nothing. Param: project_url.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T18:21:03.566317+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Read the project's candidate counts",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_read_project"
+            },
+            {
+              "kind": "recruiter_read_project",
+              "project_url": "{{project_url}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "c46c296f-21f8-4662-9681-45ecceb9db52",
+      "name": "LinkedIn Recruiter: compose bulk InMail from a template ({Nombre} chip) — gated",
+      "description": "Messages a project's UNCONTACTED candidates with a template {{body}} — switches to LinkedIn's native 'uncontacted' pipeline stage (SHORTLISTED) and select-alls it, so already-contacted/replied candidates are not re-messaged. Replaces each literal {Name}/{Nombre} token with the LinkedIn variable CHIP. Sets the subject (handles the subject-reveal quirk). send=false (default) STOPS for a snapshot preview; send=true clicks Send (REAL InMail). Params: project_url, body, subject, send.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T22:23:47.719000+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Compose the templated message (gated)",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_message_compose"
+            },
+            {
+              "kind": "recruiter_message_compose",
+              "project_url": "{{project_url}}",
+              "body": "{{body}}",
+              "subject": "{{subject}}",
+              "send": "{{send}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "37a8f06d-4bfc-4fbd-9c45-923ab11a598c",
+      "name": "LinkedIn Recruiter: add 'Contactado para <posición>' note (bulk) + move to 'contacted' stage — gated save",
+      "description": "Selects a project's ACTIVE candidates, opens the bulk 'Añadir nota' composer (in the collapsible-toolbar overflow 'Más elementos'), types {{note_text}}, sets visibility to the whole company (HIRING_CONTEXT). GATED by save: save=false (default) STOPS for a snapshot preview (and discovers the 'Cambiar fase' options) — NEVER saves; save=true clicks 'Añadir' to save the note, then moves the candidates to the native 'contacted' pipeline stage (data-test-move-to-state=CONTACTED) and verifies via the success toast. Params: project_url, note_text, save.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-19T17:32:12.999108+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Locate + type the candidate note (gated, no save)",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_note_compose"
+            },
+            {
+              "kind": "recruiter_note_compose",
+              "project_url": "{{project_url}}",
+              "note_text": "{{note_text}}",
+              "save": "{{save}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "1f17ab64-8e2b-4046-a11b-9034b1e8818a",
+      "name": "LinkedIn Recruiter: add note to ONE candidate (push)",
+      "description": "Push ONE Odoo linkedin.candidate.note to LinkedIn (select candidate by name in a project, add note, gated save).",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/projects",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-24T22:18:52.627058+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Select candidate by name + add their note (gated)",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_candidate_note_add"
+            },
+            {
+              "kind": "recruiter_candidate_note_add",
+              "project_url": "{{project_url}}",
+              "candidate_name": "{{candidate_name}}",
+              "note_text": "{{note_text}}",
+              "save": "{{save}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "752753a9-17b5-4e36-afcb-82bae204726e",
+      "name": "LinkedIn Recruiter: Archive a PROJECT (testing tool)",
+      "description": "Testing-only: archives an entire LinkedIn Recruiter project. Navigates /talent/projects, locates the project by id (its /talent/hire/<id> link) or name, opens its overflow '…' menu, clicks 'Archivar proyecto'/'Archive project', confirms, and verifies it left the active projects list. Params: project_url (and/or project_name).",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T22:23:49.101490+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Archive the project and verify",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_archive_project"
+            },
+            {
+              "kind": "recruiter_archive_project",
+              "project_url": "{{project_url}}",
+              "project_name": "{{project_name}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "fc9bb424-cecb-4d0d-bd7e-4a823e0867a4",
+      "name": "LinkedIn Recruiter: Archive (remove) a candidate from a project — parameterized",
+      "description": "Remove ONE candidate from a project pipeline (Recruiter has no hard-delete → archive). Daemon-only recruiter_archive_candidate strategy: navigates the project's /manage/all (derived from {{project_url}}), locates the candidate by NAME (paginating if needed), clicks the per-row archive button (handles an overflow menu + a confirm modal), then VERIFIES the candidate is no longer in the active pipeline. Params: project_url, candidate_name (optionally profile_url). Fired by POST /v1/recruiter/leads/remove when an Odoo linkedin.lead is deleted; on verified removal the backend deletes the Odoo lead (/akcr/api/lead_removed). The verify gate makes an unconfirmed run safe (lead stays pending, re-runnable).",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-11T16:14:52.775734+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "scroll",
+          "intent": "settle 2",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 3,
+          "action_type": "extract",
+          "intent": "Archive the target candidate from the project and verify removal",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_archive_candidate"
+            },
+            {
+              "kind": "recruiter_archive_candidate",
+              "project_url": "{{project_url}}",
+              "candidate_name": "{{candidate_name}}",
+              "profile_url": "{{profile_url}}",
+              "max_pages": 5
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "77bc4e98-c90e-4ca2-9400-5457efe5e0af",
+      "name": "LinkedIn Recruiter: Save recommended matches to the project (automated sourcing)",
+      "description": "Adds a project's RECOMMENDED candidates (LinkedIn Automated Sourcing → Recommended matches, /discover/automatedSourcing/review) to the pipeline. The recruiter_save_recommendations strategy hovers each recommendation row and clicks its 'Save to first stage' button (data-test-save-to-first-stage), up to target_count (default 10), collecting name+profile_url; verifies the project's ACTIVE count rose. Returns `people` so the backend can push them as linkedin.lead. Params: project_url, target_count.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-15T16:23:16.359434+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Warm: Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "scroll",
+          "intent": "settle 1",
+          "selector_chain": null,
+          "value": null,
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 2,
+          "action_type": "extract",
+          "intent": "Add recommended matches to the project",
+          "selector_chain": null,
+          "value": null,
+          "methods": [
+            {
+              "kind": "extract_strategy",
+              "strategy": "recruiter_save_recommendations"
+            },
+            {
+              "kind": "recruiter_save_recommendations",
+              "project_url": "{{project_url}}",
+              "target_count": "{{target_count}}",
+              "require_open_to_work": "{{require_open_to_work}}"
+            }
+          ],
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    },
+    {
+      "id": "7246989f-a6ce-4b8a-b7f4-16a49d930cae",
+      "name": "LinkedIn Recruiter: Open Talent Home",
+      "description": "Health-check / demo: daemon opens /talent/home using the staged Recruiter session (.linkedin-profile). Read-only.",
+      "prompt": null,
+      "target_url": "https://www.linkedin.com/talent/home",
+      "status": "active",
+      "workflow_type": "system",
+      "execution_mode": "generic",
+      "version": 1,
+      "config": {},
+      "created_at": "2026-06-05T19:59:11.386267+00:00",
+      "steps": [
+        {
+          "step_index": 0,
+          "action_type": "navigate",
+          "intent": "Open Recruiter Talent home",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/home",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        },
+        {
+          "step_index": 1,
+          "action_type": "navigate",
+          "intent": "Open Recruiter Projects",
+          "selector_chain": null,
+          "value": "https://www.linkedin.com/talent/projects",
+          "methods": null,
+          "success_condition": null,
+          "checkpoint": false,
+          "dom_context": null
+        }
+      ],
+      "analysis": null,
+      "connector_bindings": []
+    }
+  ]
+}

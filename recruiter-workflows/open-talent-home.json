@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: Open Talent Home",
+  "name": "LinkedIn Recruiter: Open Talent Home",
   "description": "Health-check / demo: daemon opens /talent/home using the staged Recruiter session (.linkedin-profile). Read-only.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [

@@ -1,6 +1,6 @@
 {
-  "name": "Recruiter: add note to ONE candidate (push)",
-  "description": "Push ONE Odoo linkedin.candidate.note to LinkedIn (push-only sync). Navigates the candidate's project /manage/all, selects ONLY that candidate by NAME (clicking the row's <label for=select-item-…>, since the <input.small-input> checkbox is visually hidden), opens the bulk 'Añadir nota' composer, types {{note_text}}, sets visibility to the whole company (HIRING_CONTEXT — so the note is GLOBAL to the candidate), and (GATED by save) save=false STOPS for a preview, save=true clicks 'Añadir' and verifies via the success toast. Does NOT move the pipeline stage. Reaches everything from the project pipeline — never opens the candidate profile URL directly (that bounces to login and kills the seat). Params: project_url, candidate_name, note_text, save.",
+  "name": "LinkedIn Recruiter: add note to ONE candidate (push)",
+  "description": "Push one Odoo linkedin.candidate.note to LinkedIn — select candidate by name in a project, add note (gated by save). No stage move.",
   "target_url": "https://www.linkedin.com/talent/projects",
   "steps": [
     {

@@ -1,5 +1,5 @@
 {
-  "name": "Recruiter: AI search by position (parameterized)",
+  "name": "LinkedIn Recruiter: AI search by position (parameterized)",
   "description": "PARAMETERIZED AI-Copilot search for the Odoo→Recruiter pipeline. Step 5 types 'Buscar candidatos para: {{position}}' into textarea.copilot-chat-input__textbox + submit (\\n) → AI builds & runs the search → extract candidate cards (recruiter_search_people → name + /talent/profile/ URL + headline). backend create_run substitutes runtime_params.position. The AI Copilot is the recording's real search entry (steps 13-15) — far more reliable than the advanced facets. Param: position.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
