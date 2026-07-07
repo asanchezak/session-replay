@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,13 @@ from services.execution_service import ExecutionService
 from services.recruiter_push_service import RecruiterPushService
 
 logger = logging.getLogger(__name__)
+
+# Part F: don't post a "daemon offline" chatter note in the first seconds after a
+# backend restart, before the daemon has had a chance to send its first heartbeat
+# (else a normal restart looks like the host is down). Walled (seat_warm=False) notes
+# are unaffected — that's an affirmative signal, not an absence of one.
+_BACKEND_START_MONO = time.monotonic()
+_SEAT_NOTE_STARTUP_GRACE_S = 60.0
 
 EVENT_CREATE_PROJECT = "recruiter_create_project"
 EVENT_SEARCH = "recruiter_search"
@@ -130,6 +138,7 @@ class RecruiterPipelineService:
     async def _create_pipeline_run(
         self, *, workflow_id: str, event_kind: str, runtime_params: dict,
         pipeline: dict, connector_id, priority: int = 10,
+        dedup_event_kinds: set[str] | None = None,
     ) -> ExecutionRun:
         """Create a QUEUED daemon run for the next pipeline step.
 
@@ -142,7 +151,22 @@ class RecruiterPipelineService:
         first (FIFO within a priority). Pipeline/message steps default to +10; bulk
         cleanup (deferred-removal archive) passes a low value so a flood of removals
         can't starve an interactive run.
+
+        `dedup_event_kinds`: when set, if a non-terminal (incl. QUEUED) run of one of
+        those kinds already exists for this position, return THAT run instead of
+        creating a duplicate — so a walled retry or an impatient double-click collapses
+        onto the single already-queued run.
         """
+        job_id = (pipeline or {}).get("job_id")
+        if dedup_event_kinds and job_id is not None:
+            existing = await self._find_active_pipeline_run(job_id, dedup_event_kinds)
+            if existing is not None:
+                logger.info(
+                    "recruiter pipeline: dedup — active %s run already queued for job "
+                    "%s (run %s); not creating a duplicate",
+                    event_kind, job_id, existing.id,
+                )
+                return existing
         run = await self.exec_svc.create_run(
             workflow_id=workflow_id, runtime_params=runtime_params
         )
@@ -166,13 +190,56 @@ class RecruiterPipelineService:
         }
         flag_modified(run, "origin")
         await self.session.flush()
+        await self._maybe_note_seat_unavailable(pipeline, connector_id, event_kind, run)
         return run
 
-    async def _has_active_pipeline_run(self, job_id, event_kinds=None) -> bool:
-        """Avoid duplicate concurrent runs for the same position. Scans recent
-        non-terminal runs (origin is JSON → filter in Python; rare event). By default
-        matches any pipeline stage; pass `event_kinds` to scope to specific stages
-        (e.g. {EVENT_RECOMMENDATIONS} to dedup just recommendation runs)."""
+    async def _maybe_note_seat_unavailable(
+        self, pipeline: dict, connector_id, event_kind: str, run
+    ) -> None:
+        """Part F: when a run is enqueued while the /talent seat is affirmatively
+        unavailable — walled (seat_warm False) or the operator's daemon offline — post
+        a chatter note to the Odoo position so the recruiter knows the action is queued
+        (not lost). Skips when the seat is warm, or when state is briefly unknown right
+        after a backend restart (before the first heartbeat) so we don't cry wolf.
+        Best-effort. Part E's dedup means this posts once per unavailable episode."""
+        try:
+            from api.v1.daemon import latest_seat_warm, operator_online
+
+            operator = settings.linkedin_operator
+            warm = latest_seat_warm(operator)
+            online = operator_online(operator)
+            if warm is True:
+                return  # seat is warm → will drain immediately, no note needed
+            # Affirmatively unavailable: walled, OR daemon offline (but only once the
+            # backend has been up long enough that a daemon SHOULD have checked in —
+            # avoids a false "offline" note in the first seconds after a restart).
+            uptime = time.monotonic() - _BACKEND_START_MONO
+            unavailable = (warm is False) or (
+                not online and uptime > _SEAT_NOTE_STARTUP_GRACE_S
+            )
+            if not unavailable:
+                return
+            await self._push_flow_status(
+                job_id=(pipeline or {}).get("job_id"),
+                connector_id=connector_id,
+                status="waiting_seat",
+                event_kind=event_kind,
+                run_id=run.id,
+                message=(
+                    "🔒 The LinkedIn seat isn't available right now — this action is "
+                    "queued and will run automatically once it's back."
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "seat-unavailable note failed for run %s", getattr(run, "id", "?")
+            )
+
+    async def _find_active_pipeline_run(self, job_id, event_kinds=None):
+        """Return the most-recent non-terminal (QUEUED/RUNNING/…) pipeline run for
+        this position, or None. Scans recent non-terminal runs (origin is JSON →
+        filter in Python; rare event). By default matches any pipeline stage; pass
+        `event_kinds` to scope to specific stages (e.g. {EVENT_RECOMMENDATIONS})."""
         kinds = event_kinds or PIPELINE_EVENT_KINDS
         result = await self.session.execute(
             select(ExecutionRun)
@@ -184,8 +251,13 @@ class RecruiterPipelineService:
             o = r.origin or {}
             if o.get("event_kind") in kinds:
                 if str((o.get("pipeline") or {}).get("job_id")) == str(job_id):
-                    return True
-        return False
+                    return r
+        return None
+
+    async def _has_active_pipeline_run(self, job_id, event_kinds=None) -> bool:
+        """Bool wrapper over _find_active_pipeline_run (avoid duplicate concurrent
+        runs for the same position)."""
+        return (await self._find_active_pipeline_run(job_id, event_kinds)) is not None
 
     # ------------------------------------------------------------- flow status
     @staticmethod
@@ -1229,6 +1301,7 @@ class RecruiterPipelineService:
             },
             pipeline=pipeline_ctx,
             connector_id=connector_id,
+            dedup_event_kinds={EVENT_NOTE},
         )
         logger.info(
             "recruiter pipeline: started add-note run %s for job %s (save=%s note=%r)",
@@ -1535,6 +1608,7 @@ class RecruiterPipelineService:
             runtime_params=runtime_params,
             pipeline=pipeline_ctx,
             connector_id=ctx.get("connector_id"),
+            dedup_event_kinds={EVENT_MESSAGE},
         )
         logger.info(
             "recruiter pipeline: started message-compose run %s for job %s (send=%s)",

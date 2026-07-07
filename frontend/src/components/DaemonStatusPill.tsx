@@ -9,6 +9,10 @@ interface DaemonWorkerStatus {
   circuit_open?: boolean | null;
   circuit_reason?: string | null;
   cooldown_until?: string | null;
+  // Recruiter /talent seat health from the daemon's last keepalive ping.
+  // false = walled (needs re-login); true = warm; null/undefined = unknown.
+  seat_warm?: boolean | null;
+  seat_checked_at?: string | null;
   last_seen: string;
   age_seconds: number;
   up: boolean;
@@ -18,6 +22,9 @@ interface DaemonStatusResponse {
   workers: DaemonWorkerStatus[];
   any_up: boolean;
   circuit_open?: boolean;
+  // Count of QUEUED runs that need the warm /talent seat — the backlog the daemon
+  // holds while the seat is walled. Lets a held backlog read as waiting, not stuck.
+  queued_seat_runs?: number;
 }
 
 function formatAge(ageSeconds: number): string {
@@ -66,6 +73,10 @@ export default function DaemonStatusPill() {
   const mostRecentWorker = status.workers[0] || null;
   const activeWorker = status.workers.find((worker) => worker.up && worker.driving_run_id) || null;
   const cooldownWorker = status.workers.find((worker) => worker.up && worker.circuit_open) || null;
+  // A live daemon whose last keepalive ping found the /talent seat walled: recruiter
+  // runs will fail until someone re-logs in (login-talent.bat). Surface it so it's
+  // obvious without running a pre-flight against the sensitive account.
+  const walledWorker = status.workers.find((worker) => worker.up && worker.seat_warm === false) || null;
 
   // Circuit breaker open = the LinkedIn account is in cooldown; the daemon won't
   // drive until it clears. Surface this so operators don't wonder why a trigger
@@ -98,11 +109,34 @@ export default function DaemonStatusPill() {
     );
   }
 
+  if (walledWorker) {
+    // While walled, the daemon HOLDS seat-requiring runs in the queue (it no longer
+    // drives them onto a cold seat) and drains them on re-login — so show the count
+    // waiting, so a held backlog reads as "waiting", not "stuck".
+    const waiting = status.queued_seat_runs ?? 0;
+    return (
+      <div
+        className="flex items-center gap-2 text-xs text-[#FDCB6E]"
+        aria-label="Recruiter seat walled"
+        title={`/talent seat walled — re-login needed (login-talent.bat).${
+          waiting > 0 ? ` ${waiting} run(s) queued, will run automatically once the seat is back.` : ""
+        }${
+          walledWorker.seat_checked_at ? ` · checked ${formatAge((Date.now() - Date.parse(walledWorker.seat_checked_at)) / 1000)}` : ""
+        }`}
+      >
+        <span className="w-2 h-2 rounded-full bg-[#FDCB6E]" />
+        <span>
+          Seat walled · re-login{waiting > 0 ? ` · ${waiting} waiting` : ""}
+        </span>
+      </div>
+    );
+  }
+
   if (status.any_up) {
     return (
       <div className="flex items-center gap-2 text-xs text-[#9AA0B0]" aria-label="Daemon is up">
         <span className="w-2 h-2 rounded-full bg-[#00B894]" />
-        <span>Daemon up</span>
+        <span>Daemon up{status.workers.some((w) => w.up && w.seat_warm === true) ? " · seat warm" : ""}</span>
       </div>
     );
   }

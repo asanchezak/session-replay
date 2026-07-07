@@ -748,17 +748,31 @@ class ExecutionService:
                     logger.exception(
                         "Pre-failure-notify commit failed for run %s", run_id
                     )
+                # Walled/blocker failure → auto-relaunch (clone→QUEUED, preserving
+                # origin) so the work isn't lost: the daemon's seat gate holds the
+                # clone until the seat is warm, then it drains. Capped to avoid
+                # loops. When we relaunch we push a "waiting for seat" status
+                # instead of "failed" (it isn't really failed — it's being retried).
+                relaunched = False
                 try:
-                    notified = await self._notify_recruiter_failure(run)
-                    logger.info(
-                        "Recruiter failure notify for run %s (%s): %s",
-                        run_id, event_kind, notified,
-                    )
+                    relaunched = await self._maybe_auto_relaunch_walled(run)
                 except Exception:
                     logger.exception(
-                        "Recruiter failure notify failed for run %s (%s)",
+                        "Auto-relaunch check failed for run %s (%s)",
                         run_id, event_kind,
                     )
+                if not relaunched:
+                    try:
+                        notified = await self._notify_recruiter_failure(run)
+                        logger.info(
+                            "Recruiter failure notify for run %s (%s): %s",
+                            run_id, event_kind, notified,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Recruiter failure notify failed for run %s (%s)",
+                            run_id, event_kind,
+                        )
 
             # AI SELF-HEALING (SHADOW): diagnose a FAILED recruiter run in the BACKGROUND so
             # the slow LLM call never blocks this terminal transition (it opens its own session).
@@ -822,6 +836,72 @@ class ExecutionService:
             result = await svc.notify_failure(fail_run if fail_run is not None else run)
             await fail_session.commit()
             return result
+
+    # Cap on automatic relaunches of a walled/orphaned recruiter run before we give
+    # up and surface a real failure — avoids an infinite retry loop when the seat is
+    # warm but the run keeps failing for another reason. Shared by the walled-failure
+    # hook (C.1) and the recovery supervisor's orphan requeue (C.2) via origin.
+    MAX_AUTO_RELAUNCH = 5
+
+    async def auto_relaunch(self, run: ExecutionRun) -> ExecutionRun | None:
+        """Clone a terminal/orphaned recruiter run back to QUEUED (preserving origin)
+        so the daemon's seat gate can drain it once the seat is warm — instead of
+        losing the work. Increments origin.auto_relaunch_count; returns None (no
+        relaunch) once the cap is hit. Runs in a fresh session so it can be called
+        after the caller's transaction commits. Also pushes a 'waiting_seat' status
+        to Odoo so the position reads as queued, not failed."""
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        origin = run.origin or {}
+        count = int(origin.get("auto_relaunch_count") or 0)
+        if count >= self.MAX_AUTO_RELAUNCH:
+            logger.warning(
+                "Run %s hit auto-relaunch cap (%d) — not relaunching", run.id, count,
+            )
+            return None
+        async with async_session_factory() as s:
+            svc = ExecutionService(s)
+            new_run = await svc.relaunch(str(run.id))
+            new_origin = dict(new_run.origin or {})
+            new_origin["auto_relaunch_count"] = count + 1
+            new_run.origin = new_origin
+            flag_modified(new_run, "origin")
+            await s.flush()
+            try:
+                pipeline = new_origin.get("pipeline") or {}
+                await RecruiterPipelineService(s)._push_flow_status(
+                    job_id=pipeline.get("job_id"),
+                    connector_id=new_origin.get("connector_id"),
+                    status="waiting_seat",
+                    event_kind=new_origin.get("event_kind", ""),
+                    message=(
+                        "🔒 The LinkedIn seat isn't available right now — this action "
+                        "is queued and will run automatically once it's back."
+                    ),
+                    run_id=new_run.id,
+                )
+            except Exception:
+                logger.exception(
+                    "waiting_seat notify failed for relaunch of run %s", run.id
+                )
+            await s.commit()
+            logger.info(
+                "Auto-relaunched run %s → %s (attempt %d)",
+                run.id, new_run.id, count + 1,
+            )
+            return new_run
+
+    async def _maybe_auto_relaunch_walled(self, run: ExecutionRun) -> bool:
+        """C.1: relaunch a recruiter run that FAILED because the /talent seat was
+        walled/blocked. Returns True if it was relaunched (so the caller skips the
+        real failure notify). Non-walled failures return False (surface normally)."""
+        from services.recruiter_pipeline_service import RecruiterPipelineService
+
+        if RecruiterPipelineService._classify_flow_error(run.error_summary or "") != (
+            "walled_seat"
+        ):
+            return False
+        return (await self.auto_relaunch(run)) is not None
 
     async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:
         """Run post-completion Odoo applicant push in a fresh session.

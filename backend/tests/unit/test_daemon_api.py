@@ -11,7 +11,9 @@ async def test_daemon_status_empty(client):
     response = await client.get("/v1/daemon/status", headers=_HEADERS)
 
     assert response.status_code == 200
-    assert response.json() == {"workers": [], "any_up": False, "circuit_open": False}
+    assert response.json() == {
+        "workers": [], "any_up": False, "circuit_open": False, "queued_seat_runs": 0,
+    }
 
 
 async def test_daemon_heartbeat_marks_worker_up(client, monkeypatch):
@@ -32,15 +34,41 @@ async def test_daemon_heartbeat_marks_worker_up(client, monkeypatch):
     assert body["circuit_open"] is False
     assert body["workers"] == [{
         "worker_id": "worker-a",
+        "operator_id": None,
         "polling": True,
         "driving_run_id": None,
         "circuit_open": None,
         "circuit_reason": None,
         "cooldown_until": None,
+        "seat_warm": None,
+        "seat_checked_at": None,
         "last_seen": "1970-01-01T00:01:40Z",
         "age_seconds": 0.0,
         "up": True,
     }]
+
+
+async def test_daemon_heartbeat_reports_seat_health(client, monkeypatch):
+    daemon_api.reset_heartbeat_state()
+    monkeypatch.setattr(daemon_api.time, "time", lambda: 100.0)
+
+    post = await client.post(
+        "/v1/daemon/heartbeat",
+        json={
+            "worker_id": "fernanda-worker",
+            "polling": True,
+            "driving_run_id": None,
+            "seat_warm": False,
+            "seat_checked_at": "2026-07-07T15:40:00Z",
+        },
+        headers=_HEADERS,
+    )
+    assert post.status_code == 200
+
+    body = (await client.get("/v1/daemon/status", headers=_HEADERS)).json()
+    worker = body["workers"][0]
+    assert worker["seat_warm"] is False
+    assert worker["seat_checked_at"] == "2026-07-07T15:40:00Z"
 
 
 async def test_daemon_heartbeat_reports_circuit_state(client, monkeypatch):
