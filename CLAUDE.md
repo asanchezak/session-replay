@@ -283,8 +283,12 @@ See [[project_recruiter_archive_candidate]].
   checkbox** (unchecked = preview only). Ships on akcr branch `feat/recruiter-search-link`
   / PR **#1818** (operator `-u akcr` upgrade needed for the field + wizard).
 - **Templated send (`recruiter_message_compose`, wf `c46c296f`, env
-  `RECRUITER_MESSAGE_WORKFLOW_ID`):** selects the project's ACTIVE candidates → bulk InMail
-  composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
+  `RECRUITER_MESSAGE_WORKFLOW_ID`):** ⚠️ **STALE as of 2026-07-02** — this originally
+  selected the project's ACTIVE candidates; it now scopes to LinkedIn's native
+  **"uncontacted"** pipeline stage (`SHORTLISTED`) only — already-contacted/replied
+  candidates are excluded even if active, and it sends nothing if nobody is uncontacted
+  (`reason: "no_uncontacted"`). See [[project_recruiter_message_uncontacted]]. Otherwise:
+  bulk InMail composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
   LinkedIn's **`{firstName}` variable CHIP** (the "Insert variables" `{}` button →
   `ul[data-test-variables-dropdown]` items `{firstName}`/`{lastName}`/`{fullName}`) → sets
   subject (`input[data-test-compose-subject-input]`) → **GATED**: `send=false` (default)
