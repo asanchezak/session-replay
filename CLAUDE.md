@@ -3,6 +3,13 @@
 Things future Claude sessions on this repo should know up front — discovered the
 hard way and not obvious from reading code.
 
+## Branching (added 2026-07-07)
+
+`main` = stable/deployed. Day-to-day work now happens on **`develop`** (branched off
+`main`); feature/fix branches fork from `develop` and PR back into it. Merge `develop`
+into `main` when a batch of work is ready to consider "settled." Before this date, work
+went straight to feature branches off `main` — that history is unaffected.
+
 ## CURRENT GOAL — decompose the Recruiter recording into reusable sub-workflows
 
 Carve the one long exploratory recording (`0a8404f9`, 317 steps, `/talent/home`) into
