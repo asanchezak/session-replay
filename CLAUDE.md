@@ -3,6 +3,30 @@
 Things future Claude sessions on this repo should know up front — discovered the
 hard way and not obvious from reading code.
 
+## ⏳ PENDING ACTION — verify the 2C seat-restore survived a boot (set 2026-07-08)
+
+**RESOLVED half:** the 2026-07-08 boot diagnostic was DECISIVE — `[seat-diag] PRE-NAV boot
+inventory: li_at=false … total=0` — the profile's cookie DB comes up **completely empty**
+after the nightly power-off (even 365d persistent cookies gone; Chrome exits 'Crashed', the
+unflushed cookie DB is lost). Client-side ⇒ **Item 2C built + shipped 2026-07-08**, entirely
+in the hot module (`daemon-behavior.mjs`, `behavior-8-seat-restore`, scp — no restart):
+warm ping → snapshot linkedin cookies to `C:\Users\Public\extension\.seat-state.json`
+(`saveSeatState`, only when li_at present); first keepalive tick after a boot → jar has no
+li_at → `restoreSeatStateIfCold` re-injects the file's cookies (<7d old) BEFORE the first
+/talent nav. Round-trip validated locally with a Playwright persistent context.
+
+**STILL PENDING:** (1) the seat was walled when 2C shipped → operator must run
+`login-talent.bat` once; after the next warm tick confirm `[seat-state] snapshot N linkedin
+cookie(s)` in the daemon log and that `.seat-state.json` exists. (2) After the NEXT nightly
+boot (~08:12 UTC), check the log for `[seat-restore] li_at absent at boot → injected …` and
+`seat_warm=true` without a human login. If warm ⇒ delete this block + update memory
+`project_recruiter_seat_keepalive`. If it re-injected but still WALLED ⇒ the cookie value
+itself doesn't survive server-side (IP/device binding?) — pivot per the old plan
+(`~/.claude/plans/check-if-the-seat-twinkly-clock.md`): automated morning re-login or
+keep-host-online.
+Note: checking "is the seat walled?" is a free read — `GET /v1/daemon/status` → fernanda
+`seat_warm` (or the dashboard "Seat walled" pill); don't run a workflow to find out.
+
 ## CURRENT GOAL — decompose the Recruiter recording into reusable sub-workflows
 
 Carve the one long exploratory recording (`0a8404f9`, 317 steps, `/talent/home`) into
@@ -50,10 +74,29 @@ verifies via the ACTIVE-count delta (NOT a per-url match — that under-counts a
 and one bounded retry on shortfall. `recruiter_recommendations` event_kind → `_after_recommendations`
 reuses `push_recruiter_leads`. See [[project_recruiter_demo_e2e]].
 
-### Reply-scanner — inbox replies → Odoo lead `responded` (2026-06-15)
+### Reply-scanner — inbox replies → Odoo lead `responded` (2026-06-15; **v2 classification 2026-07-07**)
 
-Closes the outreach loop: when a candidate REPLIES in the Recruiter inbox, mark the Odoo
-`linkedin.lead` `outreach_status='responded'`. It's a **passive, read-only** scan that lives
+**v2 (2026-07-07): reads reply TEXT + AI intent classification.** The scan now fetches a
+WATCHLIST (`GET /v1/recruiter/reply-watchlist` → akcr `POST /akcr/api/lead_watchlist`: leads
+`messaged/responded`, no pending removal), OPENS ≤5 watchlist-matched unread threads per scan
+(humanized click on `a[data-test-conversation-card]`; read receipt = accepted tradeoff) and
+reads the trailing inbound body (`[data-test-rich-message-body]` per
+`[data-test-message-list-item]`, sender carry-forward for grouped messages). The backend
+classifies bodies in ONE batched AI call (`backend/services/reply_intent_service.py`:
+`interested`/`not_interested`/`maybe_later`/`unclear`; failure⇒unclear, never blocks the push)
+and akcr stores body+category (`linkedin.lead.reply_category` badge, msg `ai_category`;
+`not_interested` flips `outreach_status` → off the watchlist → that thread is never opened
+again; `rejected` stays sticky; inbound dedup is now by exact body so a later SECOND reply is
+re-recorded/classified; `conversation_urn` stored on first match pins duplicate names).
+Non-watchlist unread cards stay name-only (never opened); watchlist-fetch failure ⇒ full v1
+degrade (name-only, zero opens). Host-offline is safe: replies stay UNREAD on LinkedIn; the
+timer resets on boot → first warm tick drains. akcr PR **#1934** (merged→qaodoo, needs
+`-u akcr`) / **#1935** (16.0, LEFT OPEN). Gotcha fixed on the way: `backend/ai/client.py`
+`generate()` crashed on valid JSON-ARRAY responses (confidence auto-parse assumed a dict).
+Full details: `docs/recruiter-daemon-ops.md` §Reply-scanner v2.
+
+Original v1 notes (the fallback shape): when a candidate REPLIES in the Recruiter inbox, mark
+the Odoo `linkedin.lead` `outreach_status='responded'`. A scan that lives
 in the daemon's hot-loaded `keepAliveTick` (`extension/runtime-strategies/daemon-behavior.mjs`,
 `scanInboxReplies`) on a slow cadence (`REPLY_SCAN_MS`=45m; re-syncing the file forces an
 immediate scan since the timer is module-level) — so it ships by `scp`, NO restart.
@@ -296,7 +339,13 @@ See [[project_recruiter_archive_candidate]].
 
 ### Key operational rules
 
-- **Pre-flight:** run workflow `7246989f` "Open Talent Home" on `fernanda` — `completed` = warm, `waiting_for_user` = walled → re-login needed
+- **Pre-flight (is the seat warm?):** PREFER the free read `GET /v1/daemon/status` → fernanda
+  worker `seat_warm` (`true`/`false`/`null`) — the keepalive reports it every ~2-3 min, no run,
+  never touches the account (dashboard pill shows "Seat walled · re-login"). For an ACTIVE probe
+  run workflow `7246989f` "Open Talent Home" on `fernanda`: as of 2026-07-07 `completed` = warm,
+  **`failed` = walled** (a `recruiter_hot_reload_probe` step trips `assertNoBlocker` on
+  `/uas/login-cap`). ⚠️ Pre-fix the run `completed` even when walled (a 27 KB login-cap page) —
+  do NOT trust old "completed = warm" claims.
 - **Anti-bot always on:** daemon runs (`execution_target=daemon`, `use_profile`) are UNCONDITIONALLY protected. No toggle. NEVER run via the raw extension.
 - **Strategy hot-reload** (no restart): edit `extension/runtime-strategies/recruiter.mjs` → `scp` to `linkedin-bot@100.107.206.110:'C:/Users/Public/extension/runtime-strategies/recruiter.mjs'`
 - **Daemon BEHAVIOR hot-reload** (no restart, since 2026-06-15): run-claim/priority, the

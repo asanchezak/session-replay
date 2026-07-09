@@ -19,7 +19,11 @@
 // polls + heartbeats + logs loudly — until a good module is synced. So a broken
 // `scp` safely pauses work instead of running stale/degraded.
 
-export const BEHAVIOR_VERSION = "2026-07-07-behavior-5-seat-gate";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const BEHAVIOR_VERSION = "2026-07-08-behavior-8-seat-restore";
 
 // ── Seat-warmth gate state ───────────────────────────────────────────────────
 // The daemon must NOT drive /talent runs on a cold/walled seat (they'd fail and
@@ -33,17 +37,35 @@ let seatWarm = null;            // null=unknown; true/false after a keepalive pi
 let keepaliveObserved = false;  // true once keepAliveTick has run at least once
 let lastHeldLog = "";           // throttle the "holding N seat run(s)" log
 
-// ── Reply-scanner ──────────────────────────────────────────────────────────
-// Passive, read-only scan of the Recruiter messaging inbox: collect the candidates
-// who REPLIED (conversations carrying an UNREAD badge = a new inbound message) and
-// POST them to the backend, which flips the matching Odoo linkedin.lead to
-// outreach_status='responded'. Runs inside keepAliveTick on its own slow cadence,
-// reusing the ONE warm tab. NEVER opens a thread (that would mark it read and erase
-// the human recruiter's unread cues). Matched by participant NAME — the inbox cards
-// expose no /talent/profile/ link — so akcr matches name among 'messaged' leads.
-// Land on the inbox FOLDER (list) without an /id/<thread> — navigating to bare
-// /talent/inbox auto-opens the most-recent conversation, which sends a READ receipt
-// (marks the freshest reply read → scanner misses it AND mutates the human's inbox).
+// ── Reply-scanner (v2: reads reply TEXT for watchlist candidates) ───────────
+// Scan of the Recruiter messaging inbox: collect the candidates who REPLIED
+// (conversations carrying an UNREAD badge = a new inbound message) and POST them
+// to the backend, which AI-classifies any captured reply text (interested /
+// not_interested / maybe_later / unclear) and pushes to Odoo (linkedin.lead →
+// outreach_status='responded'; not_interested closes the lead out). Runs inside
+// keepAliveTick on its own slow cadence, reusing the ONE warm tab.
+//
+// Thread-opening policy: the scanner OPENS at most THREAD_OPEN_BUDGET unread
+// threads per scan, and ONLY for candidates on the reply WATCHLIST (leads we
+// messaged that aren't closed out — GET /v1/recruiter/reply-watchlist, zero
+// LinkedIn cost). Opening sends a read receipt and clears the unread dot — the
+// accepted tradeoff for reading the reply body; the recruiter's queue lives in
+// Odoo (full text + category) from here on. Non-watchlist unread conversations
+// are NEVER opened — reported name-only exactly as v1 (akcr name-matching still
+// flips them to 'responded'). If the watchlist fetch fails, the whole scan
+// degrades to v1 (name-only, zero opens).
+//
+// Offline-queue property: replies stay UNREAD on LinkedIn while the host is off,
+// and lastReplyScanAt resets on boot/hot-reload — so the FIRST warm tick after
+// recovery scans and drains everything pending. Nothing is lost to downtime.
+//
+// Matched by participant NAME (diacritic/case-insensitive) — the inbox cards
+// expose no /talent/profile/ link — so akcr matches name among 'messaged' leads;
+// the conversation URN is stored on the Odoo lead at first match to pin later
+// replies. Land on the inbox FOLDER (list) without an /id/<thread> — navigating
+// to bare /talent/inbox auto-opens the most-recent conversation, which sends a
+// READ receipt (marks the freshest reply read → scanner misses it AND mutates
+// the human's inbox).
 const INBOX_URL = "https://www.linkedin.com/talent/inbox/0/main";
 // The seat has multiple contracts → /talent/inbox lands on a contract-chooser. Pick
 // the Recruiter contract (NOT the "Job Posting" one). Matched locale-proof by the
@@ -56,6 +78,50 @@ const SEAT_OWNER_MATCH = "Benavides";
 // this file forces an immediate scan on the next warm tick).
 const REPLY_SCAN_MS = 45 * 60_000;
 let lastReplyScanAt = 0;
+// Max unread threads OPENED per scan (each open = one read receipt). Only ever
+// watchlist-matched conversations; the rest wait for the next scan.
+const THREAD_OPEN_BUDGET = 5;
+
+// Diacritic/case/whitespace-insensitive name key for watchlist matching
+// ("María  Pérez" ≡ "maria perez").
+function normName(s) {
+  return (s || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+// Read the CURRENTLY-OPEN thread's trailing consecutive INBOUND messages (the
+// candidate's latest reply, possibly multi-message) — sender + joined body text.
+// Body selector [data-test-rich-message-body] pinned from the 2026-07-07 live DOM
+// capture. Consecutive messages from one sender only carry the sender header on
+// the first, so effective senders are carried forward before walking backwards.
+async function readOpenThreadReply(page, SEAT_OWNER) {
+  return page.evaluate((OWNER) => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const items = Array.from(document.querySelectorAll("[data-test-message-list-item]"));
+    if (!items.length) return null;
+    let carry = "";
+    const eff = items.map((it) => {
+      const s = clean(it.querySelector("[data-test-message-sender-name]")?.textContent);
+      if (s) carry = s;
+      return carry;
+    });
+    const bodies = [];
+    let sender = "";
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (!eff[i] || eff[i].includes(OWNER)) break;
+      sender = eff[i];
+      const body = items[i].querySelector("[data-test-rich-message-body]");
+      const text = (body ? body.innerText : "").trim();
+      if (text) bodies.unshift(text);
+    }
+    if (!sender) return null;
+    return { sender, body: bodies.join("\n") };
+  }, SEAT_OWNER).catch(() => null);
+}
 
 // Navigate the warm tab to the Recruiter inbox, clicking through the contract-chooser
 // if it appears. Returns true if we believe we reached the inbox.
@@ -80,44 +146,93 @@ async function gotoInbox(page, h) {
   return !/contract-chooser/i.test(page.url());
 }
 
-// Read-only scan: collect candidates who REPLIED and POST to the backend. Two signals:
-//  (1) conversation cards with an UNREAD badge (a new inbound msg we haven't opened);
+// Scan: collect candidates who REPLIED (+ the reply text where allowed) and POST
+// to the backend. Signals:
+//  (1) conversation cards with an UNREAD badge (a new inbound msg we haven't opened)
+//      — watchlist-matched ones are OPENED (≤ THREAD_OPEN_BUDGET) to read the body;
 //  (2) the auto-opened (most-recent) thread — LinkedIn force-opens it on navigation
-//      (clearing its unread badge), so detect inbound by its LAST message's sender NOT
-//      being the seat owner. Together these catch the freshest reply + any older unread.
+//      (clearing its unread badge); its body is already visible = free text.
 async function scanInboxReplies(page, api) {
   const h = api.helpers;
+  // Reply watchlist (zero LinkedIn cost): who we're allowed to open threads for.
+  // null = fetch failed → degrade to v1 (name-only, no opens).
+  let watchNames = null;
+  try {
+    const wl = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/reply-watchlist`);
+    if (wl && Array.isArray(wl.watchlist)) {
+      watchNames = new Set(wl.watchlist.map((w) => normName(w.name)).filter(Boolean));
+      console.log(`[reply-scan] watchlist: ${watchNames.size} open lead(s)`);
+    }
+  } catch (e) {
+    console.log(`[reply-scan] watchlist fetch failed (${(e && e.message) || e}) — name-only scan`);
+  }
   const reached = await gotoInbox(page, h);
   if (!reached) { console.log("[reply-scan] could not reach inbox (contract chooser?)"); return 0; }
   await h.sleep(1500);
-  const replies = await page.evaluate((SEAT_OWNER) => {
+  // Unread cards + the auto-opened thread's sender (fast, no clicks).
+  const scan = await page.evaluate((SEAT_OWNER) => {
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const out = []; const seen = new Set();
-    const add = (name, urn, via) => {
-      name = clean(name);
-      if (!name || name.includes(SEAT_OWNER) || seen.has(name)) return;
-      seen.add(name); out.push({ name, conversation_urn: urn || "", via });
-    };
-    // (1) Unread conversation cards.
+    const unread = [];
     for (const card of document.querySelectorAll("[data-test-conversation-card-container]")) {
       if (!card.querySelector("[data-test-unread-badge]")) continue;
-      add(card.querySelector("[data-test-participant-name]")?.textContent,
-          card.getAttribute("data-test-conversation-urn"), "unread");
+      const name = clean(card.querySelector("[data-test-participant-name]")?.textContent);
+      if (name && !name.includes(SEAT_OWNER))
+        unread.push({ name, urn: card.getAttribute("data-test-conversation-urn") || "" });
     }
-    // (2) Auto-opened thread: last message inbound (sender != seat owner) = a reply.
-    const items = document.querySelectorAll("[data-test-message-list-item]");
-    const last = items[items.length - 1];
-    const lastSender = clean(last?.querySelector("[data-test-message-sender-name]")?.textContent);
-    if (lastSender && !lastSender.includes(SEAT_OWNER)) add(lastSender, "", "open-thread");
-    return out;
-  }, SEAT_OWNER_MATCH).catch(() => []);
+    return { unread };
+  }, SEAT_OWNER_MATCH).catch(() => ({ unread: [] }));
+
+  const replies = [];
+  const seen = new Set();
+  const add = (name, urn, via, body) => {
+    if (!name || seen.has(normName(name))) return;
+    seen.add(normName(name));
+    const entry = { name, conversation_urn: urn || "", via };
+    if (body) entry.body = body;
+    replies.push(entry);
+  };
+
+  // (2) first: the auto-opened thread's trailing inbound reply — text is free.
+  const open = await readOpenThreadReply(page, SEAT_OWNER_MATCH);
+  if (open && open.sender) add(open.sender, "", "open-thread", open.body);
+
+  // (1) unread cards: open watchlist-matched ones (budgeted) to read the body.
+  let opened = 0;
+  for (const card of scan.unread) {
+    if (seen.has(normName(card.name))) continue;
+    const watched = watchNames !== null && watchNames.has(normName(card.name));
+    if (!watched || opened >= THREAD_OPEN_BUDGET) {
+      add(card.name, card.urn, "unread");  // name-only, thread NEVER opened
+      continue;
+    }
+    try {
+      const sel = `[data-test-conversation-card-container][data-test-conversation-urn="${card.urn}"] a[data-test-conversation-card]`;
+      const target = h.resolveLocatorWithWait
+        ? await h.resolveLocatorWithWait(page, [{ css: sel }], { timeoutMs: 8000 }).catch(() => null)
+        : null;
+      if (target && h.clickResolved) {
+        await h.clickResolved(page, target, { moveMouseAlongBezier: h.moveMouseAlongBezier, orand: Math.random });
+      } else {
+        await page.click(sel, { timeout: 8000 });
+      }
+      opened += 1;
+      await page.waitForSelector("[data-test-message-list-item]", { timeout: 15000 }).catch(() => {});
+      await h.sleep(2000 + Math.random() * 3000);
+      const reply = await readOpenThreadReply(page, SEAT_OWNER_MATCH);
+      add(card.name, card.urn, "unread", (reply && reply.body) || "");
+    } catch (e) {
+      console.log(`[reply-scan] thread open failed for '${card.name}': ${(e && e.message) || e}`);
+      add(card.name, card.urn, "unread");  // fall back to name-only
+    }
+  }
+
   if (!replies.length) { console.log("[reply-scan] no replies"); return 0; }
   try {
     const res = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/inbox-replies`, {
       method: "POST",
       body: JSON.stringify({ replies }),
     });
-    console.log(`[reply-scan] reported ${replies.length} reply(ies) ${JSON.stringify(replies.map(r => r.name + ":" + r.via))} → ${JSON.stringify(res).slice(0, 200)}`);
+    console.log(`[reply-scan] reported ${replies.length} reply(ies), ${opened} thread(s) opened ${JSON.stringify(replies.map(r => r.name + ":" + r.via + (r.body ? "+body" : "")))} → ${JSON.stringify(res).slice(0, 200)}`);
   } catch (e) {
     console.log(`[reply-scan] POST failed: ${(e && e.message) || e}`);
   }
@@ -265,6 +380,57 @@ export async function driveGenericStep({ step, page, idx, action, value, orand, 
 // wire, so no fingerprint/anti-bot impact.
 const SEAT_COOKIE_TTL_S = 7 * 86400;
 
+// ── seat-state FILE persist + boot re-inject (Item 2C, 2026-07-08) ───────────
+// The 2026-07-08 PRE-NAV boot inventory proved the profile's cookie DB comes up
+// COMPLETELY EMPTY after the nightly power-off (total=0 — even 365d persistent
+// cookies gone; Chrome exits as 'Crashed' and the unflushed cookie DB is lost).
+// So no in-jar expiry trick can survive a boot. Fix: snapshot the linkedin
+// cookies to a plain JSON file after each warm ping, and RE-INJECT them at the
+// start of a keepalive tick whenever the jar has no li_at (i.e. right after a
+// boot), BEFORE the first /talent navigation. A file on disk survives anything.
+// The seat gate holds seat runs until keepalive confirms warm, so keepalive-first
+// injection covers the run-driving path too. File lives next to the extension
+// dir (survives module re-syncs); stale state (>7d) is ignored.
+const SEAT_STATE_FILE = path.join(
+  path.dirname(path.dirname(fileURLToPath(import.meta.url))), ".seat-state.json");
+const SEAT_STATE_MAX_AGE_MS = 7 * 86400 * 1000;
+let seatRestoreAttempted = false;  // once per module load ≈ once per boot
+
+function saveSeatState(cookies) {
+  const li = (cookies || []).filter((c) => String(c.domain || "").includes("linkedin.com"));
+  if (!li.some((c) => c.name === "li_at")) return 0;  // never overwrite good state with a walled jar
+  fs.writeFileSync(SEAT_STATE_FILE, JSON.stringify({ savedAt: Date.now(), cookies: li }));
+  return li.length;
+}
+
+async function restoreSeatStateIfCold(ctx) {
+  if (seatRestoreAttempted) return false;
+  seatRestoreAttempted = true;
+  try {
+    const jar = await ctx.cookies();
+    const hasAuth = jar.some((c) => c.name === "li_at" && String(c.domain || "").includes("linkedin.com"));
+    if (hasAuth) return false;  // seat cookies present — nothing to restore
+    if (!fs.existsSync(SEAT_STATE_FILE)) {
+      console.log("[seat-restore] jar has no li_at and no saved seat state — fresh login needed");
+      return false;
+    }
+    const saved = JSON.parse(fs.readFileSync(SEAT_STATE_FILE, "utf8"));
+    const age = Date.now() - (saved.savedAt || 0);
+    if (!Array.isArray(saved.cookies) || !saved.cookies.length || age > SEAT_STATE_MAX_AGE_MS) {
+      console.log(`[seat-restore] saved state unusable (age ${(age / 86400000).toFixed(1)}d) — fresh login needed`);
+      return false;
+    }
+    const nowS = Date.now() / 1000;
+    const cookies = saved.cookies.filter((c) => !(c.expires > 0 && c.expires < nowS));
+    await ctx.addCookies(cookies);
+    console.log(`[seat-restore] li_at absent at boot → injected ${cookies.length} saved cookie(s) (snapshot ${(age / 3600000).toFixed(1)}h old) BEFORE first /talent nav`);
+    return true;
+  } catch (e) {
+    console.log(`[seat-restore] failed: ${(e && e.message) || e}`);
+    return false;
+  }
+}
+
 // ── seat-cookie DIAGNOSTIC (2026-07-07) ──────────────────────────────────────
 // The 7-day-expiry persist below is DEPLOYED and running yet the seat still walls
 // on every nightly boot. Before building a heavier fix we need to know WHY: is a
@@ -348,6 +514,9 @@ export async function keepAliveTick(api) {
         console.log(`[seat-diag] PRE-NAV boot inventory: li_at=${has("li_at")} liap=${has("liap")} li_a=${has("li_a")} JSESSIONID=${has("JSESSIONID")} total=${rep.total} session=${rep.sessionCt} partitioned=${rep.partCt} :: ${rep.list}`);
       } catch (e) { console.log(`[seat-diag] pre-nav inventory error: ${(e && e.message) || e}`); }
     }
+    // Item 2C: the nightly power-off empties the cookie DB (verified 2026-07-08) —
+    // re-inject the file-persisted seat cookies BEFORE the first /talent nav.
+    await restoreSeatStateIfCold(ctx);
     // Re-assert the session in the SAME tab: a real authenticated request every
     // couple of minutes refreshes the seat and surfaces a wall if one appeared.
     await warmPage.goto("https://www.linkedin.com/talent/home", { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -381,6 +550,12 @@ export async function keepAliveTick(api) {
         const n = await persistSeatCookies(ctx);
         if (n) console.log(`[keepalive] persisted ${n} session cookie(s) → seat survives browser restarts`);
       } catch (e) { console.log(`[keepalive] cookie persist skipped: ${(e && e.message) || e}`); }
+      // Item 2C: snapshot the linkedin cookies to disk — the boot re-inject reads
+      // this file (the cookie DB itself does NOT survive the nightly power-off).
+      try {
+        const n = saveSeatState(await ctx.cookies());
+        if (n) console.log(`[seat-state] snapshot ${n} linkedin cookie(s) → ${SEAT_STATE_FILE}`);
+      } catch (e) { console.log(`[seat-state] snapshot skipped: ${(e && e.message) || e}`); }
       // Reply-scan: on its own slow cadence (REPLY_SCAN_MS) OR on-demand when the Odoo
       // "Escanear respuestas" button requested one (newer than our last scan). Reuses
       // the warm tab; the next ping re-navigates to /talent/home.

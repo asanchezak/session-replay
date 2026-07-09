@@ -184,7 +184,10 @@ class OpenAIProvider(AIProvider):
         confidence = 0.0
         try:
             parsed = json.loads(content)
-            confidence = float(parsed.get("confidence", 0.0))
+            # Only dict responses carry a confidence field — a valid JSON ARRAY
+            # response (e.g. batched classification) must not blow up here.
+            if isinstance(parsed, dict):
+                confidence = float(parsed.get("confidence", 0.0))
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
         usage = {

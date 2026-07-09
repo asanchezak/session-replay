@@ -12,9 +12,18 @@ restart gotchas, session backup/restore.
   Only extension/dashboard-driven runs honor it (turn it ON there).
 - **NEVER run recruiter tests via the raw extension / bypassing the daemon** — that's
   the only way to lose anti-bot protection.
-- **Pre-flight:** confirm warm `/talent` seat first: run workflow `7246989f`
-  "Open Talent Home" (read-only) on `fernanda`; `completed` = warm,
-  `waiting_for_user` = walled → re-login needed.
+- **Pre-flight — check the seat is warm:**
+  - **PREFERRED (free, no run, never touches the account):** `GET /v1/daemon/status` →
+    the `fernanda` worker's `seat_warm` (`true`=warm, `false`=walled, `null`=unknown/keepalive
+    off) + `seat_checked_at`. The daemon's keepalive computes this every ~2-3 min and now
+    reports it in its heartbeat. The dashboard `DaemonStatusPill` shows "Seat walled · re-login"
+    when it's false.
+  - **Active probe (only when you need a live check):** run workflow `7246989f` "Open Talent
+    Home" (read-only) on `fernanda`. As of 2026-07-07 it asserts warmth via a
+    `recruiter_hot_reload_probe` step, so `completed` = warm and **`failed` = walled** (the
+    daemon's `assertNoBlocker` trips on `/uas/login-cap`). ⚠️ Do NOT trust the OLD behavior:
+    before this fix the run `completed` even on the login wall (its step-shot was a 27 KB
+    `login-cap` page vs ~1.86 MB for a warm home) — a false "warm".
 
 ## Driving Recruiter with the daemon — proven 2026-06-05
 
@@ -113,3 +122,49 @@ interactively logged on — otherwise `schtasks /Run` / `Start-ScheduledTask` ju
 Daemon code path on the host: `C:\Users\Public\extension`, run by `daemon-task.ps1` via
 `linkedin-bot-daemon` scheduled task. `findstr`/`where` over SSH need `cmd /c` or they
 shell-mangle the path.
+
+## Reply-scanner v2 — reads reply text + AI intent classification (2026-07-07)
+
+The inbox reply-scanner (hot module `extension/runtime-strategies/daemon-behavior.mjs`,
+`scanInboxReplies`) now reads the reply TEXT of candidates we messaged and the backend
+AI-classifies each reply into `interested` / `not_interested` / `maybe_later` / `unclear`
+(one batched OpenAI call, `backend/services/reply_intent_service.py`); the category +
+raw body land on the Odoo `linkedin.lead` (`reply_category` badge, inbound
+`linkedin.lead.message.ai_category`, akcr `/akcr/api/lead_replied` v2).
+
+- **Watchlist-gated thread opens.** Before scanning, the daemon GETs
+  `GET /v1/recruiter/reply-watchlist` (backend → akcr `POST /akcr/api/lead_watchlist`):
+  leads with `outreach_status in (messaged, responded)` and no pending removal. Only
+  UNREAD conversations whose participant name (diacritic/case-insensitive) matches the
+  watchlist are OPENED — max `THREAD_OPEN_BUDGET`=5 per scan — by a humanized click on
+  `a[data-test-conversation-card]` inside the matching
+  `[data-test-conversation-card-container][data-test-conversation-urn=…]`. A classified
+  `not_interested` (or manual `rejected`) flips `outreach_status` → the lead leaves the
+  watchlist domain → that person's thread is never opened again. Non-watchlist unread
+  cards are reported NAME-ONLY exactly as v1 (never opened). Watchlist fetch failure ⇒
+  the whole scan degrades to v1 (name-only, zero opens).
+- **Message body selector** (pinned from a live DOM capture 2026-07-07):
+  `[data-test-rich-message-body]` inside each `[data-test-message-list-item]`
+  (`innerText`; `<br>` → newlines). Consecutive messages from one sender only carry
+  `[data-test-message-sender-name]` on the FIRST → effective senders are carried forward,
+  then the TRAILING consecutive inbound run (sender ≠ "Benavides") is joined with `\n` as
+  the reply body (`readOpenThreadReply`). The auto-opened thread's body is captured for
+  free (no click).
+- **Read-receipt tradeoff (accepted, user-confirmed):** opening a thread marks it read
+  (candidate sees "seen"; Fernanda loses that unread dot). Only watchlist candidates,
+  ≤5/scan; the recruiter's reply queue lives in Odoo (full text + category) from here on.
+- **Offline-queue property:** replies stay UNREAD on LinkedIn while the host is off;
+  `lastReplyScanAt` resets on boot/hot-reload → the FIRST warm tick after recovery scans
+  and drains everything. The scan only runs on a warm seat.
+- **Second-reply support:** akcr dedups inbound messages by exact normalized body (not
+  "any inbound exists"), so a `maybe_later` candidate replying again later is recorded and
+  re-classified. `conversation_urn` is stored on the lead at first match and used FIRST for
+  matching (pins duplicate names).
+- **AI failure ⇒ `unclear`** (never blocks the push; the lead still flips `responded`).
+  Gotcha fixed on the way: `ai/client.py` `generate()` crashed on valid JSON-ARRAY
+  responses (confidence auto-parse assumed a dict).
+- **Verify:** simulated —
+  `curl -X POST $BACKEND/v1/recruiter/inbox-replies -H "X-API-Key: …" -d '{"replies":[{"name":"…","body":"…"}]}'`
+  → response `classified: N`; watchlist — `curl $BACKEND/v1/recruiter/reply-watchlist`.
+  Known caveat: reply-scan targets ENDPOINTS[0] (DEV→qaodoo) only; candidates messaged
+  from PROD/morsoft campaigns come back `lead_not_found` on qaodoo.

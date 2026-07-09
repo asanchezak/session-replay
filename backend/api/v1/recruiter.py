@@ -51,6 +51,12 @@ class StartPipelineRequest(BaseModel):
 class InboxReply(BaseModel):
     profile_url: str | None = None
     name: str | None = None
+    # Reply-classification fields (scan v2): the daemon opens watchlist-matched
+    # threads and includes the reply text; the backend classifies it before the
+    # Odoo push. All optional — a name-only detection still flips 'responded'.
+    body: str | None = None
+    conversation_urn: str | None = None
+    via: str | None = None
 
 
 class InboxRepliesRequest(BaseModel):
@@ -235,13 +241,25 @@ async def inbox_replies(
     db: AsyncSession = Depends(get_db),
 ):
     """Passive reply-scan ingress: the daemon's keepAliveTick scrapes the Recruiter
-    inbox (read-only) and POSTs the candidates who replied to our outreach. For each,
-    push an inbound-message marker to Odoo so the linkedin.lead flips to
-    outreach_status='responded'. No run is created; idempotent on the Odoo side."""
+    inbox (read-only) and POSTs the candidates who replied to our outreach. Replies
+    carrying the message text (`body`) are AI-classified (interested / not_interested /
+    maybe_later / unclear) before the Odoo push; every reply flips the linkedin.lead
+    to outreach_status='responded' (not_interested additionally closes it out). No run
+    is created; idempotent on the Odoo side."""
     svc = RecruiterPipelineService(db)
     res = await svc.record_inbox_replies([r.model_dump() for r in req.replies])
     await db.commit()
     return res
+
+
+@router.get("/reply-watchlist")
+async def reply_watchlist(db: AsyncSession = Depends(get_db)):
+    """The reply WATCHLIST for the daemon's inbox scan: leads we messaged whose
+    conversation should still be read (proxied from Odoo /akcr/api/lead_watchlist).
+    A lead classified not_interested (or manually rejected) leaves the list — the
+    scanner stops opening that person's thread. Read-only, zero LinkedIn cost."""
+    svc = RecruiterPipelineService(db)
+    return await svc.get_reply_watchlist()
 
 
 @router.post("/jobs/{job_id}/demo")

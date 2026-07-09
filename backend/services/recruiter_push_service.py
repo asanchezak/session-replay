@@ -288,6 +288,27 @@ class RecruiterPushService:
             logger.exception("inbox-reply push: POST failed")
             return {"pushed": 0, "error": True}
 
+    async def fetch_lead_watchlist(self, connector_id) -> list[dict]:
+        """Fetch the reply watchlist from Odoo (/akcr/api/lead_watchlist): open leads
+        (messaged/responded) whose conversations the inbox scanner should still read.
+        Degrades to [] on ANY failure — the scan then runs name-only (no thread opens),
+        never breaking on a backend/Odoo outage."""
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return []
+        base_url, api_key = ep
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/lead_watchlist", {})
+            odoo = res.get("odoo") or {}
+            watchlist = odoo.get("watchlist") if isinstance(odoo, dict) else None
+            if not isinstance(watchlist, list):
+                logger.warning("lead-watchlist: unexpected Odoo response %s", res)
+                return []
+            return [w for w in watchlist if isinstance(w, dict)]
+        except Exception:
+            logger.exception("lead-watchlist: fetch failed")
+            return []
+
     # ------------------------------------------------------- boolean search read/push
     async def read_search_result(self, run_id) -> dict:
         """Read a search run's extraction → {url, total_count, leads}. total_count is
