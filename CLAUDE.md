@@ -3,6 +3,13 @@
 Things future Claude sessions on this repo should know up front — discovered the
 hard way and not obvious from reading code.
 
+## Branching (added 2026-07-07)
+
+`main` = stable/deployed. Day-to-day work now happens on **`develop`** (branched off
+`main`); feature/fix branches fork from `develop` and PR back into it. Merge `develop`
+into `main` when a batch of work is ready to consider "settled." Before this date, work
+went straight to feature branches off `main` — that history is unaffected.
+
 ## ⏳ PENDING ACTION — verify the 2C seat-restore survived a boot (set 2026-07-08)
 
 **RESOLVED half:** the 2026-07-08 boot diagnostic was DECISIVE — `[seat-diag] PRE-NAV boot
@@ -319,8 +326,12 @@ See [[project_recruiter_archive_candidate]].
   checkbox** (unchecked = preview only). Ships on akcr branch `feat/recruiter-search-link`
   / PR **#1818** (operator `-u akcr` upgrade needed for the field + wizard).
 - **Templated send (`recruiter_message_compose`, wf `c46c296f`, env
-  `RECRUITER_MESSAGE_WORKFLOW_ID`):** selects the project's ACTIVE candidates → bulk InMail
-  composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
+  `RECRUITER_MESSAGE_WORKFLOW_ID`):** ⚠️ **STALE as of 2026-07-02** — this originally
+  selected the project's ACTIVE candidates; it now scopes to LinkedIn's native
+  **"uncontacted"** pipeline stage (`SHORTLISTED`) only — already-contacted/replied
+  candidates are excluded even if active, and it sends nothing if nobody is uncontacted
+  (`reason: "no_uncontacted"`). See [[project_recruiter_message_uncontacted]]. Otherwise:
+  bulk InMail composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
   LinkedIn's **`{firstName}` variable CHIP** (the "Insert variables" `{}` button →
   `ul[data-test-variables-dropdown]` items `{firstName}`/`{lastName}`/`{fullName}`) → sets
   subject (`input[data-test-compose-subject-input]`) → **GATED**: `send=false` (default)
