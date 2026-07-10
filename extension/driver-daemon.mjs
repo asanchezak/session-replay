@@ -97,6 +97,7 @@ const RECRUITER_PING_MAX_MS = Number(process.env.RECRUITER_PING_MAX_MS || 3 * 60
 const RECRUITER_PING_WALLED_BACKOFF_MS = Number(process.env.RECRUITER_PING_WALLED_BACKOFF_MS || 10 * 60_000);
 let recruiterPingDue = Date.now() + 30_000; // first ping ~30s after start
 let recruiterSessionWarm = null;            // null=unknown; true/false after a ping
+let recruiterLastPingAt = null;             // ms of the last keepalive ping (for seat_checked_at)
 const WORKER_ID = process.env.WORKER_ID || `${os.hostname()}-${process.pid}`;
 // Routing identity: this daemon only claims runs whose origin.target_operator
 // matches OPERATOR_ID. Each operator's machine sets its own (e.g. "andrey");
@@ -232,18 +233,25 @@ async function fetchJson(url, init = {}) {
 
 // Heartbeat to a SPECIFIC endpoint (explicit url+key, so it doesn't disturb the
 // active pointer). The headers override sets X-API-Key to ep.key for this call only.
-async function postHeartbeat(ep, { worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until }) {
+async function postHeartbeat(ep, { worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until, seat_warm, seat_checked_at }) {
   await fetchJson(`${ep.url}/v1/daemon/heartbeat`, {
     method: "POST",
     headers: { "X-API-Key": ep.key },
-    body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until, operator_id: OPERATOR_ID }),
+    body: JSON.stringify({ worker_id, polling, driving_run_id, circuit_open, circuit_reason, cooldown_until, operator_id: OPERATOR_ID, seat_warm, seat_checked_at }),
   });
 }
 
 // While idle, heartbeat EVERY endpoint (so each backend's /daemon/status sees this
 // worker); while driving a run, heartbeat only that run's backend (the active one).
 async function heartbeatAll() {
-  const payload = { worker_id: WORKER_ID, polling: drivingRunId === null, driving_run_id: drivingRunId, ...circuitInfo() };
+  const payload = {
+    worker_id: WORKER_ID, polling: drivingRunId === null, driving_run_id: drivingRunId, ...circuitInfo(),
+    // Recruiter seat health from the last keepalive ping, so operators can check
+    // "is the /talent seat walled?" via GET /daemon/status — a free read that never
+    // touches the sensitive LinkedIn account (unlike running a pre-flight workflow).
+    seat_warm: recruiterSessionWarm,
+    seat_checked_at: recruiterLastPingAt ? new Date(recruiterLastPingAt).toISOString() : null,
+  };
   const targets = drivingRunId === null ? ENDPOINTS : [{ url: BACKEND, key: API_KEY }];
   await Promise.allSettled(targets.map((ep) => postHeartbeat(ep, payload)));
 }
@@ -1978,6 +1986,7 @@ while (true) {
         // The module does the ping + cadence; the host applies the returned deltas.
         const { warm, nextDueMs } = await behavior.keepAliveTick(api);
         recruiterSessionWarm = warm;
+        recruiterLastPingAt = Date.now();
         recruiterPingDue = nextDueMs;
         console.log(`[keepalive] next ping ~${new Date(recruiterPingDue).toISOString()} (warm=${recruiterSessionWarm})`);
       }

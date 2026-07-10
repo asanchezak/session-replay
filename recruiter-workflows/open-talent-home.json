@@ -1,6 +1,6 @@
 {
   "name": "LinkedIn Recruiter: Open Talent Home",
-  "description": "Health-check / demo: daemon opens /talent/home using the staged Recruiter session (.linkedin-profile). Read-only.",
+  "description": "Health-check / pre-flight: daemon opens /talent/home using the staged Recruiter session (.linkedin-profile) and asserts the seat is WARM. Read-only. The recruiter_hot_reload_probe step makes the daemon run assertNoBlocker, so a walled seat FAILS the run instead of silently completing on /uas/login-cap. Therefore `completed` == warm, `failed` == walled. (Prefer the free GET /v1/daemon/status seat_warm read; run this only when you need an active probe.)",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
     {
@@ -9,9 +9,18 @@
       "value": "https://www.linkedin.com/talent/home"
     },
     {
-      "action_type": "navigate",
-      "intent": "Open Recruiter Projects",
-      "value": "https://www.linkedin.com/talent/projects"
+      "action_type": "scroll",
+      "intent": "settle"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Assert Recruiter seat is warm (fails if walled)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_hot_reload_probe"
+        }
+      ]
     }
   ]
 }

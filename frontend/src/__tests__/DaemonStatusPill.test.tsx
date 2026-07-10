@@ -61,6 +61,32 @@ describe("DaemonStatusPill", () => {
     expect(screen.getByText("Daemon driving run")).toBeInTheDocument();
   });
 
+  it("renders a walled-seat warning when an up worker's last ping was walled", async () => {
+    (global as any).fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => ({
+        any_up: true,
+        workers: [{
+          worker_id: "fernanda",
+          polling: true,
+          driving_run_id: null,
+          seat_warm: false,
+          seat_checked_at: "2026-07-07T15:40:00Z",
+          last_seen: "2026-07-07T15:41:00Z",
+          age_seconds: 2,
+          up: true,
+        }],
+      }),
+    }));
+
+    renderPill();
+
+    await waitFor(() => expect(screen.getByLabelText("Recruiter seat walled")).toBeInTheDocument());
+    expect(screen.getByText("Seat walled · re-login")).toBeInTheDocument();
+  });
+
   it("renders red with relative age when workers are stale", async () => {
     (global as any).fetch = vi.fn(async () => ({
       ok: true,

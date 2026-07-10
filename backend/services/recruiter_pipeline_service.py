@@ -35,6 +35,7 @@ from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
 from services.execution_service import ExecutionService
 from services.recruiter_push_service import RecruiterPushService
+from services.reply_intent_service import classify_replies
 
 logger = logging.getLogger(__name__)
 
@@ -1569,22 +1570,46 @@ class RecruiterPipelineService:
 
     async def record_inbox_replies(self, replies: list[dict]) -> dict:
         """Passive inbox-reply scan ingress: the daemon's keepAliveTick scrapes the
-        Recruiter inbox and POSTs candidates who replied to our outreach. Resolve the
-        recruiter connector and push an INBOUND-message marker to Odoo (→
-        outreach_status='responded' via _sync_lead_status). No ExecutionRun is created
-        (passive); akcr is idempotent so repeated scans are safe."""
+        Recruiter inbox and POSTs candidates who replied to our outreach. Replies that
+        carry the message text (`body`) are AI-classified (ONE batched call) and the
+        category travels with the Odoo push; body-less detections push as before.
+        Every reply flips the linkedin.lead to 'responded' via _sync_lead_status;
+        category=not_interested additionally closes the lead out (off the watchlist).
+        No ExecutionRun is created (passive); akcr is idempotent so repeated scans
+        are safe. AI failure degrades to category='unclear' — never blocks the push."""
         replies = [
             r for r in (replies or [])
             if isinstance(r, dict) and (r.get("profile_url") or r.get("name"))
         ]
         if not replies:
             return {"status": "skipped", "reason": "no_replies", "pushed": 0}
+        with_body = [r for r in replies if (r.get("body") or "").strip()]
+        if with_body:
+            verdicts = await classify_replies(with_body)
+            for r, v in zip(with_body, verdicts):
+                r["category"] = v["category"]
+                r["category_reason"] = v["reason"]
+            logger.info(
+                "recruiter inbox-replies: classified %d reply bodies: %s",
+                len(with_body),
+                [(r.get("name"), r.get("category")) for r in with_body],
+            )
         connector_id = await self._latest_recruiter_connector()
         if not connector_id:
             return {"status": "skipped", "reason": "no_recruiter_connector", "pushed": 0}
         res = await self.push.push_inbox_replies(connector_id=connector_id, replied=replies)
         logger.info("recruiter inbox-replies: %d candidates → %s", len(replies), res)
-        return {"status": "ok", "received": len(replies), **res}
+        return {"status": "ok", "received": len(replies), "classified": len(with_body), **res}
+
+    async def get_reply_watchlist(self) -> dict:
+        """The reply watchlist for the daemon's inbox scan: open leads (messaged/
+        responded, not closed out) fetched live from Odoo. Empty list when no
+        recruiter connector is known yet (degrades to the name-only scan)."""
+        connector_id = await self._latest_recruiter_connector()
+        if not connector_id:
+            return {"watchlist": [], "count": 0, "reason": "no_recruiter_connector"}
+        watchlist = await self.push.fetch_lead_watchlist(connector_id)
+        return {"watchlist": watchlist, "count": len(watchlist)}
 
     async def send_messages(self, job_id, subject: str | None = None,
                             body: str | None = None, send: bool = False) -> str | None:
