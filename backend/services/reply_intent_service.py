@@ -29,8 +29,8 @@ _SYSTEM_PROMPT = (
     "opening. Input is a JSON array of items {id, name, body} where body is the "
     "candidate's reply text (any language). Respond with ONLY a JSON array — no prose, "
     'no code fences: [{"id": <same id>, "category": "<one of: interested | '
-    'not_interested | maybe_later | unclear>", "reason": "<at most 15 words, in the '
-    'same language as the reply>"}].\n'
+    'not_interested | maybe_later | unclear>", "reason": "<at most 15 words, '
+    'ALWAYS written in English regardless of the reply\'s language>"}].\n'
     "interested = wants to proceed, accepts, or engages with the opportunity in any "
     "way: asking about the role, salary, process, or company; requesting the job "
     "description or a working application link; reporting a broken link so they can "
