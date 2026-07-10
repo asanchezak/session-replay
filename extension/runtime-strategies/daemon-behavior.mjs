@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const BEHAVIOR_VERSION = "2026-07-08-behavior-8-seat-restore";
+export const BEHAVIOR_VERSION = "2026-07-10-behavior-9-seat-gate-boot";
 
 // ── Seat-warmth gate state ───────────────────────────────────────────────────
 // The daemon must NOT drive /talent runs on a cold/walled seat (they'd fail and
@@ -36,6 +36,14 @@ export const BEHAVIOR_VERSION = "2026-07-08-behavior-8-seat-restore";
 let seatWarm = null;            // null=unknown; true/false after a keepalive ping
 let keepaliveObserved = false;  // true once keepAliveTick has run at least once
 let lastHeldLog = "";           // throttle the "holding N seat run(s)" log
+// Arm the gate from the moment the module loads (nightly boot / hot-reload), BEFORE the
+// first keepAliveTick has run — otherwise a run queued overnight is claimed on the first
+// tick (keepaliveObserved still false) and driven on a cold seat → false "seat walled".
+// The grace window bounds this so a host where keepalive is disabled (seatWarm stays
+// null, keepaliveObserved stays false) doesn't strand seat runs forever: once the grace
+// lapses, the gate reverts to the keepaliveObserved-based behavior (no-op there).
+const MODULE_LOADED_AT = Date.now();
+const SEAT_GATE_BOOT_GRACE_MS = 120_000; // covers boot → first keepalive (~30s) w/ margin
 
 // ── Reply-scanner (v2: reads reply TEXT for watchlist candidates) ───────────
 // Scan of the Recruiter messaging inbox: collect the candidates who REPLIED
@@ -265,10 +273,13 @@ export function pickPendingRun(runs, api) {
   if (watched.length === 0) return null;
   // Seat-warmth gate: HOLD runs that need the warm /talent seat until keepalive
   // has confirmed it's warm — otherwise driving them on a cold/walled seat fails
-  // the run and loses the work. Only enforced once keepalive has actually run on
-  // this host (keepaliveObserved); if keepalive is disabled the gate is a no-op so
-  // runs aren't stranded. Generic dashboard runs don't need the seat → never held.
-  const seatGateActive = keepaliveObserved && seatWarm !== true;
+  // the run and loses the work. Armed as soon as the module loads (boot grace) so a
+  // run queued overnight isn't claimed on the very first tick before keepalive/seat-
+  // restore has run; after the grace lapses it falls back to requiring keepaliveObserved,
+  // so a host where keepalive is disabled doesn't strand seat runs. Generic dashboard
+  // runs don't need the seat → never held.
+  const withinBootGrace = (Date.now() - MODULE_LOADED_AT) < SEAT_GATE_BOOT_GRACE_MS;
+  const seatGateActive = seatWarm !== true && (keepaliveObserved || withinBootGrace);
   const claimable = seatGateActive ? watched.filter((r) => !needsSeat(r)) : watched;
   if (claimable.length === 0) {
     if (seatGateActive) {
@@ -523,7 +534,16 @@ export async function keepAliveTick(api) {
     await warmPage.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
     await h.sleep(2500 + Math.random() * 2500);
     const url = warmPage.url();
-    const walled = h.isBlockerUrl(url) || /\/uas\/login|login-cap/i.test(url);
+    let walled = h.isBlockerUrl(url) || /\/uas\/login|login-cap/i.test(url);
+    // Match the run path's blocker check, not just the URL: /talent/home can render a
+    // login form / re-auth interstitial WITHOUT a login URL (esp. after seat-restore
+    // injects cookies that are dead server-side). assertNoBlocker adds the DOM check
+    // (visible password field / captcha / 2FA) the run's own guard uses, so seatWarm is
+    // only true when the seat is genuinely usable — no false-warm gate releases.
+    if (!walled) {
+      try { await h.assertNoBlocker(warmPage, "keepalive"); }
+      catch { walled = true; }
+    }
     warm = !walled;
     // DIAGNOSTIC: on the FIRST ping after this module (re)loaded — i.e. right after
     // a nightly boot — and on every walled ping, log which linkedin cookies actually
