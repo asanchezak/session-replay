@@ -50,15 +50,19 @@
       "failure_reasons": { "add_profile_failed": "The /in/ bridge to the Recruiter profile or the Save-to-project button drifted." }
     },
     "recruiter_message_compose": {
-      "intent": "Bulk-InMail the project's active candidates from a template ({Nombre} -> {firstName} chip), gated by `send`.",
-      "params": ["project_url", "body", "subject", "send"],
-      "success_criteria": "message_compose_result.ok (gated preview OR a real send that delivered).",
+      "intent": "UNIFIED per-page loop over the project's UNCONTACTED (SHORTLISTED) stage: for each page, message from a template ({Nombre}->{firstName} chip) -> (only if the send succeeded) add the note_text contact note -> move that page to 'contacted'. messaged == noted == moved by construction. Gated by `send` (false=preview page 1 only, no mutation).",
+      "params": ["project_url", "body", "subject", "note_text", "send"],
+      "success_criteria": "message_compose_result.ok (gated preview OR >=1 page actually messaged). Reports messaged_count/noted_count/moved_count (should match) + recipients (union across pages) + more_remaining (backend re-invokes to drain the rest).",
       "failure_reasons": {
-        "rate_limited_24h": "LinkedIn won't contact the same person twice within 24h — the Send button is disabled.",
+        "rate_limited_24h": "LinkedIn won't contact the same person twice within 24h — the Send button is disabled; the loop stops without noting/moving that page.",
         "no_inmail_credits": "0 InMail credits left.",
         "send_button_disabled": "Send is greyed out for another reason.",
-        "composer_open_failed": "The Message button (data-test-action=send-message) or the composer editor drifted."
-      }
+        "composer_open_failed": "The Message button (data-test-action=send-message) or the composer editor drifted.",
+        "note_save_unverified": "A page was messaged but 'Añadir' produced no success toast/modal-close (data-test-create-edit-note-submit-btn / data-test-mentions-edit-textarea drift) — loop stops honestly.",
+        "move_failed_after_send": "A page was messaged+noted but the move to 'contacted' could not be verified (count delta + toast both failed after a retry) — loop stops; that page's moved count lags.",
+        "select_all_not_found": "The header select-all (input.small-input) drifted."
+      },
+      "known_gotchas": "Recruiter has NO across-pages select; the header checkbox selects ONE visible page (~25) — the loop processes a page at a time and relies on move-to-'contacted' removing it from the uncontacted view to surface the next page. add-note lives in the collapsible-toolbar OVERFLOW (button.collapsible-toolbar__dropdown-trigger) with TWO buttons (hidden original + visible clone) — click the visible one. move-to-contacted is verified by the SHORTLISTED count DELTA (locale/toast-proof), not the toast alone (toast-only under-counted moves -> the old 96-noted/46-moved bug). The step is bounded ~195s (< daemon 240s watchdog); it stops early with more_remaining and the backend re-invokes."
     },
     "recruiter_note_compose": {
       "intent": "Add a 'Contactado para <posición>' note (bulk) to the project's active candidates and move them to the native 'contacted' stage. Paginates across pages. Gated by `save` (false=preview, true=save+move).",

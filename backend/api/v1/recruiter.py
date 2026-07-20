@@ -30,6 +30,9 @@ class SendMessagesRequest(BaseModel):
     # UNGATED: default true = actually send InMail (the Odoo button click is the confirmation;
     # no preview pre-step). Pass send=false explicitly only for a deliberate dry-run preview.
     send: bool = True
+    # Bound the run to EXACTLY this many uncontacted candidates (per-row selection, one batch,
+    # no auto-drain). None ⇒ whole uncontacted stage across pages.
+    max_recipients: int | None = None
 
 
 class AddNoteRequest(BaseModel):
@@ -137,6 +140,7 @@ async def send_messages(
         subject=(req.subject if req else None),
         body=(req.body if req else None),
         send=(req.send if req else False),
+        max_recipients=(req.max_recipients if req else None),
     )
     await db.commit()
     if not run_id:
@@ -301,6 +305,25 @@ async def reset_pipeline(job_id: str, db: AsyncSession = Depends(get_db)):
     archive)."""
     svc = RecruiterPipelineService(db)
     res = await svc.reset_and_research(job_id)
+    await db.commit()
+    return res
+
+
+class DeleteImagesRequest(BaseModel):
+    reason: str | None = None  # "archived" | "removed" — logging only
+
+
+@router.post("/jobs/{job_id}/delete-images")
+async def delete_images(
+    job_id: str,
+    req: DeleteImagesRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Odoo calls this when a position is archived or removed (unlinked): deletes
+    every stored image (screenshot/dom_snapshot/a11y_tree, file + DB row) for every
+    run ever associated with this job_id. Passive cleanup — no run is created."""
+    svc = RecruiterPipelineService(db)
+    res = await svc.delete_images_for_job(job_id, reason=(req.reason if req else None))
     await db.commit()
     return res
 

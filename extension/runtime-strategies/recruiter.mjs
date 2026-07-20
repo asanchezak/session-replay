@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-06-22-recommendations-soft-empty";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-07-20-unified-message-note-move";
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -101,6 +101,288 @@ async function collectListRows(page, sleep, expected, orand) {
     window.scrollTo(0, 0);
   }, ROWS).catch(() => {});
   return Array.from(collected.values());
+}
+
+// Shared pipeline-list operations for the /talent project "manage" views, used by BOTH the
+// unified message+note+move loop (composeRecruiterMessage) and the standalone note flow
+// (composeRecruiterNote) — one implementation so the move-to-contacted verification fix lives
+// in a single place. ctx = { sleep, orand, clickSel, clickPoint, typeHumanLike }.
+function makePipelineOps(page, ctx) {
+  const { sleep, orand, clickSel, clickPoint, typeHumanLike } = ctx;
+
+  // Read the bulk bar's selected-count ("N SELECCIONADOS" / "N selected"). The note/stage
+  // applies to the SELECTED set, so this is the number that actually gets the note.
+  const readSelectedCount = () => page.evaluate(() => {
+    const t = document.body.innerText || "";
+    const m = t.match(/(\d+)\s*(?:SELECCIONAD\w*|seleccionad\w*|selected)/i);
+    return m ? parseInt(m[1], 10) : null;
+  }).catch(() => null);
+
+  const HEADER_CB = "[data-live-test-select-all] input, .profile-list__select-all input, input.small-input";
+  // Recruiter's project pipeline has NO "select all across pages" and NO page-size control —
+  // the header checkbox selects only the VISIBLE PAGE (~25). So to cover EVERY candidate we
+  // process one page at a time (moving to a later stage removes it from a stage-filtered view).
+  const selectPage = async () => {
+    if (!await clickSel(HEADER_CB)) return null;
+    await sleep(900 + Math.floor(orand() * 300));
+    return await readSelectedCount();
+  };
+  const NEXT_PAGE = "[data-test-pagination-next], [data-live-test-pagination-next], [data-test-mini-pagination-next], [data-live-test-mini-pagination-next]";
+  const nextPage = async () => {
+    const enabled = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      if (!b) return false;
+      return !(b.disabled || b.getAttribute("aria-disabled") === "true" || b.matches("[disabled]") || getComputedStyle(b).pointerEvents === "none");
+    }, NEXT_PAGE).catch(() => false);
+    if (!enabled) return false;
+    if (!await clickSel(NEXT_PAGE)) return false;
+    await sleep(2400 + Math.floor(orand() * 700));
+    await page.waitForSelector(HEADER_CB, { timeout: 10000 }).catch(() => {});
+    return true;
+  };
+
+  const dumpBulkBar = () => page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const bar = document.querySelector("[data-test-profile-list-bulk-actions], [data-live-test-profile-list-bulk-actions], .profile-list-bulk-actions, .bulk-actions");
+    const grab = (sel) => { const el = document.querySelector(sel); return el ? clean(el.outerHTML).slice(0, 16000) : null; };
+    let items = [];
+    if (bar) {
+      const lis = Array.from(bar.querySelectorAll("li, button, [role='menuitem'], [data-test-component]"));
+      const seen = new Set();
+      for (const e of lis) {
+        const btn = e.matches("button") ? e : e.querySelector("button, [role='button']");
+        const action = (btn || e).getAttribute?.("data-test-action") || (btn || e).getAttribute?.("data-live-test-action");
+        const comp = e.getAttribute?.("data-test-component") || (btn || e).getAttribute?.("data-test-component");
+        const key = action || comp || clean(e.textContent).slice(0, 30);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const hidden = e.classList?.contains("collapsible-toolbar__item--hidden") || e.closest(".collapsible-toolbar__item--hidden") != null;
+        items.push({ action: action || null, component: comp || null, text: clean(e.textContent).slice(0, 50), hidden });
+      }
+    }
+    return {
+      bulk_actions: bar ? clean(bar.outerHTML).slice(0, 16000) : null,
+      toolbar_items: items.slice(0, 30),
+      open_menu: grab("[role='menu'], .artdeco-dropdown__content--is-open"),
+    };
+  }).catch(() => ({ bulk_actions: null, toolbar_items: [], open_menu: null }));
+
+  const NOTE_FIELD = "textarea[data-test-mentions-edit-textarea], textarea.mentions-edit__text-box";
+  // Locate a clickable bulk "Añadir nota" (data-test-action='add-note'). Two exist in the DOM:
+  // the COLLAPSED original and, once the toolbar overflow is open, a VISIBLE clone — return the
+  // visible one's point (querySelector returns the hidden original first).
+  const addNoteState = () => page.evaluate(() => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
+    const all = Array.from(document.querySelectorAll("[data-test-action='add-note'], [data-live-test-action='add-note']"));
+    const visEl = all.find(vis);
+    if (!all.length) return { present: false, visible: false, point: null };
+    if (!visEl) return { present: true, visible: false, point: null };
+    const r = visEl.getBoundingClientRect();
+    return { present: true, visible: true, point: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+  }).catch(() => ({ present: false, visible: false, point: null }));
+
+  // Open the bulk note composer: expand the collapsible-toolbar overflow ("Más elementos") if
+  // add-note is collapsed, then click the visible clone. Returns {present, opened, fieldFound}.
+  const openAddNote = async () => {
+    let st = await addNoteState();
+    if (st.present && !st.visible) {
+      const expandPt = await page.evaluate(() => {
+        const bar = document.querySelector("[data-test-profile-list-bulk-actions], .profile-list-bulk-actions");
+        const cand = bar && bar.querySelector("button.collapsible-toolbar__dropdown-trigger");
+        if (!cand) return null;
+        cand.scrollIntoView({ block: "center" });
+        const r = cand.getBoundingClientRect();
+        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      }).catch(() => null);
+      if (expandPt) { await clickPoint(expandPt); await sleep(1300 + Math.floor(orand() * 500)); }
+      st = await addNoteState();
+    }
+    if (!st.present) return { present: false, opened: false, fieldFound: false };
+    if (!st.point) return { present: true, opened: false, fieldFound: false };
+    await clickPoint(st.point);
+    await sleep(1500 + Math.floor(orand() * 500));
+    const fieldFound = await page.evaluate((sel) => !!document.querySelector(sel), NOTE_FIELD).catch(() => false);
+    return { present: true, opened: true, fieldFound };
+  };
+
+  // Type the note + set visibility = whole company (HIRING_CONTEXT). Does NOT save.
+  const fillNote = async (noteText) => {
+    await clickSel(NOTE_FIELD);
+    await sleep(300);
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await sleep(200);
+    if (typeHumanLike) await typeHumanLike(page, noteText, orand);
+    else await page.keyboard.type(noteText, { delay: 24 });
+    await sleep(600 + Math.floor(orand() * 300));
+    return await page.evaluate(() => {
+      const input = document.querySelector("input[visibility-value='HIRING_CONTEXT'], [id$='-note-visbility-option-HIRING_CONTEXT']");
+      if (!input) return false;
+      const label = input.id ? document.querySelector(`label[for='${input.id}']`) : null;
+      (label || input).click();
+      return true;
+    }).catch(() => false);
+  };
+
+  // Click "Añadir" + verify via the success toast ("Se ha añadido una nota a N candidatos").
+  // Returns {ok, count, toast_text}.
+  const saveNote = async () => {
+    const clicked = await clickSel("button[data-test-create-edit-note-submit-btn]");
+    await sleep(1900 + Math.floor(orand() * 600));
+    const v = await page.evaluate(() => {
+      const modalGone = !document.querySelector("[data-test-add-note-container], textarea[data-test-mentions-edit-textarea]");
+      const toastEl = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+      const t = toastEl ? (toastEl.innerText || toastEl.textContent || "") : "";
+      const isNote = /(nota|note)/i.test(t) && /(a[ñn]adid|agregad|added|guardad|saved)/i.test(t);
+      const m = t.match(/(\d+)\s*(?:candidat|perfil|profile|people)/i);
+      return { modalGone, toast: isNote, count: m ? parseInt(m[1], 10) : null, toast_text: t.replace(/\s+/g, " ").trim().slice(0, 120) };
+    }).catch(() => ({ modalGone: false, toast: false, count: null, toast_text: "" }));
+    return { ok: clicked && (v.toast || v.modalGone), ...v };
+  };
+
+  // Read the SHORTLISTED ("uncontacted") stage count off the pipeline nav — locale-independent.
+  const readUncontactedCount = () => page.evaluate(() => {
+    const node = document.querySelector('[data-live-test-pipeline-state="SHORTLISTED"], [data-test-pipeline-state][data-live-test-pipeline-state="SHORTLISTED"]');
+    if (!node) return null;
+    const cnt = node.querySelector("[data-test-pipeline-profile-count], [data-live-test-pipeline-profile-count]");
+    const mm = String((cnt && cnt.textContent) || node.textContent || "").match(/(\d[\d.,]*)/);
+    return mm ? parseInt(mm[1].replace(/[.,]/g, ""), 10) : null;
+  }).catch(() => null);
+
+  // Move the CURRENT selection to the native "contacted" stage. VERIFY primarily via the
+  // uncontacted stage-count DELTA (locale/toast-proof), with the toast as a secondary signal —
+  // the old toast-only check produced false negatives (the move happened but the toast text
+  // didn't match), which under-counted "moved" (the 96-noted/46-moved divergence). Ensures a
+  // selection exists first and RETRIES once. Returns {moved, count, toast_text, reason, before, after}.
+  const moveContacted = async () => {
+    const attempt = async () => {
+      let sel = await readSelectedCount();
+      if (!sel) { await clickSel(HEADER_CB); await sleep(800); sel = await readSelectedCount(); }
+      const before = await readUncontactedCount();
+      const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
+      if (!await clickSel(stageTrigger)) return { moved: false, reason: "trigger_not_found", before };
+      await sleep(1100 + Math.floor(orand() * 400));
+      const pt = await page.evaluate(() => {
+        const el = document.querySelector("[data-test-move-to-state='CONTACTED']");
+        if (!el) return null;
+        el.scrollIntoView({ block: "center" });
+        const r = el.getBoundingClientRect();
+        return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: el.getAttribute("aria-disabled") === "true" } : null;
+      }).catch(() => null);
+      if (!pt) return { moved: false, reason: "contacted_not_found", before };
+      if (pt.disabled) return { moved: false, reason: "already_contacted", before };
+      await clickPoint(pt);
+      await sleep(1800 + Math.floor(orand() * 600));
+      const toast = await page.evaluate(() => {
+        const el = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
+        const t = el ? (el.innerText || el.textContent || "") : "";
+        const m = t.match(/(\d+)\s*(?:candidat|perfil|profile|people)/i);
+        return { text: t.replace(/\s+/g, " ").trim().slice(0, 120), count: m ? parseInt(m[1], 10) : null,
+                 match: /contacted/i.test(t) && /(movido|moved|cambiad|changed|fase|stage|contactad)/i.test(t) };
+      }).catch(() => ({ text: "", count: null, match: false }));
+      // Let the stage-filtered view refresh, then re-read the uncontacted count.
+      await sleep(900 + Math.floor(orand() * 400));
+      const after = await readUncontactedCount();
+      const delta = (before != null && after != null) ? (before - after) : null;
+      const movedByDelta = delta != null && delta > 0;
+      const moved = toast.match || movedByDelta;
+      const count = toast.count || (movedByDelta ? delta : null) || (moved ? sel : 0);
+      return { moved, count, toast_text: toast.text, before, after, reason: moved ? null : "unverified" };
+    };
+    let r = await attempt();
+    if (!r.moved) { await sleep(1200 + Math.floor(orand() * 500)); const r2 = await attempt(); if (r2.moved) r = r2; else r.retry_reason = r2.reason; }
+    return r;
+  };
+
+  // Select EXACTLY up to `n` individual rows (per-row checkbox) — a BOUNDED batch, unlike
+  // selectPage()'s whole-page select-all. The `<input.small-input>` is visually hidden; the real
+  // click target is its `<label for="select-item-…">` (Ember ids, resolve at click time). Scrolls
+  // to render virtualized rows; clicks the first unchecked row each pass so a clicked row is skipped
+  // next time. Returns { selected (bulk-bar count), rows:[{profile_url,name}] } — rows become the
+  // exact recipients. Modeled on selectByName + selectRecruiterResultCheckboxes.
+  const selectN = async (n) => {
+    const want = Math.max(1, n | 0);
+    const rows = new Map();
+    const tried = new Set();
+    const diag = { rows_seen: 0, clicked: 0, fails: 0 };
+    const t0 = Date.now();
+    let clicked = 0, stable = 0;
+    for (let i = 0; i < 200 && Date.now() - t0 < 60000; i++) {
+      if (clicked >= want) break;
+      // Find the next unchecked, not-yet-tried row: capture its checkbox INPUT id (to verify
+      // .checked) + a label/input click-point. The <input.small-input> is visually hidden.
+      const pick = await page.evaluate((triedIds) => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
+        const els = Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"));
+        for (const row of els) {
+          const cb = row.querySelector("span.profile-list-item__selector input[type='checkbox'], input.small-input[type='checkbox'], input[type='checkbox']");
+          if (!cb || cb.disabled || cb.checked) continue;
+          if (cb.id && triedIds.includes(cb.id)) continue;
+          const link = row.querySelector('a[href*="/talent/profile/"]');
+          const label = cb.id ? document.querySelector(`label[for='${cb.id}']`) : row.querySelector("span.profile-list-item__selector label");
+          const tgt = label || cb;
+          tgt.scrollIntoView({ block: "center" });
+          const r = tgt.getBoundingClientRect();
+          return { id: cb.id || null, rows_total: els.length, url: canon(link && link.getAttribute("href")),
+                   name: clean(link && (link.innerText || link.textContent)),
+                   x: r.left + r.width / 2, y: r.top + r.height / 2, has_rect: r.width > 0 && r.height > 0 };
+        }
+        return { none: true, rows_total: els.length };
+      }, Array.from(tried)).catch(() => null);
+      diag.rows_seen = Math.max(diag.rows_seen, (pick && pick.rows_total) || 0);
+      if (!pick || pick.none) {
+        // No fresh unchecked row rendered → scroll to load the next virtualized batch.
+        await page.evaluate(() => {
+          const els = document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item");
+          const last = els[els.length - 1];
+          if (last) last.scrollIntoView({ block: "end" });
+          let el = last;
+          while (el) { const cs = getComputedStyle(el); if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) { el.scrollTop = Math.min(el.scrollTop + Math.max(el.clientHeight * 0.8, 400), el.scrollHeight); break; } el = el.parentElement; }
+          window.scrollBy(0, 500);
+        }).catch(() => {});
+        await sleep(500 + Math.floor(orand() * 250));
+        if (++stable >= 5) break;  // list exhausted (fewer than `want` available)
+        continue;
+      }
+      stable = 0;
+      if (pick.id) tried.add(pick.id);
+      // Human-like mouse click on the label, then VERIFY the input toggled; fall back to an
+      // in-page .click() on the label/input (fires React onChange) if the mouse click missed.
+      if (pick.has_rect) { await clickPoint({ x: pick.x, y: pick.y }); await sleep(200 + Math.floor(orand() * 180)); }
+      let checked = pick.id
+        ? await page.evaluate((id) => { const el = document.getElementById(id); return !!(el && el.checked); }, pick.id).catch(() => false)
+        : true;
+      if (!checked && pick.id) {
+        await page.evaluate((id) => {
+          const el = document.getElementById(id);
+          if (el && !el.checked) { const lab = document.querySelector(`label[for='${id}']`); (lab || el).click(); }
+        }, pick.id).catch(() => {});
+        await sleep(200 + Math.floor(orand() * 180));
+        checked = await page.evaluate((id) => { const el = document.getElementById(id); return !!(el && el.checked); }, pick.id).catch(() => false);
+      }
+      if (checked) {
+        clicked++; diag.clicked = clicked;
+        if (pick.url) rows.set(pick.url, { profile_url: pick.url, name: pick.name });
+      } else {
+        diag.fails++;
+        if (diag.fails >= 5) break;  // clicking isn't toggling — bail rather than spin
+      }
+      await sleep(140 + Math.floor(orand() * 160));
+    }
+    // Return to the top so the composer / bulk toolbar interactions are unaffected.
+    await page.evaluate(() => {
+      let el = document.querySelector("[data-test-profile-list-view-list-row], .profile-list-item");
+      while (el) { const cs = getComputedStyle(el); if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) { el.scrollTop = 0; break; } el = el.parentElement; }
+      window.scrollTo(0, 0);
+    }).catch(() => {});
+    await sleep(500 + Math.floor(orand() * 300));
+    const selected = await readSelectedCount();
+    return { selected: selected != null ? selected : clicked, clicked, rows: Array.from(rows.values()), diag };
+  };
+
+  return { readSelectedCount, HEADER_CB, selectPage, selectN, nextPage, dumpBulkBar, NOTE_FIELD,
+           addNoteState, openAddNote, fillNote, saveNote, readUncontactedCount, moveContacted };
 }
 
 function readSearchOptions(step) {
@@ -204,6 +486,12 @@ function readMessageComposeOptions(step) {
     projectUrl: String(method.project_url ?? "").trim(),
     body: String(method.body ?? "").trim(),
     subject: String(method.subject ?? "").trim(),
+    // Contact note added (and the move to "contacted") for EACH messaged page — the
+    // unified loop applies message+note+move to the same selection so the three counts match.
+    noteText: String(method.note_text ?? "").trim(),
+    // Bounded batch: cap the run to EXACTLY N uncontacted candidates (per-row selection, single
+    // batch, no auto-drain). null/absent ⇒ whole-page multi-page loop (unbounded).
+    maxRecipients: readPositiveInt(method.max_recipients ?? method.limit, null),
     send: send === true || send === "true" || send === 1 || send === "1",
   };
 }
@@ -1467,6 +1755,13 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
   const body = String(options.body || "");
   const subject = String(options.subject || "").trim();
+  // The contact note added to each messaged page (unified loop). Empty ⇒ legacy single-page
+  // behavior (message one page, no note/move) so an older backend that doesn't pass it is safe.
+  const noteText = String(options.noteText || "").trim();
+  // Bounded batch: when set, select EXACTLY this many uncontacted candidates (per-row), run a
+  // SINGLE batch, and do NOT auto-continue. null ⇒ whole-page multi-page loop.
+  const maxRecipients = Number.isFinite(options.maxRecipients) && options.maxRecipients > 0
+    ? Math.floor(options.maxRecipients) : null;
   const send = !!options.send;
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, sent: false, reason: "missing_project_id" };
@@ -1574,8 +1869,11 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       const contactedTotal = await readPipelineCounts(page).then((c) => c.active).catch(() => null);
       return { ok: false, sent: false, recipient_count: 0, reason: "no_uncontacted", contacted_count: contactedTotal };
     }
+    // The uncontacted-stage list URL — reused to RELOAD a clean list between pages (after a send
+    // the composer leaves the bulk toolbar in a state where the add-note overflow won't open).
+    const stageUrl = stage.found && stage.href ? "https://www.linkedin.com" + stage.href : manageUrl;
     if (stage.found && stage.href) {
-      await page.goto("https://www.linkedin.com" + stage.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.goto(stageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
       await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
       await sleep(1500 + Math.floor(orand() * 500));
@@ -1586,111 +1884,233 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       ? stage.count
       : await readPipelineCounts(page).then((c) => c.active);
     if (recipientCount === 0) return { ok: false, sent: false, recipient_count: 0, reason: "no_active_candidates" };
-    // Safety backstop (ungated run on a sensitive account): never bulk-send beyond the cap.
-    if (recipientCount != null && recipientCount > MAX_BULK_RECIPIENTS) {
+    // Safety backstop (ungated run on a sensitive account): never bulk-send beyond the cap. With a
+    // maxRecipients cap we only ever touch that many, so the guard checks the EFFECTIVE count (so a
+    // large uncontacted stage doesn't block a deliberately-small bounded batch).
+    const effectiveCount = maxRecipients != null && recipientCount != null
+      ? Math.min(recipientCount, maxRecipients) : recipientCount;
+    if (effectiveCount != null && effectiveCount > MAX_BULK_RECIPIENTS) {
       return { ok: false, sent: false, recipient_count: recipientCount, reason: "exceeds_max_recipients" };
     }
 
-    // Capture the (uncontacted) candidates we're about to message (profile_url + name), so the
-    // backend marks EXACTLY these as messaged in Odoo. The list is VIRTUALIZED — a one-shot scrape
-    // only sees the ~2 rows in the viewport, which silently marked 2 of N messaged while select-all
-    // sent to all N. collectListRows scrolls to enumerate the full set.
-    let recipients = await collectListRows(page, sleep, recipientCount, orand);
+    // UNIFIED per-page loop: for EACH page of the uncontacted stage, message → (only if the
+    // send succeeded) add the contact note → move to "contacted". This makes messaged == noted
+    // == moved by construction (the old flow messaged ONE page but noted/moved all pages, and
+    // used toast-only move verification → 25/96/46). Moving a page to "contacted" removes it
+    // from the uncontacted view, so the next round's top page is fresh.
+    const clickPoint = async (pt) => {
+      if (!pt || pt.x == null) return false;
+      await moveMouseAlongBezier(page, pt, orand).catch(() => {});
+      await sleep(110 + Math.floor(orand() * 160));
+      await page.mouse.click(pt.x, pt.y).catch(() => {});
+      return true;
+    };
+    const ops = makePipelineOps(page, { sleep, orand, clickSel, clickPoint, typeHumanLike });
+    const { selectPage, selectN, openAddNote, fillNote, saveNote, moveContacted, readUncontactedCount } = ops;
 
-    // Select every candidate in the (uncontacted) view. LinkedIn's "select all" spans pages
-    // via its "select all N" banner, so this covers all uncontacted candidates.
-    if (!await clickSel("[data-live-test-select-all] input, .profile-list__select-all input, input.small-input")) {
-      return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
-    }
-    await sleep(900 + Math.floor(orand() * 400));
-    if (!await clickSel("button[data-test-action='send-message']")) {
-      return { ok: false, sent: false, recipient_count: recipientCount, reason: "composer_open_failed" };
-    }
-    await page.waitForSelector(EDITOR, { timeout: 15000 }).catch(() => {});
-    await sleep(1800 + Math.floor(orand() * 700));
-    await shot(`mensaje: composer abierto (${recipients.length} destinatario(s))`).catch(() => {});
-
-    // Clear the AI-drafted body so only the template remains.
-    await clickSel(EDITOR);
-    await sleep(400);
-    await page.keyboard.press("Control+A").catch(() => {});
-    await page.keyboard.press("Backspace").catch(() => {});
-    await sleep(500);
-
-    // Type the body; replace each literal first-name token with the variable chip.
-    // Accept {Name} (English default) and {Nombre} (legacy Spanish), case-insensitive.
-    const parts = body.split(/\{(?:name|nombre)\}/gi);
-    let variableInserted = false;
-    for (let i = 0; i < parts.length; i++) {
-      const seg = parts[i];
-      if (seg) {
-        await clickSel(EDITOR);
-        if (typeHumanLike) await typeHumanLike(page, seg, orand);
-        else await page.keyboard.type(seg, { delay: 22 });
-        await sleep(150 + Math.floor(orand() * 150));
+    // Compose + send the InMail to the CURRENTLY-SELECTED page. Assumes the page is selected.
+    // Returns {sent, gated?, blocked?, reason?, variableInserted, subjectSet}.
+    const messageCurrentPage = async () => {
+      if (!await clickSel("button[data-test-action='send-message']")) return { sent: false, reason: "composer_open_failed" };
+      await page.waitForSelector(EDITOR, { timeout: 15000 }).catch(() => {});
+      await sleep(1800 + Math.floor(orand() * 700));
+      // Clear the AI-drafted body so only the template remains.
+      await clickSel(EDITOR);
+      await sleep(400);
+      await page.keyboard.press("Control+A").catch(() => {});
+      await page.keyboard.press("Backspace").catch(() => {});
+      await sleep(500);
+      // Type the body; replace each literal first-name token ({Name}/{Nombre}) with the chip.
+      const parts = body.split(/\{(?:name|nombre)\}/gi);
+      let variableInserted = false;
+      for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i];
+        if (seg) {
+          await clickSel(EDITOR);
+          if (typeHumanLike) await typeHumanLike(page, seg, orand);
+          else await page.keyboard.type(seg, { delay: 22 });
+          await sleep(150 + Math.floor(orand() * 150));
+        }
+        if (i < parts.length - 1) {
+          if (await insertNameVariable()) variableInserted = true;
+          await clickSel(EDITOR);
+        }
       }
-      if (i < parts.length - 1) {
-        if (await insertNameVariable()) variableInserted = true;
-        await clickSel(EDITOR);
-      }
-    }
-    await sleep(800 + Math.floor(orand() * 400));
-
-    // Subject: type directly if the field is visible, else reveal it via a Send attempt.
-    let subjectSet = true;
-    if (subject) {
-      subjectSet = await typeSubject();
-      if (!subjectSet) {
-        await clickSel(SEND_BTN);  // blocked when subject empty → reveals subject field
-        await sleep(1200 + Math.floor(orand() * 500));
+      await sleep(800 + Math.floor(orand() * 400));
+      // Subject: type directly if visible, else reveal it via a Send attempt.
+      let subjectSet = true;
+      if (subject) {
         subjectSet = await typeSubject();
+        if (!subjectSet) {
+          await clickSel(SEND_BTN);
+          await sleep(1200 + Math.floor(orand() * 500));
+          subjectSet = await typeSubject();
+        }
+      }
+      await sleep(1200);
+      if (!send) { await sleep(1200); return { sent: false, gated: true, variableInserted, subjectSet }; }
+      // VERIFY Send is enabled before clicking (rate-limit / 0 InMail credits / disabled).
+      const block = await page.evaluate((sel) => {
+        const btn = document.querySelector(sel);
+        const cs = btn ? getComputedStyle(btn) : null;
+        const disabled = !btn || btn.disabled
+          || btn.matches("[disabled], [aria-disabled='true']")
+          || (cs && cs.pointerEvents === "none");
+        const t = (document.body.innerText || "").toLowerCase();
+        const rate = /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje|dentro de (las pr[óo]ximas )?24 horas/.test(t);
+        const noCred = /\b0\s*\/\s*\d+\s*inmail/i.test(document.body.innerText || "");
+        return { disabled: !!disabled, rate, noCred };
+      }, SEND_BTN).catch(() => ({ disabled: false, rate: false, noCred: false }));
+      if (block.rate || block.disabled) {
+        const reason = block.rate ? "rate_limited_24h" : (block.noCred ? "no_inmail_credits" : "send_button_disabled");
+        // Capture the blocker banner (rate-limit / 0-credits / disabled Send) for visual proof.
+        await shot(`mensaje BLOQUEADO: ${reason}`).catch(() => {});
+        return { sent: false, blocked: true, reason, variableInserted, subjectSet };
+      }
+      const clicked = await clickSel(SEND_BTN);
+      await sleep(2500 + Math.floor(orand() * 1000));
+      const postRate = await page.evaluate(() =>
+        /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje/
+          .test((document.body.innerText || "").toLowerCase())
+      ).catch(() => false);
+      const sent = clicked && !postRate;
+      return { sent, variableInserted, subjectSet, ...(sent ? {} : { blocked: true, reason: "rate_limited_24h" }) };
+    };
+
+    const recipients = new Map();  // union across pages (profile_url → row)
+    let messaged = 0, noted = 0, moved = 0, pagesDone = 0;
+    let variableInserted = false, subjectSet = true;
+    const diag = { pages: [] };
+    const MAX_ROUNDS = 12;
+    // The unified loop is much slower per page than note-only (adds compose+type+Send). Keep the
+    // whole step safely under the daemon's ~240s per-step watchdog: stop early and report
+    // more_remaining so the backend re-invokes send-messages to drain the rest (moved-to-contacted
+    // candidates leave the uncontacted stage, so a follow-up run naturally resumes).
+    const BUDGET_MS = 195000;
+    const tStart = Date.now();
+    let stopReason = null, moreRemaining = false;
+
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      if (round > 0) {
+        await sleep(1800 + Math.floor(orand() * 600));
+        const remaining = await readUncontactedCount();
+        if (remaining != null && remaining <= 0) break;
+        if (Date.now() - tStart > BUDGET_MS - 55000) { moreRemaining = true; stopReason = "budget"; break; }
+      }
+      let pageSel, pageRows;
+      if (maxRecipients != null) {
+        // BOUNDED batch: select EXACTLY up to maxRecipients rows (per-row checkboxes). selectN
+        // returns the selected rows, which are the exact recipients (no separate enumeration).
+        const remaining = round === 0 ? recipientCount : (await readUncontactedCount());
+        const want = Math.min(maxRecipients, (remaining != null && remaining > 0) ? remaining : maxRecipients);
+        const sn = await selectN(want);
+        pageSel = sn.selected;
+        pageRows = sn.rows;
+        diag.select = { want, ...sn.diag, selected: sn.selected };
+        if (!pageSel) {
+          if (round === 0) return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_none", diag };
+          stopReason = "select_none"; break;
+        }
+      } else {
+        pageSel = await selectPage();
+        if (pageSel == null) {
+          if (round === 0) return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
+          stopReason = "select_all_not_found"; break;
+        }
+        // Enumerate THIS page's rows so the backend marks EXACTLY the messaged profiles in Odoo.
+        // The list is VIRTUALIZED (~2 rows rendered), so a one-shot scrape under-captures — scroll
+        // to collect the full page (~25). collectListRows returns to the top; selection persists.
+        pageRows = await collectListRows(page, sleep, Math.min((pageSel || 25) + 5, 40), orand);
+      }
+
+      const mr = await messageCurrentPage();
+      if (mr.gated) {
+        for (const r of pageRows) if (r.profile_url) recipients.set(r.profile_url, r);
+        await shot(`mensaje: preview página 1 (${pageSel}), sin enviar`).catch(() => {});
+        return { ok: true, sent: false, gated: true, recipient_count: recipientCount,
+                 recipients: Array.from(recipients.values()), variable_inserted: mr.variableInserted,
+                 subject_set: mr.subjectSet, var_diag: lastVarDiag, manage_url: manageUrl };
+      }
+      if (!mr.sent) {
+        // Send blocked → do NOT note/move this page, and STOP (gate keeps the counts equal).
+        stopReason = mr.reason || "send_blocked";
+        moreRemaining = true;
+        if (messaged === 0) {
+          return { ok: false, sent: false, blocked: true, reason: stopReason,
+                   recipient_count: recipientCount, messaged_count: 0, noted_count: 0, moved_count: 0,
+                   recipients: Array.from(recipients.values()), variable_inserted: mr.variableInserted,
+                   subject_set: mr.subjectSet, manage_url: manageUrl, diag };
+        }
+        break;
+      }
+      messaged += pageSel;
+      variableInserted = variableInserted || mr.variableInserted;
+      subjectSet = subjectSet && mr.subjectSet;
+      for (const r of pageRows) if (r.profile_url) recipients.set(r.profile_url, r);
+      await shot(`mensaje: enviado página ${pagesDone + 1} (${pageSel} destinatario(s))`).catch(() => {});
+
+      // RELOAD a clean uncontacted list before noting: right after the composer closes, the bulk
+      // toolbar is in a state where the add-note overflow won't open (observed: messaged>0 but
+      // note_open_failed → 0 noted/0 moved). A fresh nav restores a clean toolbar. The messaged
+      // candidates are STILL in the uncontacted stage (messaging ≠ stage change), so re-selecting
+      // the page targets the same set. Then re-select + note + move.
+      await sleep(1200 + Math.floor(orand() * 500));
+      await page.goto(stageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+      await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await sleep(1400 + Math.floor(orand() * 500));
+      // Re-select the SAME set for the note+move. Capped ⇒ re-select exactly N per-row (the same
+      // top-N messaged rows — order is stable and nothing has moved yet); else the whole page.
+      const pageSel2 = maxRecipients != null ? (await selectN(pageSel)).selected : await selectPage();
+      const sel2 = pageSel2 || pageSel;
+
+      // Add the contact note + move THIS page to "contacted" (same selection, gated on the send).
+      let pageNoted = 0, pageMoved = 0, noteReason = null, moveReason = null;
+      if (noteText) {
+        let op = await openAddNote();
+        if (!op.opened) {  // one retry after a short settle — the toolbar can lag the reload
+          await sleep(1500 + Math.floor(orand() * 500));
+          op = await openAddNote();
+        }
+        if (op.opened) {
+          await fillNote(noteText);
+          const s = await saveNote();
+          if (s.ok) { pageNoted = s.count || sel2; noted += pageNoted; } else noteReason = "note_save_unverified";
+          const mv = await moveContacted();
+          if (mv.moved) { pageMoved = mv.count || sel2; moved += pageMoved; }
+          else moveReason = mv.reason || mv.retry_reason || "move_failed_after_send";
+          await shot(`nota+fase página ${pagesDone + 1}: noted=${pageNoted} moved=${pageMoved}`).catch(() => {});
+        } else noteReason = "note_open_failed";
+      }
+      pagesDone++;
+      diag.pages.push({ page: pagesDone, selected: pageSel, messaged: pageSel, noted: pageNoted,
+                        moved: pageMoved, note_reason: noteReason, move_reason: moveReason });
+
+      if (maxRecipients != null) {
+        // BOUNDED batch complete — one deliberate batch, never auto-drain (no more_remaining).
+        if (noteText && (noteReason || moveReason)) stopReason = moveReason || noteReason;
+        break;
+      }
+      if (noteText) {
+        // A failed note/move AFTER a successful send: stop honestly (the page is still
+        // uncontacted; continuing would re-message it). Counts diverge for this page only.
+        if (noteReason || moveReason) { stopReason = moveReason || noteReason; moreRemaining = true; break; }
+        // Success: the moved page left the uncontacted view → loop re-reads the count and drains.
+      } else {
+        // BACKWARD-COMPAT: no note_text configured (an older backend that hasn't rolled out the
+        // unified flow) → behave like the legacy single-page send: message ONE page and STOP.
+        // We do NOT paginate here, so this never messages more people than the old code did.
+        if (recipientCount != null && recipientCount > pageSel) moreRemaining = true;
+        break;
       }
     }
-    await sleep(1200);
-    await shot(`mensaje: cuerpo+asunto listos (var_chip=${variableInserted})`).catch(() => {});
 
-    if (!send) {
-      await sleep(1500);  // settle for the per-step snapshot (gated preview)
-      return { ok: true, sent: false, gated: true, recipient_count: recipientCount, recipients, variable_inserted: variableInserted, subject_set: subjectSet, var_diag: lastVarDiag, manage_url: manageUrl };
-    }
-
-    // send=true → VERIFY Send is actually enabled before clicking. LinkedIn DISABLES
-    // (greys out) the Send button when the recipient can't be contacted — most commonly
-    // the rate limit "cannot be contacted more than once within 24 hours … will not
-    // receive this message", or 0 InMail credits. A blind click on a disabled button is
-    // a NO-OP, so reporting sent=true there is a false positive (and wrongly marks Odoo
-    // messaged). Detect the disabled button + the warning banner and report the reason.
-    const block = await page.evaluate((sel) => {
-      const btn = document.querySelector(sel);
-      const cs = btn ? getComputedStyle(btn) : null;
-      const disabled = !btn || btn.disabled
-        || btn.matches("[disabled], [aria-disabled='true']")
-        || (cs && cs.pointerEvents === "none");
-      const t = (document.body.innerText || "").toLowerCase();
-      const rate = /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje|dentro de (las pr[óo]ximas )?24 horas/.test(t);
-      const noCred = /\b0\s*\/\s*\d+\s*inmail/i.test(document.body.innerText || "");
-      return { disabled: !!disabled, rate, noCred };
-    }, SEND_BTN).catch(() => ({ disabled: false, rate: false, noCred: false }));
-    if (block.rate || block.disabled) {
-      const reason = block.rate ? "rate_limited_24h"
-        : (block.noCred ? "no_inmail_credits" : "send_button_disabled");
-      return { ok: false, sent: false, blocked: true, reason,
-               recipient_count: recipientCount, recipients,
-               variable_inserted: variableInserted, subject_set: subjectSet, manage_url: manageUrl };
-    }
-
-    const clicked = await clickSel(SEND_BTN);
-    await sleep(2500 + Math.floor(orand() * 1000));
-    // Post-send guard: if the rate-limit / "will not receive" banner is showing now, the
-    // click did NOT deliver — don't report a false send.
-    const postRate = await page.evaluate(() =>
-      /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje/
-        .test((document.body.innerText || "").toLowerCase())
-    ).catch(() => false);
-    const sent = clicked && !postRate;
-    return { ok: sent, sent, recipient_count: recipientCount, recipients,
+    return { ok: messaged > 0, sent: messaged > 0,
+             messaged_count: messaged, noted_count: noted, moved_count: moved,
+             recipient_count: recipientCount, recipients: Array.from(recipients.values()),
+             pages: pagesDone, ...(moreRemaining ? { more_remaining: true } : {}),
              variable_inserted: variableInserted, subject_set: subjectSet,
-             ...(sent ? {} : { blocked: true, reason: "rate_limited_24h" }) };
+             ...(stopReason ? { stop_reason: stopReason } : {}), manage_url: manageUrl, diag };
   } catch (e) {
     return { ok: false, sent: false, reason: `error:${(e && e.message) || e}` };
   }
@@ -1929,32 +2349,10 @@ async function composeRecruiterNote(page, options, orand, runtime) {
 
   // Move the CURRENT page's selection to the native "contacted" stage; verify via the toast
   // ("Se ha movido a N candidatos a la fase contacted"). Returns {moved, count}.
-  const moveContacted = async () => {
-    const sel = await readSelectedCount();
-    if (!sel) { await clickSel(HEADER_CB); await sleep(800); }
-    const stageTrigger = "[data-test-move-to-trigger], [data-test-component='move-to-pipeline-btn'] button, button[data-live-test-change-state-trigger]";
-    if (!await clickSel(stageTrigger)) return { moved: false };
-    await sleep(1100 + Math.floor(orand() * 400));
-    const pt = await page.evaluate(() => {
-      const el = document.querySelector("[data-test-move-to-state='CONTACTED']");
-      if (!el) return null;
-      el.scrollIntoView({ block: "center" });
-      const r = el.getBoundingClientRect();
-      return r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: el.getAttribute("aria-disabled") === "true" } : null;
-    }).catch(() => null);
-    if (!pt) return { moved: false, reason: "contacted_not_found" };
-    if (pt.disabled) return { moved: false, reason: "already_contacted" };
-    await clickPoint(pt);
-    await sleep(1800 + Math.floor(orand() * 600));
-    const v = await page.evaluate(() => {
-      const toast = document.querySelector(".artdeco-toast-item, .artdeco-toasts__toast, [role='alert'], [data-test-artdeco-toast-item]");
-      const t = toast ? (toast.innerText || toast.textContent || "") : "";
-      const moved = /contacted/i.test(t) && /(movido|moved|cambiad|changed|fase|stage)/i.test(t);
-      const m = t.match(/(\d+)\s*(?:candidat|perfil|profile|people)/i);
-      return { moved, count: m ? parseInt(m[1], 10) : null };
-    }).catch(() => ({ moved: false, count: null }));
-    return v;
-  };
+  // Use the SHARED, count-delta-verified moveContacted (see makePipelineOps) so the standalone
+  // note flow gets the same reliability fix as the unified message loop (toast-only verification
+  // produced false negatives → the 96-noted/46-moved divergence).
+  const { moveContacted } = makePipelineOps(page, { sleep, orand, clickSel, clickPoint, typeHumanLike });
 
   const diag = { bulk_bar: null, note_candidates: [], note_field: null, overflow_tried: false, opened_via: null, pages: [] };
 

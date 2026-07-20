@@ -326,19 +326,23 @@ See [[project_recruiter_archive_candidate]].
   checkbox** (unchecked = preview only). Ships on akcr branch `feat/recruiter-search-link`
   / PR **#1818** (operator `-u akcr` upgrade needed for the field + wizard).
 - **Templated send (`recruiter_message_compose`, wf `c46c296f`, env
-  `RECRUITER_MESSAGE_WORKFLOW_ID`):** ⚠️ **STALE as of 2026-07-02** — this originally
-  selected the project's ACTIVE candidates; it now scopes to LinkedIn's native
-  **"uncontacted"** pipeline stage (`SHORTLISTED`) only — already-contacted/replied
-  candidates are excluded even if active, and it sends nothing if nobody is uncontacted
-  (`reason: "no_uncontacted"`). See [[project_recruiter_message_uncontacted]]. Otherwise:
-  bulk InMail composer → CLEARS the AI draft → types the body, replacing each literal `{Nombre}` with
-  LinkedIn's **`{firstName}` variable CHIP** (the "Insert variables" `{}` button →
-  `ul[data-test-variables-dropdown]` items `{firstName}`/`{lastName}`/`{fullName}`) → sets
-  subject (`input[data-test-compose-subject-input]`) → **GATED**: `send=false` (default)
-  types + STOPS for a snapshot preview; `send=true` clicks Send
-  (`button[data-test-messaging-submit-btn]`). Reports the recipients it messaged so the
-  backend marks exactly those in Odoo. `POST /v1/recruiter/jobs/{id}/send-messages {body,
-  subject, send}`. **Live-verified: real InMail to Andrey only → Odoo `outreach_status=messaged`.**
+  `RECRUITER_MESSAGE_WORKFLOW_ID`):** as of **2026-07-20** this is ONE **unified per-page
+  loop** over the native **"uncontacted"** (`SHORTLISTED`) stage: for each page it messages →
+  (only if the send succeeded) adds the contact note → moves that page to **"contacted"**, so
+  **`messaged == noted == moved`** (fixed the 25/96/46 chatter mismatch). No uncontacted ⇒
+  `reason:"no_uncontacted"`. Per page: bulk InMail composer → CLEARS the AI draft → types the
+  body, replacing each literal `{Name}`/`{Nombre}` with LinkedIn's **`{firstName}` variable
+  CHIP** (`{}` button → `ul[data-test-variables-dropdown]`) → sets subject
+  (`input[data-test-compose-subject-input]`) → verifies Send is enabled (rate-limit / 0 credits
+  / disabled ⇒ STOP, no note/move) → Send → re-selects the page → note + move. The move is
+  verified by the **SHORTLISTED count DELTA** (not the fragile toast — that caused the old
+  96-noted/46-moved gap), via the shared `makePipelineOps(page, ctx)` factory (also used by the
+  standalone note flow). Bounded ~195s < daemon 240s watchdog; returns `more_remaining` and the
+  backend re-invokes to drain the rest. `send=false` = gated preview (page 1, no mutation);
+  empty `note_text` ⇒ legacy single-page behavior. `POST /v1/recruiter/jobs/{id}/send-messages
+  {body, subject, send}` (backend supplies `note_text`). See [[project_recruiter_message_uncontacted]].
+  **Live-verified DEV job 336 (103 uncontacted, 4 pages): note+move 100==100 (was 96/46);
+  real InMail send pending the account's external rate-limit reset.**
 - **profile_url URN gotcha:** the project `/manage/all` rows report the `AEMAA…` urn, but
   the public-`/in/`-bridge save yields a different `ACoAA…` urn — they must match for the
   Odoo outreach-status update. Align the lead's `profile_url` to the `AEMAA…` form.
