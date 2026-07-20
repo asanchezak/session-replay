@@ -33,6 +33,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.config import settings
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
+from services.artifact_service import ArtifactService
 from services.execution_service import ExecutionService
 from services.recruiter_push_service import RecruiterPushService
 from services.reply_intent_service import classify_replies
@@ -1251,10 +1252,17 @@ class RecruiterPipelineService:
                 message="✉️ Message preview ready (not sent).",
             )
             return {"stage": "message", "sent": False, "preview": True}
-        # Req B: mark the candidates we actually messaged (the project's active
-        # candidates at send time, reported by the compose strategy) as messaged.
+        # The unified compose loop messaged + noted + moved-to-contacted the SAME candidates
+        # per page, so all three counts should match. Mark EXACTLY the messaged recipients as
+        # messaged in Odoo (the loop reports the union across pages).
         recipients = compose.get("recipients") or pipeline.get("messaged") or []
         subject = pipeline.get("subject") or ""
+        note_text = pipeline.get("note_text") or ""
+        messaged_n = compose.get("messaged_count")
+        if messaged_n is None:
+            messaged_n = len(recipients)
+        noted_n = compose.get("noted_count", 0) or 0
+        moved_n = compose.get("moved_count", 0) or 0
         messaged = [
             ({"profile_url": r, "subject": subject, "message_type": "inmail"}
              if isinstance(r, str)
@@ -1264,28 +1272,54 @@ class RecruiterPipelineService:
         res = await self.push.push_outreach_update(
             run_id=run.id, job_id=job_id, connector_id=connector_id, messaged=messaged,
         )
-        logger.info("recruiter pipeline: outreach update for job %s — %s", job_id, res)
-        await self._push_flow_status(
-            job_id=job_id, connector_id=connector_id, status="done",
-            event_kind=EVENT_MESSAGE, run_id=run.id,
-            message=f"✉️ Message sent to {len(recipients)} candidate(s).",
+        logger.info(
+            "recruiter pipeline: outreach update for job %s — %s (messaged=%s noted=%s moved=%s)",
+            job_id, res, messaged_n, noted_n, moved_n,
         )
-        # "Ambos": after a REAL send, chain an add-note run (save=true) so the messaged
-        # candidates get the "Contactado para <posición>" note + the native "contacted"
-        # stage — the LinkedIn-side markers of "already contacted". Best-effort: if the
-        # note workflow is unset it no-ops; a note failure never un-does the send.
-        note_run_id = None
-        if settings.recruiter_note_workflow_id:
+        # Mirror the contact note to Odoo (linkedin.candidate.note) for each messaged candidate —
+        # LinkedIn notes are global to the candidate; idempotent per candidate via a stable key.
+        if note_text and recipients:
+            lkey = f"contact-note:job{job_id}"
+            for r in recipients:
+                purl = (r.get("profile_url") or "").strip() if isinstance(r, dict) else (r if isinstance(r, str) else "")
+                if not purl:
+                    continue
+                try:
+                    await self.push.push_candidate_notes(
+                        run_id=run.id, connector_id=connector_id, profile_url=purl,
+                        notes=[{"body": note_text, "key": lkey}], pushed=[],
+                    )
+                except Exception:  # noqa: BLE001 — mirroring is best-effort
+                    logger.exception("recruiter pipeline: failed to mirror contact note for %s (run %s)", purl, run.id)
+        # ONE consistent chatter line. Happy path: the three counts agree. If a page's note/move
+        # failed after its send (stop_reason), report the honest three numbers instead of hiding it.
+        more = bool(compose.get("more_remaining"))
+        consistent = (messaged_n == noted_n == moved_n) and not compose.get("stop_reason")
+        if consistent:
+            msg = f"✉️📝 Messaged + noted + moved to 'contacted': {messaged_n} candidate(s)."
+        else:
+            msg = (f"✉️ Messaged {messaged_n} · 📝 noted {noted_n} · moved to 'contacted' {moved_n}"
+                   + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
+        if more:
+            msg += " Continuing with the remaining uncontacted candidates…"
+        await self._push_flow_status(
+            job_id=job_id, connector_id=connector_id, status="running" if more else "done",
+            event_kind=EVENT_MESSAGE, run_id=run.id, message=msg,
+        )
+        # More uncontacted pages remain (the run stopped at its time budget). Re-invoke the same
+        # send so a fresh daemon claim drains the rest — moved-to-contacted candidates have left
+        # the uncontacted stage, so this strictly converges (ends in "no_uncontacted").
+        cont_run_id = None
+        if more and pipeline.get("send") and messaged_n and not pipeline.get("max_recipients"):
             try:
-                note_run_id = await self._enqueue_note_run(
-                    job_id=job_id, connector_id=connector_id,
-                    project_id=pipeline.get("project_id"),
-                    position=pipeline.get("position"),
-                    project_name=pipeline.get("project_name"),
+                cont_run_id = await self.send_messages(
+                    job_id, subject=subject, body=pipeline.get("body"), send=True,
                 )
-            except Exception:  # noqa: BLE001 — chaining is best-effort
-                logger.exception("recruiter pipeline: failed to chain add-note after message (job %s)", job_id)
-        return {"stage": "message", "sent": True, "outreach": res, "note_run_id": note_run_id}
+            except Exception:  # noqa: BLE001 — continuation is best-effort
+                logger.exception("recruiter pipeline: failed to continue message drain (job %s)", job_id)
+        return {"stage": "message", "sent": True, "outreach": res,
+                "messaged_count": messaged_n, "noted_count": noted_n, "moved_count": moved_n,
+                "more_remaining": more, "continuation_run_id": cont_run_id}
 
     async def _default_note_text(self, job_id, position: str | None,
                                  connector_id, contacted_by: str = DEFAULT_CONTACTED_BY) -> str:
@@ -1551,6 +1585,44 @@ class RecruiterPipelineService:
                     ctx["saved"].append({"profile_url": url})
         return ctx
 
+    async def delete_images_for_job(self, job_id, reason: str | None = None) -> dict:
+        """Odoo notifies us when a position is archived or removed (unlinked) —
+        delete every stored image (screenshot/dom_snapshot/a11y_tree Artifact, file +
+        DB row) for every run ever associated with that job_id. job_id is stamped on
+        a run's origin in one of two shapes depending on how the run was created:
+        origin.job_payload.job_id (webhook-fired new_job_position/linkedin_lead_search
+        runs) or origin.pipeline.job_id (recruiter_* pipeline sub-runs) — check both.
+        Best-effort per run so one bad run can't block cleanup of the rest."""
+        result = await self.session.execute(select(ExecutionRun))
+        matched_run_ids = []
+        for r in result.scalars().all():
+            o = r.origin or {}
+            job_payload_id = (o.get("job_payload") or {}).get("job_id")
+            pipeline_id = (o.get("pipeline") or {}).get("job_id")
+            if (job_payload_id is not None and str(job_payload_id) == str(job_id)) or (
+                pipeline_id is not None and str(pipeline_id) == str(job_id)
+            ):
+                matched_run_ids.append(str(r.id))
+        artifacts = ArtifactService(self.session)
+        images_deleted = 0
+        for run_id in matched_run_ids:
+            try:
+                images_deleted += await artifacts.delete_artifacts_for_run(run_id)
+            except Exception:
+                logger.exception(
+                    "delete_images_for_job: failed deleting artifacts for run_id=%s (job_id=%s)",
+                    run_id, job_id,
+                )
+        logger.info(
+            "delete_images_for_job: job_id=%s reason=%s runs_affected=%d images_deleted=%d",
+            job_id, reason, len(matched_run_ids), images_deleted,
+        )
+        return {
+            "job_id": str(job_id),
+            "runs_affected": len(matched_run_ids),
+            "images_deleted": images_deleted,
+        }
+
     async def _latest_recruiter_connector(self) -> str | None:
         """The recruiter connector to push to when there's no run/job context (the
         passive inbox-reply scan): the connector_id of the most recent pipeline run.
@@ -1612,7 +1684,8 @@ class RecruiterPipelineService:
         return {"watchlist": watchlist, "count": len(watchlist)}
 
     async def send_messages(self, job_id, subject: str | None = None,
-                            body: str | None = None, send: bool = False) -> str | None:
+                            body: str | None = None, send: bool = False,
+                            max_recipients: int | None = None) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
         candidates with a template body. Fires the recruiter_message_compose run
         (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
@@ -1635,9 +1708,16 @@ class RecruiterPipelineService:
             return None
         subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
         body = (body or DEFAULT_MESSAGE_BODY).strip()
+        # The unified compose loop adds a contact note + moves each messaged page to
+        # "contacted" in the SAME run, so messaged == noted == moved. Pass the note text
+        # (the "Contacted - <position> · by · <Odoo link>" default) alongside the body.
+        note_text = await self._default_note_text(
+            job_id, ctx.get("position"), ctx.get("connector_id"),
+        )
         project_url = (
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
+        cap = int(max_recipients) if max_recipients and int(max_recipients) > 0 else None
         pipeline_ctx = {
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
@@ -1645,14 +1725,20 @@ class RecruiterPipelineService:
             "position": ctx.get("position"),
             "project_name": ctx.get("project_name"),
             "subject": subject,
+            "body": body,
+            "note_text": note_text,
+            "max_recipients": cap,
             "send": bool(send),
         }
         runtime_params = {
             "project_url": project_url,
             "subject": subject,
             "body": body,
+            "note_text": note_text,
             "send": "true" if send else "false",
         }
+        if cap is not None:
+            runtime_params["max_recipients"] = str(cap)
         run = await self._create_pipeline_run(
             workflow_id=wf,
             event_kind=EVENT_MESSAGE,
