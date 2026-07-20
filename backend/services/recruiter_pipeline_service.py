@@ -34,6 +34,7 @@ from core.config import settings
 from core.models.run import ExecutionRun
 from core.state_machine import RunStatus
 from services.artifact_service import ArtifactService
+from services.blacklist_matcher import BlacklistMatcher, normalize_name
 from services.execution_service import ExecutionService
 from services.recruiter_push_service import RecruiterPushService
 from services.reply_intent_service import classify_replies
@@ -538,22 +539,33 @@ class RecruiterPipelineService:
                 message="✨ No new recommendations right now — LinkedIn didn't suggest more candidates for this position.",
             )
             return {"stage": "recommendations", "done": True, "no_recommendations": True, "leads": 0}
+        matcher = BlacklistMatcher(await self.push.fetch_lead_blacklist(connector_id))
         lead_res = await self.push.push_recruiter_leads(
             run_id=run.id, job_id=job_id, connector_id=connector_id,
-            source="recommendation",
+            source="recommendation", blacklist=matcher,
         )
         logger.info(
             "recruiter pipeline: recommendations for job %s → pushed %s lead(s)",
             job_id, lead_res.get("pushed"),
         )
         n_added = len(lead_res.get("leads") or [])
+        # The recommendations strategy already ADDED the recommended people to the
+        # project before this hook, so a blocked person is already in it — sweep them
+        # out (the leads pre-filter above only kept them out of Odoo).
+        blacklisted = lead_res.get("blacklisted") or []
+        if blacklisted:
+            await self.sweep_blacklisted(
+                job_id, blacklisted=blacklisted, connector_id=connector_id,
+                project_url=pipeline.get("project_url") or "", pipeline=pipeline,
+            )
         await self._push_flow_status(
             job_id=job_id, connector_id=connector_id, status="done",
             event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
             message=f"✨ Added {n_added} recommended candidate(s) to the project.",
         )
         return {"stage": "recommendations", "done": True,
-                "pushed": lead_res.get("pushed"), "leads": n_added}
+                "pushed": lead_res.get("pushed"), "leads": n_added,
+                "blacklisted": [b.get("name") for b in blacklisted]}
 
     # ----------------------------------------------------------------- demo button
     async def start_demo(self, job_id, *, send: bool = False,
@@ -1100,12 +1112,22 @@ class RecruiterPipelineService:
                 query=pipeline.get("search_query"),
                 filters=" · ".join(filter_parts),
             )
+        # Blacklist: fetch once for this run and pre-filter blocked people out of the
+        # leads before they reach Odoo (empty/failed fetch ⇒ no-op).
+        matcher = BlacklistMatcher(await self.push.fetch_lead_blacklist(connector_id))
         # Requirement A: candidates → linkedin.lead.
         lead_res = await self.push.push_recruiter_leads(
             run_id=run.id, job_id=job_id, connector_id=connector_id,
-            source="boolean_search",
+            source="boolean_search", blacklist=matcher,
         )
         candidates = lead_res.get("leads") or []
+        blacklisted = lead_res.get("blacklisted") or []
+        if blacklisted:
+            origin = dict(run.origin or {})
+            origin["blacklist_dropped"] = [b.get("name") for b in blacklisted]
+            run.origin = origin
+            flag_modified(run, "origin")
+            await self.session.flush()
 
         # Loud signal: finalizing with ZERO candidates is almost always a problem
         # (a walled seat, a search that committed empty, or a boolean too tight after
@@ -1175,6 +1197,17 @@ class RecruiterPipelineService:
                 event_kind=EVENT_SEARCH, run_id=run.id,
                 message=f"🔎 Candidate search done — {found_str}saving {target_count} candidate(s) to the project…",
             )
+            # Post-add sweep: the bulk save select-alls the LinkedIn results page
+            # (independent of the pre-filtered leads), so a blacklisted person on that
+            # page still lands in the project. Archive them out (bounded, deduped,
+            # low priority — runs AFTER the +10 save completes). The per-candidate
+            # fallback path below is already blacklist-clean (to_save came from the
+            # filtered leads), so no sweep is needed there.
+            if blacklisted:
+                await self.sweep_blacklisted(
+                    job_id, blacklisted=blacklisted, connector_id=connector_id,
+                    project_url=pipeline.get("project_url") or "", pipeline=pipeline,
+                )
             return {"stage": "search", "leads": lead_res, "save_runs": save_runs,
                     "bulk_save": True}
 
@@ -1683,6 +1716,16 @@ class RecruiterPipelineService:
         watchlist = await self.push.fetch_lead_watchlist(connector_id)
         return {"watchlist": watchlist, "count": len(watchlist)}
 
+    async def get_blacklist(self) -> dict:
+        """Read-only view of the blacklist (debugging / verifying the Odoo contract +
+        normalizer parity). Zero LinkedIn cost. Empty when no recruiter connector is
+        known yet."""
+        connector_id = await self._latest_recruiter_connector()
+        if not connector_id:
+            return {"blacklist": [], "count": 0, "reason": "no_recruiter_connector"}
+        blacklist = await self.push.fetch_lead_blacklist(connector_id)
+        return {"blacklist": blacklist, "count": len(blacklist)}
+
     async def send_messages(self, job_id, subject: str | None = None,
                             body: str | None = None, send: bool = False,
                             max_recipients: int | None = None) -> str | None:
@@ -1705,6 +1748,26 @@ class RecruiterPipelineService:
         ctx = await self._gather_job_context(job_id)
         if not ctx.get("project_id"):
             logger.warning("recruiter pipeline: no project for job %s — can't message", job_id)
+            return None
+        # Blacklist safety gate: the compose strategy select-alls LinkedIn's native
+        # "uncontacted" stage by page — there is NO per-recipient filter, so if a
+        # blacklist sweep is still archiving someone out of this project, a send fired
+        # now could message them before they're removed. Sweep archives are low
+        # priority (−10) and this send is +10, so an in-flight archive means the sweep
+        # hasn't drained yet: DEFER the send rather than risk messaging a blocked
+        # person. (Coarse — also defers for an unrelated single-candidate removal —
+        # but archives are rare and drain in minutes.)
+        pending_archive = await self._find_active_pipeline_run(job_id, {EVENT_ARCHIVE})
+        if pending_archive is not None:
+            logger.warning(
+                "recruiter pipeline: blacklist/archive sweep still pending for job %s "
+                "(run %s) — deferring send", job_id, pending_archive.id,
+            )
+            await self._push_flow_status(
+                job_id=str(job_id), connector_id=ctx.get("connector_id"),
+                status="running", event_kind=EVENT_MESSAGE,
+                message="⏳ Finishing a blacklist cleanup before sending — try again shortly.",
+            )
             return None
         subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
         body = (body or DEFAULT_MESSAGE_BODY).strip()
@@ -1758,6 +1821,72 @@ class RecruiterPipelineService:
                      if send else "✉️ Preparing the outreach message (preview)…"),
         )
         return str(run.id)
+
+    async def _recently_archived_names(self, job_id) -> set[str]:
+        """Normalized names of candidates already targeted by an archive run for this
+        job (QUEUED/RUNNING/COMPLETED) — the sweep dedup key. Archiving someone from a
+        project does NOT remove them from LinkedIn search results, so every later
+        search re-detects them; without this the sweep would re-enqueue an archive for
+        the same person on every run, forever."""
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        names: set[str] = set()
+        done_or_active = set(_NON_TERMINAL) | {RunStatus.COMPLETED.value}
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_ARCHIVE:
+                continue
+            p = o.get("pipeline") or {}
+            if str(p.get("job_id")) != str(job_id):
+                continue
+            if r.status not in done_or_active:
+                continue
+            n = normalize_name(p.get("candidate_name"))
+            if n:
+                names.add(n)
+        return names
+
+    async def sweep_blacklisted(self, job_id, *, blacklisted: list[dict],
+                                connector_id, project_url: str, pipeline: dict) -> dict:
+        """Archive blacklisted people who landed in the project via the bulk save.
+        Bounded (recruiter_max_sweep_archives_per_run), deduped against recently
+        archived names, low priority. The remainder (beyond the cap) drains over
+        subsequent searches via re-detection + dedup. Never raises — a sweep failure
+        must not break the pipeline terminal hook."""
+        try:
+            already = await self._recently_archived_names(job_id)
+            cap = settings.recruiter_max_sweep_archives_per_run
+            enqueued, skipped_seen, no_name = 0, 0, 0
+            for b in blacklisted:
+                name = (b.get("name") or "").strip()
+                if not name:
+                    no_name += 1
+                    continue
+                norm = normalize_name(name)
+                if norm in already:
+                    skipped_seen += 1
+                    continue
+                if enqueued >= cap:
+                    break
+                run_id = await self.remove_candidate(
+                    job_id, profile_url=b.get("profile_url"), name=name,
+                    project_url=project_url or None, connector_id=connector_id,
+                )
+                if run_id:
+                    already.add(norm)
+                    enqueued += 1
+            remainder = max(0, len(blacklisted) - enqueued - skipped_seen - no_name)
+            logger.info(
+                "recruiter pipeline: blacklist sweep job %s — enqueued %d archive(s), "
+                "skipped %d already-handled, %d nameless, %d deferred to next run (cap=%d)",
+                job_id, enqueued, skipped_seen, no_name, remainder, cap,
+            )
+            return {"enqueued": enqueued, "skipped_seen": skipped_seen,
+                    "no_name": no_name, "remainder": remainder}
+        except Exception:
+            logger.exception("recruiter pipeline: blacklist sweep failed for job %s", job_id)
+            return {"enqueued": 0, "error": True}
 
     async def remove_candidate(
         self, job_id, *, profile_url: str | None = None, name: str | None = None,

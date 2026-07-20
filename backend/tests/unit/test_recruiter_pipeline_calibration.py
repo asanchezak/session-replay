@@ -30,8 +30,9 @@ def _make_svc(db_session, monkeypatch, *, count, pipeline_extra=None):
     svc.push = SimpleNamespace(
         read_search_result=AsyncMock(return_value={"total_count": count, "url": "https://x/search?start=0"}),
         push_search_link=AsyncMock(return_value={"pushed": 1}),
-        push_recruiter_leads=AsyncMock(return_value={"leads": []}),
+        push_recruiter_leads=AsyncMock(return_value={"leads": [], "blacklisted": []}),
         push_flow_status=AsyncMock(return_value={"pushed": 1}),
+        fetch_lead_blacklist=AsyncMock(return_value=[]),
     )
     svc._create_pipeline_run = AsyncMock(return_value=SimpleNamespace(id="rerun-run-id"))
     # Deterministic config + a builder we control.

@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # (== linkedin.lead rows pushed to Odoo). PRODUCTION = 6: a small, deliberate shortlist
     # per position. 0 = NO cap (save every extracted). Env: RECRUITER_MAX_SAVES_PER_POSITION.
     recruiter_max_saves_per_position: int = 6
+    # Blacklist post-add sweep: max NEW (post-dedup) archive runs enqueued per search
+    # run for blacklisted people who slipped into the project via the bulk save. Bounds
+    # the anti-bot load on the sensitive seat; the remainder drains over subsequent
+    # searches (re-detection + dedup). Env: RECRUITER_MAX_SWEEP_ARCHIVES_PER_RUN.
+    recruiter_max_sweep_archives_per_run: int = 10
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True
