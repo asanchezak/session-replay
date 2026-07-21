@@ -83,6 +83,8 @@ async def test_sweep_enqueues_capped(db_session: AsyncSession, monkeypatch):
     assert res["enqueued"] == 2
     assert res["remainder"] == 1
     assert svc.remove_candidate.await_count == 2
+    # Sweep archives are tagged so a failure won't flip the Odoo position to failed.
+    assert svc.remove_candidate.await_args.kwargs.get("sweep") is True
 
 
 @pytest.mark.asyncio
@@ -147,3 +149,31 @@ async def test_send_proceeds_when_no_archive_pending(db_session: AsyncSession, m
     out = await svc.send_messages("1", subject="s", body="b", send=True)
     assert out == "msg-run"
     svc._create_pipeline_run.assert_awaited_once()
+
+
+# ------------------------------------------- notify_failure quiet for sweep archives
+
+@pytest.mark.asyncio
+async def test_notify_failure_skips_blacklist_sweep(db_session: AsyncSession):
+    svc = RecruiterPipelineService(db_session)
+    svc._push_flow_status = AsyncMock()
+    run = SimpleNamespace(
+        id="arch-run", error_summary="archive_not_verified",
+        origin={"event_kind": "recruiter_archive",
+                "pipeline": {"job_id": "1", "blacklist_sweep": True}})
+    res = await svc.notify_failure(run)
+    assert res.get("skipped") == "blacklist_sweep"
+    svc._push_flow_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_notify_failure_marks_normal_archive_failed(db_session: AsyncSession):
+    svc = RecruiterPipelineService(db_session)
+    svc._push_flow_status = AsyncMock(return_value={"pushed": 1})
+    run = SimpleNamespace(
+        id="arch-run", error_summary="archive_not_verified",
+        origin={"event_kind": "recruiter_archive",
+                "pipeline": {"job_id": "1", "connector_id": "c"}})
+    await svc.notify_failure(run)
+    svc._push_flow_status.assert_awaited_once()
+    assert svc._push_flow_status.await_args.kwargs["status"] == "failed"

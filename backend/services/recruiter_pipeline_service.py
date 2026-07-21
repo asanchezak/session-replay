@@ -303,6 +303,16 @@ class RecruiterPipelineService:
         if event_kind in SILENT_FLOW_EVENT_KINDS:
             return {"skipped": "silent_event_kind", "event_kind": event_kind}
         pipeline = origin.get("pipeline") or {}
+        # A blacklist-sweep archive is background cleanup, not the position's flow —
+        # a failure here must NOT mark the Odoo position 'failed' (it retries on the
+        # next search). Log quietly and skip the flow-status push.
+        if pipeline.get("blacklist_sweep"):
+            logger.info(
+                "recruiter pipeline: blacklist-sweep archive %s failed (%s) — not "
+                "flipping job %s to failed; will retry on the next search",
+                run.id, run.error_summary or "", pipeline.get("job_id"),
+            )
+            return {"skipped": "blacklist_sweep", "run_id": str(run.id)}
         job_id = pipeline.get("job_id") or origin.get("job_id")
         connector_id = pipeline.get("connector_id") or origin.get("connector_id")
         return await self._push_flow_status(
@@ -1872,6 +1882,7 @@ class RecruiterPipelineService:
                 run_id = await self.remove_candidate(
                     job_id, profile_url=b.get("profile_url"), name=name,
                     project_url=project_url or None, connector_id=connector_id,
+                    sweep=True,
                 )
                 if run_id:
                     already.add(norm)
@@ -1891,6 +1902,7 @@ class RecruiterPipelineService:
     async def remove_candidate(
         self, job_id, *, profile_url: str | None = None, name: str | None = None,
         project_url: str | None = None, connector_id=None, lead_id=None,
+        sweep: bool = False,
     ) -> str | None:
         """Deferred-delete trigger: an Odoo linkedin.lead was deleted → archive that
         candidate from the LinkedIn project. Creates ONE daemon archive run that
@@ -1942,6 +1954,11 @@ class RecruiterPipelineService:
             "profile_url": profile_url,
             "candidate_name": name,
             "lead_id": lead_id,
+            # Background blacklist cleanup — a failure here must NOT flip the Odoo
+            # position to 'failed' (it's not the position's fault, and the failed
+            # archive is retried on the next search since dedup skips only
+            # COMPLETED/active names). notify_failure honors this flag.
+            "blacklist_sweep": bool(sweep),
         }
         run = await self._create_pipeline_run(
             workflow_id=wf,
