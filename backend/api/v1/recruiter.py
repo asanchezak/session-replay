@@ -266,6 +266,15 @@ async def reply_watchlist(db: AsyncSession = Depends(get_db)):
     return await svc.get_reply_watchlist()
 
 
+@router.get("/blacklist")
+async def blacklist(db: AsyncSession = Depends(get_db)):
+    """The BLACKLIST (proxied from Odoo /akcr/api/lead_blacklist): people who must
+    never be sourced/saved/messaged. Read-only, zero LinkedIn cost — useful for
+    verifying the Odoo contract and name-normalizer parity."""
+    svc = RecruiterPipelineService(db)
+    return await svc.get_blacklist()
+
+
 @router.post("/jobs/{job_id}/demo")
 async def run_demo(
     job_id: str,

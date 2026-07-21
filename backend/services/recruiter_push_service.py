@@ -167,7 +167,8 @@ class RecruiterPushService:
             return {"pushed": 0, "error": True}
 
     async def push_recruiter_leads(self, *, run_id, job_id, connector_id,
-                                   mode: str = "live", source: str = "") -> dict:
+                                   mode: str = "live", source: str = "",
+                                   blacklist=None) -> dict:
         """Requirement A: create linkedin.lead rows from the search run's candidates.
 
         Always returns the collected candidates under "leads" (even when the Odoo
@@ -177,17 +178,49 @@ class RecruiterPushService:
         `source` tags how the candidates were sourced ("boolean_search" vs
         "recommendation") — it's uniform per run, so it rides at the payload top level
         and Odoo applies it to every lead in the batch.
+
+        `blacklist` (a BlacklistMatcher, optional) drops blocked people BEFORE they
+        become leads. Dropped candidates are returned under "blacklisted" on every
+        return path so the caller can drive the post-add sweep (the bulk results-page
+        save select-alls the LinkedIn page independent of leads, so a person filtered
+        here can still land in the project and must be swept out).
         """
         leads = await self._collect_recruiter_leads(run_id)
         if not leads:
             logger.info("recruiter lead push: no candidates for run %s", run_id)
-            return {"pushed": 0, "skipped": "no_leads", "leads": []}
+            return {"pushed": 0, "skipped": "no_leads", "leads": [], "blacklisted": []}
+        blacklisted: list[dict] = []
+        if blacklist:
+            kept: list[dict] = []
+            for lead in leads:
+                hit, reason = blacklist.is_blacklisted(
+                    lead.get("name"), lead.get("profile_url")
+                )
+                if hit:
+                    blacklisted.append({**lead, "match_reason": reason})
+                else:
+                    kept.append(lead)
+            if blacklisted:
+                logger.info(
+                    "recruiter lead push: blacklist dropped %d/%d candidate(s) for "
+                    "run %s (by_name=%d by_url=%d): %s",
+                    len(blacklisted), len(leads), run_id,
+                    sum(1 for b in blacklisted if b["match_reason"] == "name"),
+                    sum(1 for b in blacklisted if b["match_reason"] == "url"),
+                    [b.get("name") for b in blacklisted],
+                )
+            leads = kept
+        if not leads:
+            return {"pushed": 0, "skipped": "no_leads", "leads": [],
+                    "blacklisted": blacklisted}
         leads = leads[:DEFAULT_MAX_LEADS_PER_RUN]
         if not job_id:
-            return {"pushed": 0, "skipped": "no_job_id", "leads": leads}
+            return {"pushed": 0, "skipped": "no_job_id", "leads": leads,
+                    "blacklisted": blacklisted}
         ep = await self._connector_endpoint(connector_id)
         if ep is None:
-            return {"pushed": 0, "skipped": "connector_unconfigured", "leads": leads}
+            return {"pushed": 0, "skipped": "connector_unconfigured", "leads": leads,
+                    "blacklisted": blacklisted}
         base_url, api_key = ep
         payload = {
             "job_id": job_id,
@@ -202,10 +235,12 @@ class RecruiterPushService:
                 "recruiter lead push: posted %d candidates for run %s odoo=%s",
                 len(leads), run_id, res,
             )
-            return {"pushed": len(leads), "leads": leads, **res}
+            return {"pushed": len(leads), "leads": leads,
+                    "blacklisted": blacklisted, **res}
         except Exception:
             logger.exception("recruiter lead push: POST failed for run %s", run_id)
-            return {"pushed": 0, "error": True, "leads": leads}
+            return {"pushed": 0, "error": True, "leads": leads,
+                    "blacklisted": blacklisted}
 
     async def push_outreach_update(self, *, run_id, job_id, connector_id,
                                    messaged: list[dict] | list[str]) -> dict:
@@ -307,6 +342,28 @@ class RecruiterPushService:
             return [w for w in watchlist if isinstance(w, dict)]
         except Exception:
             logger.exception("lead-watchlist: fetch failed")
+            return []
+
+    async def fetch_lead_blacklist(self, connector_id) -> list[dict]:
+        """Fetch the blacklist from Odoo (/akcr/api/lead_blacklist): people who must
+        never be sourced/saved/messaged. Each entry is
+        {name, normalized_name, profile_url, synthetic}. Degrades to [] on ANY
+        failure — an empty matcher means the pipeline behaves exactly as before, so
+        an Odoo/backend outage never blocks sourcing."""
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return []
+        base_url, api_key = ep
+        try:
+            res = await self._post(base_url, api_key, "/akcr/api/lead_blacklist", {})
+            odoo = res.get("odoo") or {}
+            blacklist = odoo.get("blacklist") if isinstance(odoo, dict) else None
+            if not isinstance(blacklist, list):
+                logger.warning("lead-blacklist: unexpected Odoo response %s", res)
+                return []
+            return [b for b in blacklist if isinstance(b, dict)]
+        except Exception:
+            logger.exception("lead-blacklist: fetch failed")
             return []
 
     # ------------------------------------------------------- boolean search read/push
