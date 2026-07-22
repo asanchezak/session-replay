@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const BEHAVIOR_VERSION = "2026-07-10-behavior-9-seat-gate-boot";
+export const BEHAVIOR_VERSION = "2026-07-22-behavior-10-reply-scan-multi-backend";
 
 // ── Seat-warmth gate state ───────────────────────────────────────────────────
 // The daemon must NOT drive /talent runs on a cold/walled seat (they'd fail and
@@ -160,20 +160,43 @@ async function gotoInbox(page, h) {
 //      — watchlist-matched ones are OPENED (≤ THREAD_OPEN_BUDGET) to read the body;
 //  (2) the auto-opened (most-recent) thread — LinkedIn force-opens it on navigation
 //      (clearing its unread badge); its body is already visible = free text.
-async function scanInboxReplies(page, api) {
-  const h = api.helpers;
-  // Reply watchlist (zero LinkedIn cost): who we're allowed to open threads for.
-  // null = fetch failed → degrade to v1 (name-only, no opens).
-  let watchNames = null;
+// Reply watchlist for ONE endpoint (zero LinkedIn cost): who we're allowed to open
+// threads for on that backend. null = fetch failed → that endpoint degrades to
+// name-only matching (still posted there as a fallback, see below).
+async function fetchWatchlistFor(api, ep) {
   try {
-    const wl = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/reply-watchlist`);
+    const wl = await api.io.fetchJson(
+      `${ep.url}/v1/recruiter/reply-watchlist`,
+      ep.key ? { headers: { "X-API-Key": ep.key } } : {},
+    );
     if (wl && Array.isArray(wl.watchlist)) {
-      watchNames = new Set(wl.watchlist.map((w) => normName(w.name)).filter(Boolean));
-      console.log(`[reply-scan] watchlist: ${watchNames.size} open lead(s)`);
+      return new Set(wl.watchlist.map((w) => normName(w.name)).filter(Boolean));
     }
   } catch (e) {
-    console.log(`[reply-scan] watchlist fetch failed (${(e && e.message) || e}) — name-only scan`);
+    console.log(`[reply-scan] watchlist fetch failed for ${ep.url} (${(e && e.message) || e})`);
   }
+  return null;
+}
+
+// The daemon shares ONE LinkedIn seat across every backend it serves (dev + prod).
+// Each backend owns its own connector/leads, so the watchlist AND the reported
+// replies must be per-endpoint, not just the single "currently active" backend —
+// otherwise replies on a non-primary backend's jobs are silently never recorded.
+async function scanInboxReplies(page, api) {
+  const h = api.helpers;
+  const endpoints = (api.config.ENDPOINTS && api.config.ENDPOINTS.length)
+    ? api.config.ENDPOINTS
+    : [{ url: api.config.BACKEND }];
+  const watchByEndpoint = await Promise.all(
+    endpoints.map(async (ep) => ({ ep, names: await fetchWatchlistFor(api, ep) })),
+  );
+  for (const { ep, names } of watchByEndpoint) {
+    console.log(`[reply-scan] watchlist ${ep.url}: ${names ? `${names.size} open lead(s)` : "fetch failed — name-only"}`);
+  }
+  // A card is "watched" (safe to open) if ANY endpoint's watchlist names it.
+  const watchNames = watchByEndpoint.some(({ names }) => names !== null)
+    ? new Set(watchByEndpoint.flatMap(({ names }) => (names ? [...names] : [])))
+    : null;
   const reached = await gotoInbox(page, h);
   if (!reached) { console.log("[reply-scan] could not reach inbox (contract chooser?)"); return 0; }
   await h.sleep(1500);
@@ -235,15 +258,34 @@ async function scanInboxReplies(page, api) {
   }
 
   if (!replies.length) { console.log("[reply-scan] no replies"); return 0; }
-  try {
-    const res = await api.io.fetchJson(`${api.config.BACKEND}/v1/recruiter/inbox-replies`, {
-      method: "POST",
-      body: JSON.stringify({ replies }),
-    });
-    console.log(`[reply-scan] reported ${replies.length} reply(ies), ${opened} thread(s) opened ${JSON.stringify(replies.map(r => r.name + ":" + r.via + (r.body ? "+body" : "")))} → ${JSON.stringify(res).slice(0, 200)}`);
-  } catch (e) {
-    console.log(`[reply-scan] POST failed: ${(e && e.message) || e}`);
+  // Route each reply to the endpoint(s) whose watchlist named it — a name matched
+  // on exactly one backend's leads posts only there. A name matched nowhere (fetch
+  // failure, or genuinely off every watchlist) posts to ALL endpoints as a harmless
+  // superset: each backend's akcr already no-ops a name it doesn't recognize, so
+  // this preserves the old single-backend "always post" behavior for that case
+  // without risking a real cross-backend reply going unreported.
+  const matchedEndpoints = watchByEndpoint.filter(({ names }) => names !== null);
+  for (const { ep, names } of watchByEndpoint) {
+    const mine = matchedEndpoints.length
+      ? replies.filter((r) => {
+          const matchesThis = names !== null && names.has(normName(r.name));
+          const matchesAny = matchedEndpoints.some((w) => w.names.has(normName(r.name)));
+          return matchesThis || !matchesAny;
+        })
+      : replies; // no endpoint's watchlist loaded at all → old v1-style broadcast
+    if (!mine.length) continue;
+    try {
+      const res = await api.io.fetchJson(`${ep.url}/v1/recruiter/inbox-replies`, {
+        method: "POST",
+        headers: ep.key ? { "X-API-Key": ep.key } : {},
+        body: JSON.stringify({ replies: mine }),
+      });
+      console.log(`[reply-scan] ${ep.url}: reported ${mine.length} reply(ies) ${JSON.stringify(mine.map(r => r.name + ":" + r.via + (r.body ? "+body" : "")))} → ${JSON.stringify(res).slice(0, 200)}`);
+    } catch (e) {
+      console.log(`[reply-scan] POST failed for ${ep.url}: ${(e && e.message) || e}`);
+    }
   }
+  console.log(`[reply-scan] ${replies.length} reply(ies) total, ${opened} thread(s) opened`);
   return replies.length;
 }
 
