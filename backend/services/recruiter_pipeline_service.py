@@ -104,6 +104,8 @@ PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
 _PROJECT_DESC_MAX = 2000
 # Default outreach copy for req B (send_messages); overridable per call.
+# Subject defaults to "{position} position available"; falls back to this when
+# the job's position title isn't known.
 DEFAULT_MESSAGE_SUBJECT = "Opportunity at AKUREY"
 DEFAULT_MESSAGE_BODY = (
     "Hi {Name},\n\n"
@@ -116,6 +118,11 @@ DEFAULT_MESSAGE_BODY = (
 # the Odoo position — composed in _default_note_text from the job context + connector URL.
 DEFAULT_NOTE_PREFIX = "Contacted - "
 DEFAULT_CONTACTED_BY = "Automation"
+
+
+def _default_subject(position: str | None) -> str:
+    position = (position or "").strip()
+    return f"{position} position available" if position else DEFAULT_MESSAGE_SUBJECT
 
 
 class RecruiterPipelineService:
@@ -607,7 +614,7 @@ class RecruiterPipelineService:
             "profile_url": settings.recruiter_demo_profile_url,
             "profile_name": settings.recruiter_demo_profile_name,
             "send": bool(send),
-            "subject": (subject or DEFAULT_MESSAGE_SUBJECT).strip(),
+            "subject": (subject or _default_subject(ctx.get("position"))).strip(),
             "body": (body or DEFAULT_MESSAGE_BODY).strip(),
             "archive_rounds": 0,
         }
@@ -1779,7 +1786,7 @@ class RecruiterPipelineService:
                 message="⏳ Finishing a blacklist cleanup before sending — try again shortly.",
             )
             return None
-        subject = (subject or DEFAULT_MESSAGE_SUBJECT).strip()
+        subject = (subject or _default_subject(ctx.get("position"))).strip()
         body = (body or DEFAULT_MESSAGE_BODY).strip()
         # The unified compose loop adds a contact note + moves each messaged page to
         # "contacted" in the SAME run, so messaged == noted == moved. Pass the note text
