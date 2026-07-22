@@ -104,8 +104,8 @@ PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
 _PROJECT_DESC_MAX = 2000
 # Default outreach copy for req B (send_messages); overridable per call.
-# Subject defaults to "{position} position available"; falls back to this when
-# the job's position title isn't known.
+# Subject defaults to "{position} Opportunity"; falls back to this when the
+# job's position title isn't known.
 DEFAULT_MESSAGE_SUBJECT = "Opportunity at AKUREY"
 DEFAULT_MESSAGE_BODY = (
     "Hi {Name},\n\n"
@@ -122,7 +122,7 @@ DEFAULT_CONTACTED_BY = "Automation"
 
 def _default_subject(position: str | None) -> str:
     position = (position or "").strip()
-    return f"{position} position available" if position else DEFAULT_MESSAGE_SUBJECT
+    return f"{position} Opportunity" if position else DEFAULT_MESSAGE_SUBJECT
 
 
 class RecruiterPipelineService:
