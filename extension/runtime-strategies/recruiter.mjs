@@ -962,6 +962,21 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
     if (!wentNext) break;
     await page.waitForSelector(CARD, { timeout: 10000 }).catch(() => {});
   }
+  // Zero-results disambiguation. If we read no count AND collected no cards, the search
+  // is EITHER genuinely empty (0 matches → LinkedIn's empty state carries no "N resultados"
+  // header for the regex above to catch) OR it failed to render (walled seat / DOM drift).
+  // The stage gate (stageVerdict) hard-FAILS on total_count=null + 0 people, which would
+  // otherwise mark a legitimately-empty tightened search as a broken run. Disambiguate
+  // STRUCTURALLY: the search-results scaffold (the query-summary header) only renders once
+  // a search has COMMITTED and never appears on a login/checkpoint wall — so if it's
+  // present, this is a real 0-match result → report total_count=0 (rendered, empty) and let
+  // the run complete instead of failing "did not render". Locale-independent (data-test).
+  if (totalCount == null && byUrl.size === 0) {
+    const committed = await page.evaluate(() => !!document.querySelector(
+      '[data-test-search-query-summary-container], [data-test-search-query-summary-title], [data-test-search-wrapper]',
+    )).catch(() => false);
+    if (committed) totalCount = 0;
+  }
   const people = Array.from(byUrl.values());
   return {
     people: options.targetCount ? people.slice(0, options.targetCount) : people,

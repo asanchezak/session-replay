@@ -1096,12 +1096,22 @@ class RecruiterPipelineService:
                 re_params = {"boolean_query": query}
                 if settings.recruiter_default_location:
                     re_params["location"] = settings.recruiter_default_location
+                # Remember the tightest search so far that still had results, so a tighten
+                # that OVERSHOOTS (e.g. 1500 → 0) can fall back to it at finalize instead of
+                # discarding a usable candidate set. We only ever tighten when count is above
+                # the acceptable ceiling, so count here is always > 0 → a valid fallback.
+                best_search = pipeline.get("best_search")
+                if count and count > 0:
+                    best_search = {
+                        "url": result.get("url"), "count": count,
+                        "query": pipeline.get("search_query"), "run_id": str(run.id),
+                    }
                 re_run = await self._create_pipeline_run(
                     workflow_id=adv_wf, event_kind=EVENT_SEARCH,
                     runtime_params=re_params,
                     pipeline={**pipeline, "search_tightness": new_t,
                               "search_reruns": reruns + 1, "search_query": query,
-                              "search_prev_count": count},
+                              "search_prev_count": count, "best_search": best_search},
                     connector_id=connector_id,
                 )
                 logger.info(
@@ -1117,7 +1127,34 @@ class RecruiterPipelineService:
             )
 
         # --- in band (or no count / reruns exhausted): finalize ---
-        if pipeline.get("search_query"):
+        # Overshoot fallback: if the LAST search tightened below the usable band (typically
+        # a genuine 0-match result now that the extractor reports total_count=0 for an empty
+        # search) but an earlier, looser search DID have results, finalize on that best prior
+        # search instead of on the empty one — otherwise a single overshooting tighten throws
+        # away a perfectly good candidate set and the whole position ends with zero leads.
+        best = pipeline.get("best_search")
+        use_fallback = bool(
+            best and best.get("url") and (best.get("count") or 0) > 0
+            and (count is None or count < settings.recruiter_count_band_min)
+        )
+        if use_fallback:
+            logger.warning(
+                "recruiter pipeline: job %s tighten overshot (count=%s < band_min=%s) — "
+                "falling back to best prior search run=%s count=%s",
+                job_id, count, settings.recruiter_count_band_min,
+                best.get("run_id"), best.get("count"),
+            )
+            eff_url = best.get("url")
+            eff_count = best.get("count")
+            eff_query = best.get("query") or pipeline.get("search_query")
+            lead_run_id = best.get("run_id") or run.id
+        else:
+            eff_url = result.get("url")
+            eff_count = count
+            eff_query = pipeline.get("search_query")
+            lead_run_id = run.id
+
+        if eff_query:
             # Readable summary of the facet filters applied to the search (currently
             # the location facet; extend here as more facets are added).
             filter_parts = []
@@ -1125,8 +1162,8 @@ class RecruiterPipelineService:
                 filter_parts.append(f"Location: {settings.recruiter_default_location}")
             await self.push.push_search_link(
                 run_id=run.id, job_id=job_id, connector_id=connector_id,
-                search_url=result.get("url"), count=count,
-                query=pipeline.get("search_query"),
+                search_url=eff_url, count=eff_count,
+                query=eff_query,
                 filters=" · ".join(filter_parts),
             )
         # Blacklist: fetch once for this run and pre-filter blocked people out of the
@@ -1134,7 +1171,7 @@ class RecruiterPipelineService:
         matcher = BlacklistMatcher(await self.push.fetch_lead_blacklist(connector_id))
         # Requirement A: candidates → linkedin.lead.
         lead_res = await self.push.push_recruiter_leads(
-            run_id=run.id, job_id=job_id, connector_id=connector_id,
+            run_id=lead_run_id, job_id=job_id, connector_id=connector_id,
             source="boolean_search", blacklist=matcher,
         )
         candidates = lead_res.get("leads") or []
@@ -1168,7 +1205,7 @@ class RecruiterPipelineService:
         # "found N; saving M…" when a save is enqueued, or a terminal "search complete"
         # note when there's nothing to save.
         n_cands = len(candidates)
-        found_str = f"found {count} result(s); " if count is not None else ""
+        found_str = f"found {eff_count} result(s); " if eff_count is not None else ""
 
         # Save EVERY extracted candidate to the project: the count saved == the count
         # the search extracted (the extraction is itself bounded by the search
@@ -1187,7 +1224,7 @@ class RecruiterPipelineService:
         # The search extractor stores the LAST page it landed on (often start=25).
         # Normalize to start=0 so the bulk save begins on page 1 and can paginate
         # forward over the whole result set.
-        search_url = re.sub(r"([?&]start=)\d+", r"\g<1>0", result.get("url") or "")
+        search_url = re.sub(r"([?&]start=)\d+", r"\g<1>0", eff_url or "")
         if bulk_wf and project_name and to_save and search_url:
             target_count = len(to_save)
             save_run = await self._create_pipeline_run(

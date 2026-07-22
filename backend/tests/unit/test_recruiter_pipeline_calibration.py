@@ -151,3 +151,41 @@ async def test_per_candidate_fallback_when_no_bulk_wf(db_session: AsyncSession, 
     res = await svc._after_search(run, pipeline, connector_id="c", job_id="1")
     assert not res.get("bulk_save")
     assert svc._create_pipeline_run.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_calibration_stashes_best_search_when_tightening(db_session: AsyncSession, monkeypatch):
+    """When a tighten is enqueued, the current (still-non-empty) search is stashed as
+    best_search so a later overshoot can fall back to it."""
+    svc, run, pipeline = _make_svc(db_session, monkeypatch, count=460)
+    await svc._after_search(run, pipeline, connector_id="c", job_id="1")
+    _, kwargs = svc._create_pipeline_run.await_args
+    best = kwargs["pipeline"]["best_search"]
+    assert best["count"] == 460
+    assert best["run_id"] == "search-run-id"
+    assert best["url"] == "https://x/search?start=0"
+
+
+@pytest.mark.asyncio
+async def test_tighten_overshoot_falls_back_to_best_prior_search(db_session: AsyncSession, monkeypatch):
+    """A tighten that overshoots to 0 (below band_min) with reruns exhausted finalizes on
+    the best prior search: leads pushed from THAT run + its URL/count on the search link,
+    instead of discarding a usable candidate set."""
+    best = {"url": "https://x/search?start=0&best=1", "count": 320,
+            "query": "QUERY@t3", "run_id": "best-run-id"}
+    svc, run, pipeline = _make_svc(
+        db_session, monkeypatch, count=0,
+        pipeline_extra={"search_reruns": 1, "search_query": "QUERY@t4", "best_search": best},
+    )
+    monkeypatch.setattr(settings, "recruiter_max_search_reruns", 1)  # exhausted → no rerun
+    res = await svc._after_search(run, pipeline, connector_id="c", job_id="1")
+    assert not res.get("calibrating")
+    svc._create_pipeline_run.assert_not_called()
+    # leads pulled from the best prior run, not the empty current one
+    _, lead_kwargs = svc.push.push_recruiter_leads.await_args
+    assert lead_kwargs["run_id"] == "best-run-id"
+    # the search link reflects the best prior search's url + count + query
+    _, link_kwargs = svc.push.push_search_link.await_args
+    assert link_kwargs["search_url"] == "https://x/search?start=0&best=1"
+    assert link_kwargs["count"] == 320
+    assert link_kwargs["query"] == "QUERY@t3"
