@@ -746,7 +746,7 @@ function buildBehaviorApi() {
     },
     io: { fetchJson, reportStepResult, failRun, pauseRun, postExtraction, captureDebug },
     config: {
-      BACKEND, OPERATOR_ID, WORKER_ID,
+      BACKEND, OPERATOR_ID, WORKER_ID, ENDPOINTS,
       VIEWPORT_WIDTH, VIEWPORT_HEIGHT,
       STEP_RESOLVE_TIMEOUT_MS,
       RECRUITER_PING_MIN_MS, RECRUITER_PING_MAX_MS, RECRUITER_PING_WALLED_BACKOFF_MS,
