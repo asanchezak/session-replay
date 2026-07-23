@@ -102,7 +102,15 @@ _PROJECT_URL_RE = re.compile(r"/talent/hire/(\d+)")
 # Prefix marking projects this automation created (so they're findable/cleanable).
 PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
-_PROJECT_DESC_MAX = 2000
+# Kept SMALL on purpose: the create-project run is bounded by the daemon's per-RUN
+# watchdog (RUN_WATCHDOG_MS=240s), and the description is typed character-by-character
+# (humanized). A long JD (the old 2000-char cap) pushed a single create run past 240s
+# → the run was watchdog-aborted mid-create, so the project was left uncommitted and its
+# /talent/hire/<id> URL was never captured (no project_url/pid threaded downstream, which
+# in turn broke the bulk-save project picker). ~500 chars types in well under a minute,
+# leaving ample budget for the navigations/scrolls/extract in the same run. The project
+# description is informational only, so a trimmed blurb is fine.
+_PROJECT_DESC_MAX = 500
 # Default outreach copy for req B (send_messages); overridable per call.
 # Subject defaults to "{position} Opportunity"; falls back to this when the
 # job's position title isn't known.
