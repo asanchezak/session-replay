@@ -50,19 +50,23 @@
       "failure_reasons": { "add_profile_failed": "The /in/ bridge to the Recruiter profile or the Save-to-project button drifted." }
     },
     "recruiter_message_compose": {
-      "intent": "UNIFIED per-page loop over the project's UNCONTACTED (SHORTLISTED) stage: for each page, message from a template ({Nombre}->{firstName} chip) -> (only if the send succeeded) add the note_text contact note -> move that page to 'contacted'. messaged == noted == moved by construction. Gated by `send` (false=preview page 1 only, no mutation).",
-      "params": ["project_url", "body", "subject", "note_text", "send"],
-      "success_criteria": "message_compose_result.ok (gated preview OR >=1 page actually messaged). Reports messaged_count/noted_count/moved_count (should match) + recipients (union across pages) + more_remaining (backend re-invokes to drain the rest).",
+      "intent": "UNIFIED per-BATCH loop over the project's UNCONTACTED (SHORTLISTED) stage: take batch_size (default 5) candidates by per-row checkbox, message from a template ({Nombre}->{firstName} chip) -> (only if the send succeeded) add the note_text contact note -> move that batch to 'contacted'. messaged == noted == moved by construction. Gated by `send` (false=preview of one batch, no mutation).",
+      "params": ["project_url", "body", "subject", "note_text", "batch_size", "skip_urls", "max_recipients", "send"],
+      "success_criteria": "message_compose_result.ok (gated preview OR >=1 batch messaged OR >=1 batch legitimately deferred). Reports messaged_count/noted_count/moved_count (must match) + recipients (the messaged rows ONLY) + skipped/skipped_count (deferred rows) + more_remaining (backend chains another run).",
       "failure_reasons": {
-        "rate_limited_24h": "LinkedIn won't contact the same person twice within 24h — the Send button is disabled; the loop stops without noting/moving that page.",
         "no_inmail_credits": "0 InMail credits left.",
         "send_button_disabled": "Send is greyed out for another reason.",
+        "send_unconfirmed": "Send was clicked but the composer never closed — the send could not be confirmed, so the batch is NOT noted/moved.",
         "composer_open_failed": "The Message button (data-test-action=send-message) or the composer editor drifted.",
-        "note_save_unverified": "A page was messaged but 'Añadir' produced no success toast/modal-close (data-test-create-edit-note-submit-btn / data-test-mentions-edit-textarea drift) — loop stops honestly.",
-        "move_failed_after_send": "A page was messaged+noted but the move to 'contacted' could not be verified (count delta + toast both failed after a retry) — loop stops; that page's moved count lags.",
-        "select_all_not_found": "The header select-all (input.small-input) drifted."
+        "note_save_unverified": "A batch was messaged but 'Añadir' produced no success toast/modal-close (data-test-create-edit-note-submit-btn / data-test-mentions-edit-textarea drift) — loop stops honestly.",
+        "move_failed_after_send": "A batch was messaged+noted but the move to 'contacted' could not be verified (count delta + toast both failed after a retry) — loop stops; that batch's moved count lags.",
+        "select_none": "No selectable row found (per-row checkbox drift), and nothing had been deferred."
       },
-      "known_gotchas": "Recruiter has NO across-pages select; the header checkbox selects ONE visible page (~25) — the loop processes a page at a time and relies on move-to-'contacted' removing it from the uncontacted view to surface the next page. add-note lives in the collapsible-toolbar OVERFLOW (button.collapsible-toolbar__dropdown-trigger) with TWO buttons (hidden original + visible clone) — click the visible one. move-to-contacted is verified by the SHORTLISTED count DELTA (locale/toast-proof), not the toast alone (toast-only under-counted moves -> the old 96-noted/46-moved bug). The step is bounded ~195s (< daemon 240s watchdog); it stops early with more_remaining and the backend re-invokes."
+      "non_failures": {
+        "recipients_ineligible": "NOT a failure. The composer showed 'N recipients cannot be contacted more than once within 24 hours' / '...have been contacted by someone on your team this month'. Send stays ENABLED and LinkedIn silently drops those recipients WITHOUT saying which — so the whole batch is deferred (no send/note/move), its URLs are returned in `skipped`, and the run continues with the next batch.",
+        "all_deferred": "Every batch this run attempted was deferred. ok:true so the run COMPLETES and the backend can chain the next one — failing here stalls the entire outreach (the 2026-07-27 job-290 incident: 0 of 97 messaged)."
+      },
+      "known_gotchas": "Recruiter has NO across-pages select; selection is per-row (label[for=select-item-…], the input is visually hidden) and the list is VIRTUALIZED, so selecting scrolls. Deferred candidates are carried across chained runs via skip_urls, otherwise every run re-picks the same blocked people at the top of the list. After a send, re-select the SAME batch BY URL (deferred rows sit above them, so 'the top N' is no longer the same people). add-note lives in the collapsible-toolbar OVERFLOW (button.collapsible-toolbar__dropdown-trigger) with TWO buttons (hidden original + visible clone) — click the visible one. move-to-contacted is verified by the SHORTLISTED count DELTA (locale/toast-proof), not the toast alone (toast-only under-counted moves -> the old 96-noted/46-moved bug). A successful send is verified by the COMPOSER CLOSING, never by the absence of the 24h banner (that banner stays on screen after a successful send). The step is bounded ~195s (< daemon 240s watchdog); it stops early with more_remaining and the backend chains another run."
     },
     "recruiter_note_compose": {
       "intent": "Add a 'Contactado para <posición>' note (bulk) to the project's active candidates and move them to the native 'contacted' stage. Paginates across pages. Gated by `save` (false=preview, true=save+move).",

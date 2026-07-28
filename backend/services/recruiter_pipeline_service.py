@@ -1336,7 +1336,9 @@ class RecruiterPipelineService:
                         f"({compose.get('contacted_count', 0)}) — no new messages were sent.",
             )
             return {"stage": "message", "sent": False, "no_uncontacted": True}
-        if not pipeline.get("send") or not compose.get("sent"):
+        skipped = compose.get("skipped") or []
+        skipped_n = int(compose.get("skipped_count") or len(skipped))
+        if not pipeline.get("send") or (not compose.get("sent") and not skipped_n):
             logger.info(
                 "recruiter pipeline: message preview for job %s (send=%s sent=%s) — "
                 "no Odoo outreach update", job_id, pipeline.get("send"), compose.get("sent"),
@@ -1386,34 +1388,71 @@ class RecruiterPipelineService:
                     )
                 except Exception:  # noqa: BLE001 — mirroring is best-effort
                     logger.exception("recruiter pipeline: failed to mirror contact note for %s (run %s)", purl, run.id)
-        # ONE consistent chatter line. Happy path: the three counts agree. If a page's note/move
-        # failed after its send (stop_reason), report the honest three numbers instead of hiding it.
+        # Accumulate the CHAIN totals: one send spans many runs (5 candidates per composer,
+        # ~2 batches per run under the daemon watchdog), and only the LAST run posts chatter.
+        chain = dict(pipeline.get("chain") or {})
+        chain_index = int(chain.get("index") or 0)
+        totals = {
+            "messaged": int(chain.get("messaged") or 0) + messaged_n,
+            "noted": int(chain.get("noted") or 0) + noted_n,
+            "moved": int(chain.get("moved") or 0) + moved_n,
+            "skipped": int(chain.get("skipped") or 0) + skipped_n,
+        }
+        # Deferred candidates carry forward so the next run doesn't re-pick the same blocked
+        # people (that would burn its whole budget on them and never drain the stage).
+        deferred_urls = list(pipeline.get("deferred_urls") or [])
+        for row in skipped:
+            url = (row.get("profile_url") or "").strip() if isinstance(row, dict) else str(row or "").strip()
+            if url and url not in deferred_urls:
+                deferred_urls.append(url)
+
         more = bool(compose.get("more_remaining"))
-        consistent = (messaged_n == noted_n == moved_n) and not compose.get("stop_reason")
-        if consistent:
-            msg = f"✉️📝 Messaged + noted + moved to 'contacted': {messaged_n} candidate(s)."
-        else:
-            msg = (f"✉️ Messaged {messaged_n} · 📝 noted {noted_n} · moved to 'contacted' {moved_n}"
-                   + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
-        if more:
-            msg += " Continuing with the remaining uncontacted candidates…"
-        await self._push_flow_status(
-            job_id=job_id, connector_id=connector_id, status="running" if more else "done",
-            event_kind=EVENT_MESSAGE, run_id=run.id, message=msg,
+        progressed = bool(messaged_n or skipped_n)
+        can_chain = (
+            more and pipeline.get("send") and progressed
+            and not pipeline.get("max_recipients")
+            and chain_index < settings.recruiter_message_max_continuations
         )
-        # More uncontacted pages remain (the run stopped at its time budget). Re-invoke the same
-        # send so a fresh daemon claim drains the rest — moved-to-contacted candidates have left
-        # the uncontacted stage, so this strictly converges (ends in "no_uncontacted").
         cont_run_id = None
-        if more and pipeline.get("send") and messaged_n and not pipeline.get("max_recipients"):
+        if can_chain:
             try:
                 cont_run_id = await self.send_messages(
                     job_id, subject=subject, body=pipeline.get("body"), send=True,
+                    batch_size=pipeline.get("batch_size"),
+                    deferred_urls=deferred_urls,
+                    chain={**totals, "index": chain_index + 1},
                 )
             except Exception:  # noqa: BLE001 — continuation is best-effort
                 logger.exception("recruiter pipeline: failed to continue message drain (job %s)", job_id)
-        return {"stage": "message", "sent": True, "outreach": res,
+        # Chatter: ONE final summary for the whole chain (intermediate runs update the status
+        # only — an empty `message` posts no chatter line).
+        if cont_run_id:
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_MESSAGE, run_id=run.id, message="",
+            )
+        else:
+            consistent = (totals["messaged"] == totals["noted"] == totals["moved"]) and not compose.get("stop_reason")
+            if consistent:
+                msg = (f"✉️📝 Outreach complete — messaged + noted + moved to 'contacted': "
+                       f"{totals['messaged']} candidate(s).")
+            else:
+                msg = (f"✉️ Messaged {totals['messaged']} · 📝 noted {totals['noted']} · moved to "
+                       f"'contacted' {totals['moved']}"
+                       + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
+            if totals["skipped"]:
+                msg += (f" ⏭️ {totals['skipped']} skipped — LinkedIn can't message them right now "
+                        f"(24h rule / already contacted by a teammate); they stay uncontacted and "
+                        f"will be picked up by the next send.")
+            if more and not can_chain:
+                msg += " Uncontacted candidates remain — run the send again to continue."
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_MESSAGE, run_id=run.id, message=msg,
+            )
+        return {"stage": "message", "sent": bool(messaged_n), "outreach": res,
                 "messaged_count": messaged_n, "noted_count": noted_n, "moved_count": moved_n,
+                "skipped_count": skipped_n, "chain_totals": totals, "chain_index": chain_index,
                 "more_remaining": more, "continuation_run_id": cont_run_id}
 
     async def _default_note_text(self, job_id, position: str | None,
@@ -1790,7 +1829,10 @@ class RecruiterPipelineService:
 
     async def send_messages(self, job_id, subject: str | None = None,
                             body: str | None = None, send: bool = False,
-                            max_recipients: int | None = None) -> str | None:
+                            max_recipients: int | None = None,
+                            batch_size: int | None = None,
+                            deferred_urls: list[str] | None = None,
+                            chain: dict | None = None) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
         candidates with a template body. Fires the recruiter_message_compose run
         (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
@@ -1799,9 +1841,19 @@ class RecruiterPipelineService:
         → _after_message → push_outreach_update marks the messaged leads in Odoo.
 
         Recipients = the project's UNCONTACTED candidates: the compose strategy switches
-        to LinkedIn's native "uncontacted" pipeline stage and select-alls it, so
-        already-contacted/replied candidates are never re-messaged. It reports exactly
-        the rows it selected so the backend marks precisely those in Odoo.
+        to LinkedIn's native "uncontacted" pipeline stage and works through it in small
+        batches (`batch_size`, default `recruiter_message_batch_size`), reporting exactly
+        the rows it messaged so the backend marks precisely those in Odoo.
+
+        A batch whose composer reports ineligible recipients ("N recipients cannot be
+        contacted more than once within 24 hours" / "…contacted by someone on your team")
+        is DEFERRED WHOLE — LinkedIn never says WHICH of them it would silently drop, so
+        messaging it would break the messaged == noted == moved guarantee. Deferred URLs
+        come back in the result and are carried forward via `deferred_urls` so the chain
+        converges instead of re-hitting the same blocked people.
+
+        `chain` accumulates the running totals across the chained runs so only the LAST
+        run posts a summary to the Odoo chatter.
         """
         wf = settings.recruiter_message_workflow_id
         if not wf:
@@ -1843,6 +1895,10 @@ class RecruiterPipelineService:
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
         cap = int(max_recipients) if max_recipients and int(max_recipients) > 0 else None
+        batch = int(batch_size) if batch_size and int(batch_size) > 0 else settings.recruiter_message_batch_size
+        deferred = [u for u in (deferred_urls or []) if u]
+        chain_ctx = dict(chain or {})
+        chain_ctx.setdefault("index", 0)
         pipeline_ctx = {
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
@@ -1853,6 +1909,9 @@ class RecruiterPipelineService:
             "body": body,
             "note_text": note_text,
             "max_recipients": cap,
+            "batch_size": batch,
+            "deferred_urls": deferred,
+            "chain": chain_ctx,
             "send": bool(send),
         }
         runtime_params = {
@@ -1860,6 +1919,8 @@ class RecruiterPipelineService:
             "subject": subject,
             "body": body,
             "note_text": note_text,
+            "batch_size": str(batch),
+            "skip_urls": json.dumps(deferred) if deferred else "",
             "send": "true" if send else "false",
         }
         if cap is not None:

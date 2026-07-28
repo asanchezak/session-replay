@@ -1,6 +1,6 @@
 {
   "name": "LinkedIn Recruiter: compose bulk InMail from a template ({Nombre} chip) — gated",
-  "description": "Messages a project's UNCONTACTED candidates with a template {{body}} in a UNIFIED per-page loop: for each page of the native 'uncontacted' stage (SHORTLISTED) it messages → adds the {{note_text}} contact note → moves that page to 'contacted', so messaged == noted == moved. Replaces each literal {Name}/{Nombre} token with the LinkedIn variable CHIP. Sets the subject (handles the subject-reveal quirk). send=false (default) STOPS for a snapshot preview (page 1, no mutation); send=true sends REAL InMail + notes + moves. Params: project_url, body, subject, note_text, send.",
+  "description": "Messages a project's UNCONTACTED candidates with a template {{body}} in a UNIFIED per-BATCH loop: it takes {{batch_size}} (default 5) candidates from the native 'uncontacted' stage (SHORTLISTED) at a time and messages → adds the {{note_text}} contact note → moves that batch to 'contacted', so messaged == noted == moved. A batch whose composer reports ineligible recipients ('N recipients cannot be contacted more than once within 24 hours' / '…contacted by someone on your team' — LinkedIn gives a COUNT, never WHO) is SKIPPED WHOLE: no send, no note, no move; those URLs come back in `skipped` and are passed to the next chained run as {{skip_urls}}. Replaces each literal {Name}/{Nombre} token with the LinkedIn variable CHIP. Sets the subject (handles the subject-reveal quirk). send=false (default) STOPS for a snapshot preview (one batch, no mutation); send=true sends REAL InMail + notes + moves. Params: project_url, body, subject, note_text, batch_size, skip_urls, max_recipients, send.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
     {
@@ -26,6 +26,8 @@
           "body": "{{body}}",
           "subject": "{{subject}}",
           "note_text": "{{note_text}}",
+          "batch_size": "{{batch_size}}",
+          "skip_urls": "{{skip_urls}}",
           "max_recipients": "{{max_recipients}}",
           "send": "{{send}}"
         }

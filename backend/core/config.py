@@ -136,6 +136,16 @@ class Settings(BaseSettings):
     # the anti-bot load on the sensitive seat; the remainder drains over subsequent
     # searches (re-detection + dedup). Env: RECRUITER_MAX_SWEEP_ARCHIVES_PER_RUN.
     recruiter_max_sweep_archives_per_run: int = 10
+    # Bulk outreach batching. LinkedIn's composer reports ineligible recipients ("N recipients
+    # cannot be contacted more than once within 24 hours", "…contacted by someone on your team")
+    # as a COUNT ONLY and silently drops them, so a batch showing any such notice is skipped
+    # WHOLE to keep messaged == noted == moved exact. Small batches keep that collateral small.
+    # Env: RECRUITER_MESSAGE_BATCH_SIZE.
+    recruiter_message_batch_size: int = 5
+    # A send spans many chained runs (each bounded by the daemon's 240s per-step watchdog).
+    # Hard stop on the chain length so a pathological loop can't run forever.
+    # Env: RECRUITER_MESSAGE_MAX_CONTINUATIONS.
+    recruiter_message_max_continuations: int = 40
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True
