@@ -126,6 +126,10 @@ DEFAULT_MESSAGE_BODY = (
 # the Odoo position — composed in _default_note_text from the job context + connector URL.
 DEFAULT_NOTE_PREFIX = "Contacted - "
 DEFAULT_CONTACTED_BY = "Automation"
+# Stamped on candidates a TEAMMATE already contacted this month (LinkedIn's composer says so).
+# We don't message them; this note + the move to 'contacted' retires them from the send queue so
+# every future send stops re-scanning them (PROD job 290: 5 straight batches were 100% these).
+DEFAULT_SKIP_NOTE_PREFIX = "Already contacted this month by the team - "
 
 
 def _default_subject(position: str | None) -> str:
@@ -1388,6 +1392,44 @@ class RecruiterPipelineService:
                     )
                 except Exception:  # noqa: BLE001 — mirroring is best-effort
                     logger.exception("recruiter pipeline: failed to mirror contact note for %s (run %s)", purl, run.id)
+        # Candidates a TEAMMATE already contacted this month: not messaged, but the strategy
+        # retired them from the queue (note + move to 'contacted'). Mirror that into Odoo so the
+        # position shows WHY they were skipped and they stop looking like untouched leads.
+        team_rows = [r for r in skipped
+                     if isinstance(r, dict) and r.get("reason") == "team_contacted"]
+        team_urls = [(r.get("profile_url") or "").strip() for r in team_rows]
+        team_urls = [u for u in team_urls if u]
+        if team_urls:
+            skip_note = pipeline.get("skip_note_text") or ""
+            if skip_note:
+                lkey = f"team-contacted-note:job{job_id}"
+                for purl in team_urls:
+                    try:
+                        await self.push.push_candidate_notes(
+                            run_id=run.id, connector_id=connector_id, profile_url=purl,
+                            notes=[{"body": skip_note, "key": lkey}], pushed=[],
+                        )
+                    except Exception:  # noqa: BLE001 — mirroring is best-effort
+                        logger.exception(
+                            "recruiter pipeline: failed to mirror team-contacted note for %s (run %s)",
+                            purl, run.id,
+                        )
+            # Flip the leads' outreach_status so they leave the "to contact" pool. Degrades
+            # quietly while akcr hasn't rolled out the new status (endpoint 404) — the LinkedIn
+            # move + the candidate note already retired them.
+            try:
+                res_skip = await self.push.push_leads_contacted_by_team(
+                    run_id=run.id, job_id=job_id, connector_id=connector_id,
+                    profile_urls=team_urls, note=pipeline.get("skip_note_text") or "",
+                )
+                logger.info(
+                    "recruiter pipeline: job %s — %s candidate(s) already contacted by the team → %s",
+                    job_id, len(team_urls), res_skip,
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "recruiter pipeline: failed to push team-contacted leads (job %s)", job_id
+                )
         # Accumulate the CHAIN totals: one send spans many runs (5 candidates per composer,
         # ~2 batches per run under the daemon watchdog), and only the LAST run posts chatter.
         chain = dict(pipeline.get("chain") or {})
@@ -1397,11 +1439,16 @@ class RecruiterPipelineService:
             "noted": int(chain.get("noted") or 0) + noted_n,
             "moved": int(chain.get("moved") or 0) + moved_n,
             "skipped": int(chain.get("skipped") or 0) + skipped_n,
+            "retired": int(chain.get("retired") or 0) + int(compose.get("skipped_moved_count") or 0),
         }
         # Deferred candidates carry forward so the next run doesn't re-pick the same blocked
-        # people (that would burn its whole budget on them and never drain the stage).
+        # people (that would burn its whole budget on them and never drain the stage). RETIRED
+        # ones are excluded: they already left the uncontacted stage, so carrying them would only
+        # bloat the skip list the strategy has to scroll past on every batch.
         deferred_urls = list(pipeline.get("deferred_urls") or [])
         for row in skipped:
+            if isinstance(row, dict) and row.get("retired"):
+                continue
             url = (row.get("profile_url") or "").strip() if isinstance(row, dict) else str(row or "").strip()
             if url and url not in deferred_urls:
                 deferred_urls.append(url)
@@ -1440,10 +1487,14 @@ class RecruiterPipelineService:
                 msg = (f"✉️ Messaged {totals['messaged']} · 📝 noted {totals['noted']} · moved to "
                        f"'contacted' {totals['moved']}"
                        + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
-            if totals["skipped"]:
-                msg += (f" ⏭️ {totals['skipped']} skipped — LinkedIn can't message them right now "
-                        f"(24h rule / already contacted by a teammate); they stay uncontacted and "
-                        f"will be picked up by the next send.")
+            retired = totals.get("retired") or 0
+            if retired:
+                msg += (f" 🤝 {retired} skipped because a teammate already contacted them this "
+                        f"month — noted and moved to 'contacted' so they're out of the queue.")
+            deferred_only = (totals["skipped"] or 0) - retired
+            if deferred_only > 0:
+                msg += (f" ⏭️ {deferred_only} skipped — LinkedIn won't message them again within "
+                        f"24h; they stay uncontacted and the next send picks them up.")
             if more and not can_chain:
                 msg += " Uncontacted candidates remain — run the send again to continue."
             await self._push_flow_status(
@@ -1452,7 +1503,8 @@ class RecruiterPipelineService:
             )
         return {"stage": "message", "sent": bool(messaged_n), "outreach": res,
                 "messaged_count": messaged_n, "noted_count": noted_n, "moved_count": moved_n,
-                "skipped_count": skipped_n, "chain_totals": totals, "chain_index": chain_index,
+                "skipped_count": skipped_n, "team_contacted_count": len(team_urls),
+                "chain_totals": totals, "chain_index": chain_index,
                 "more_remaining": more, "continuation_run_id": cont_run_id}
 
     async def _default_note_text(self, job_id, position: str | None,
@@ -1463,6 +1515,19 @@ class RecruiterPipelineService:
         pos = (position or "").strip()
         parts = [f"{DEFAULT_NOTE_PREFIX}{pos}".strip(" -") if pos else "Contacted",
                  f"by: {contacted_by}"]
+        ep = await self.push._connector_endpoint(connector_id)
+        if ep:
+            base, _key = ep
+            parts.append(f"{base.rstrip('/')}/web#id={job_id}&model=hr.job&view_type=form")
+        return " · ".join(parts)
+
+    async def _default_skip_note_text(self, job_id, position: str | None, connector_id) -> str:
+        """The note stamped on candidates skipped because a teammate already contacted them:
+        "Already contacted this month by the team - <position> · skipped by: Automation · <link>"."""
+        pos = (position or "").strip()
+        parts = [f"{DEFAULT_SKIP_NOTE_PREFIX}{pos}".strip(" -") if pos
+                 else DEFAULT_SKIP_NOTE_PREFIX.strip(" -"),
+                 f"skipped by: {DEFAULT_CONTACTED_BY}"]
         ep = await self.push._connector_endpoint(connector_id)
         if ep:
             base, _key = ep
@@ -1891,6 +1956,11 @@ class RecruiterPipelineService:
         note_text = await self._default_note_text(
             job_id, ctx.get("position"), ctx.get("connector_id"),
         )
+        # Note for a batch skipped because a teammate already contacted them this month — the
+        # strategy also moves those to 'contacted', retiring them from the queue.
+        skip_note_text = await self._default_skip_note_text(
+            job_id, ctx.get("position"), ctx.get("connector_id"),
+        )
         project_url = (
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
@@ -1908,6 +1978,7 @@ class RecruiterPipelineService:
             "subject": subject,
             "body": body,
             "note_text": note_text,
+            "skip_note_text": skip_note_text,
             "max_recipients": cap,
             "batch_size": batch,
             "deferred_urls": deferred,
@@ -1919,6 +1990,7 @@ class RecruiterPipelineService:
             "subject": subject,
             "body": body,
             "note_text": note_text,
+            "skip_note_text": skip_note_text,
             "batch_size": str(batch),
             "skip_urls": json.dumps(deferred) if deferred else "",
             "send": "true" if send else "false",

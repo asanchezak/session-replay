@@ -26,6 +26,7 @@ def _make_svc(db_session, monkeypatch, *, compose, pipeline_extra=None):
         read_message_compose_result=AsyncMock(return_value=compose),
         push_outreach_update=AsyncMock(return_value={"updated": 1}),
         push_candidate_notes=AsyncMock(return_value={"pushed": 1}),
+        push_leads_contacted_by_team=AsyncMock(return_value={"pushed": 1}),
         push_flow_status=AsyncMock(return_value={"pushed": 1}),
     )
     svc.send_messages = AsyncMock(return_value="next-run-id")
@@ -33,6 +34,7 @@ def _make_svc(db_session, monkeypatch, *, compose, pipeline_extra=None):
     pipeline = {
         "job_id": "290", "send": True, "subject": "Job opportunity", "body": "Hi {Nombre},",
         "note_text": "Contacted - Staff SWE", "batch_size": 5,
+        "skip_note_text": "Already contacted this month by the team - Staff SWE",
     }
     pipeline.update(pipeline_extra or {})
     run = SimpleNamespace(id="msg-run-id", origin={})
@@ -72,6 +74,45 @@ async def test_fully_deferred_run_still_chains(db_session: AsyncSession, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_team_contacted_are_retired_not_carried_forward(
+    db_session: AsyncSession, monkeypatch,
+):
+    """A teammate already contacted them this month → the strategy noted them and moved them to
+    'contacted', so Odoo gets the note + status and they must NOT be carried in deferred_urls
+    (they've left the uncontacted stage; carrying them just bloats the scroll-past list). The
+    24h-blocked ones ARE carried, since they stay uncontacted for a later retry."""
+    svc, run, pipeline = _make_svc(db_session, monkeypatch, compose={
+        "ok": True, "sent": False, "reason": "all_deferred", "more_remaining": True,
+        "messaged_count": 0, "noted_count": 0, "moved_count": 0, "recipients": [],
+        "skipped_noted_count": 2, "skipped_moved_count": 2, "skipped_count": 3,
+        "skipped": [
+            {"profile_url": "https://www.linkedin.com/talent/profile/T1", "name": "T1",
+             "reason": "team_contacted", "retired": True},
+            {"profile_url": "https://www.linkedin.com/talent/profile/T2", "name": "T2",
+             "reason": "team_contacted", "retired": True},
+            {"profile_url": "https://www.linkedin.com/talent/profile/R1", "name": "R1",
+             "reason": "rate_limited_24h"},
+        ],
+    })
+    res = await svc._after_message(run, pipeline, connector_id="c", job_id="290")
+    # Odoo learns WHY they were skipped: a per-candidate note + the lead status.
+    assert svc.push.push_candidate_notes.await_count == 2
+    svc.push.push_leads_contacted_by_team.assert_awaited_once()
+    assert svc.push.push_leads_contacted_by_team.await_args.kwargs["profile_urls"] == [
+        "https://www.linkedin.com/talent/profile/T1",
+        "https://www.linkedin.com/talent/profile/T2",
+    ]
+    assert res["team_contacted_count"] == 2
+    # Only the 24h one carries forward.
+    assert svc.send_messages.await_args.kwargs["deferred_urls"] == [
+        "https://www.linkedin.com/talent/profile/R1",
+    ]
+    assert res["chain_totals"]["retired"] == 2
+    # Nobody was messaged → no outreach rows.
+    assert svc.push.push_outreach_update.await_args.kwargs["messaged"] == []
+
+
+@pytest.mark.asyncio
 async def test_chain_totals_accumulate_and_only_last_run_posts_chatter(
     db_session: AsyncSession, monkeypatch,
 ):
@@ -89,7 +130,8 @@ async def test_chain_totals_accumulate_and_only_last_run_posts_chatter(
     # No more_remaining → the chain ends here.
     assert res["continuation_run_id"] is None
     svc.send_messages.assert_not_awaited()
-    assert res["chain_totals"] == {"messaged": 20, "noted": 20, "moved": 20, "skipped": 10}
+    assert res["chain_totals"] == {"messaged": 20, "noted": 20, "moved": 20, "skipped": 10,
+                                   "retired": 0}
     msgs = _chatter(svc)
     assert len(msgs) == 1
     assert "20 candidate(s)" in msgs[0]

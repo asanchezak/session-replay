@@ -321,8 +321,15 @@ function makePipelineOps(page, ctx) {
     const tried = new Set();
     const diag = { rows_seen: 0, clicked: 0, fails: 0, skipped_rows: 0 };
     const t0 = Date.now();
+    // Skipping/targeting a set means scrolling PAST those rows before anything is clickable, and
+    // the list is virtualized — so scale the patience with the set size (the defaults are tuned
+    // for "click the first N", which gave up after ~25 carried skips and reported nothing
+    // selectable → a bogus run failure).
+    const extra = Math.max(skip.length, only.length);
+    const timeBudget = Math.min(60000 + extra * 1200, 110000);
+    const stableLimit = 5 + Math.min(Math.ceil(extra / 5), 8);
     let clicked = 0, stable = 0;
-    for (let i = 0; i < 200 && Date.now() - t0 < 60000; i++) {
+    for (let i = 0; i < 200 + extra * 4 && Date.now() - t0 < timeBudget; i++) {
       if (clicked >= want) break;
       // Find the next unchecked, not-yet-tried row: capture its checkbox INPUT id (to verify
       // .checked) + a label/input click-point. The <input.small-input> is visually hidden.
@@ -364,7 +371,7 @@ function makePipelineOps(page, ctx) {
           window.scrollBy(0, 500);
         }).catch(() => {});
         await sleep(500 + Math.floor(orand() * 250));
-        if (++stable >= 5) break;  // list exhausted (fewer than `want` available)
+        if (++stable >= stableLimit) break;  // list exhausted (fewer than `want` available)
         continue;
       }
       stable = 0;
@@ -518,6 +525,10 @@ function readMessageComposeOptions(step) {
     // Contact note added (and the move to "contacted") for EACH messaged page — the
     // unified loop applies message+note+move to the same selection so the three counts match.
     noteText: String(method.note_text ?? "").trim(),
+    // Note stamped on a batch skipped because a TEAMMATE already contacted them this month.
+    // Present ⇒ those candidates are also moved to 'contacted', retiring them from the queue.
+    // Empty ⇒ they're only deferred (older backend, or deliberately).
+    skipNoteText: String(method.skip_note_text ?? "").trim(),
     // Bounded batch: cap the run to EXACTLY N uncontacted candidates (per-row selection, single
     // batch, no auto-drain). null/absent ⇒ the run loops batches until its time budget and
     // reports more_remaining so the backend chains another run.
@@ -710,7 +721,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     return {
       handled: true,
       extraction: { message_compose_result: r },
-      log: `recruiter_message_compose ok=${r.ok} sent=${r.sent} messaged=${r.messaged_count} noted=${r.noted_count} moved=${r.moved_count} skipped=${r.skipped_count} recipients=${r.recipient_count} batches=${r.batches} more_remaining=${!!r.more_remaining} reason="${r.reason || ""}" stop="${r.stop_reason || ""}"`,
+      log: `recruiter_message_compose ok=${r.ok} sent=${r.sent} messaged=${r.messaged_count} noted=${r.noted_count} moved=${r.moved_count} skipped=${r.skipped_count} retired=${r.skipped_moved_count} recipients=${r.recipient_count} batches=${r.batches} more_remaining=${!!r.more_remaining} reason="${r.reason || ""}" stop="${r.stop_reason || ""}"`,
     };
   }
 
@@ -1817,49 +1828,89 @@ async function addProfileToProject(page, options, orand, runtime) {
 // postpones a batch to the next run; a false negative silently corrupts the accounting.
 // Returns { blocking, notices:[text], root_found, root_html } — root_html (truncated) is kept in
 // the run's diag so the real selectors + the Spanish strings can be tuned OFFLINE.
-// PHRASES that unambiguously mean "LinkedIn will not deliver to some of these recipients".
-// EN + ES (the seat's Recruiter locale flips). Safe to match against the composer's whole text,
-// so detection does NOT depend on getting the notice element's selector right.
-export const COMPOSER_NOTICE_PATTERNS = [
+// TWO notice families, because they need OPPOSITE handling:
+//
+// RATE24 — "N recipients cannot be contacted more than once within 24 hours. They will not
+//   receive this message." LinkedIn genuinely DROPS them. Temporary (24h) ⇒ defer the batch and
+//   leave everyone uncontacted so a later send retries them. NEVER mark them contacted.
+// TEAM — "N recipients have been contacted by someone on your team this month." Informational:
+//   Send stays enabled and they WOULD receive it. A colleague is already working them, so we
+//   skip them — and (user's call, 2026-07-29) take them OUT of the queue: note + move to
+//   'contacted' in LinkedIn and flag them in Odoo, so every future send doesn't re-scan them.
+//   PROD job 290 proved why this matters: 5 consecutive batches were 100% team-contacted.
+//
+// EN + ES (the seat's Recruiter locale flips). These are safe to match against the composer's
+// whole text, so detection does NOT depend on getting the notice element's selector right.
+export const COMPOSER_NOTICE_RATE24_PATTERNS = [
   "cannot(?:not)? be contacted more than once within 24\\s*hours",
   "can't be contacted more than once within 24\\s*hours",
   "will not receive this message",
   "won't receive this message",
-  "(?:have|has) been contacted by someone on your team",
   "no se pued[ee]n? contactar",
   "no recibir[áa]n? (?:este|el) mensaje",
   "m[áa]s de una vez (?:en|dentro de) (?:las\\s*)?24\\s*horas",
+];
+export const COMPOSER_NOTICE_TEAM_PATTERNS = [
+  "(?:have|has) been contacted by someone on your team",
   "contactad[oa]s? por (?:alguien|otra persona|otro miembro)",
+];
+export const COMPOSER_NOTICE_PATTERNS = [
+  ...COMPOSER_NOTICE_RATE24_PATTERNS, ...COMPOSER_NOTICE_TEAM_PATTERNS,
 ];
 // COUNT-shaped patterns ("6 recipients …"). Only applied to a text we KNOW is a notice element —
 // the composer's own recipient row can legitimately say "25 recipients", which must not defer.
+// Kind is unknown from a count alone ⇒ treated as RATE24 (the conservative one: never marks
+// anybody contacted).
 export const COMPOSER_NOTICE_COUNT_PATTERNS = [
   "\\b\\d+\\s+recipients?\\b",
   "\\b\\d+\\s+destinatarios?\\b",
 ];
 
-function _anyMatch(text, patterns) {
+function _hit(text, patterns) {
   const s = String(text || "");
-  return patterns.some((src) => new RegExp(src, "i").test(s));
+  return patterns.find((src) => new RegExp(src, "i").test(s)) || null;
 }
 
 // `texts` = notice ELEMENTS (count patterns apply); `scopedText` = the composer's whole text
 // minus our typed body/subject (phrase patterns only).
-export function noticesAreBlocking(texts, scopedText = "") {
-  const all = [...COMPOSER_NOTICE_PATTERNS, ...COMPOSER_NOTICE_COUNT_PATTERNS];
-  if ((texts || []).some((t) => _anyMatch(t, all))) return true;
-  return _anyMatch(scopedText, COMPOSER_NOTICE_PATTERNS);
+// Returns { blocking, kind: "rate_limited_24h"|"team_contacted"|null, matched, tier }.
+// RATE24 WINS when both are present: moving a merely-24h-blocked person to 'contacted' would
+// wrongly retire someone we never messaged.
+export function classifyNotices(texts, scopedText = "") {
+  const list = texts || [];
+  for (const fam of [
+    { kind: "rate_limited_24h", pats: COMPOSER_NOTICE_RATE24_PATTERNS },
+    { kind: "team_contacted", pats: COMPOSER_NOTICE_TEAM_PATTERNS },
+  ]) {
+    for (const t of list) {
+      const m = _hit(t, fam.pats);
+      if (m) return { blocking: true, kind: fam.kind, matched: m, tier: "notice_element" };
+    }
+    const m = _hit(scopedText, fam.pats);
+    if (m) return { blocking: true, kind: fam.kind, matched: m, tier: "composer_text" };
+  }
+  for (const t of list) {
+    const m = _hit(t, COMPOSER_NOTICE_COUNT_PATTERNS);
+    if (m) return { blocking: true, kind: "rate_limited_24h", matched: m, tier: "notice_count" };
+  }
+  return { blocking: false, kind: null, matched: null, tier: null };
 }
 
+export function noticesAreBlocking(texts, scopedText = "") {
+  return classifyNotices(texts, scopedText).blocking;
+}
+
+// Scrapes the composer's notice texts in-page, then classifies them OUT of page context with the
+// shared (unit-tested) classifier — one source of truth for the patterns.
 async function readComposerNotices(page) {
-  return page.evaluate((patterns) => {
+  const scraped = await page.evaluate(() => {
     const COMPOSER = "[data-test-compose-body], button[data-test-messaging-submit-btn], input[data-test-compose-subject-input]";
     let root = null;
     for (const el of document.querySelectorAll(COMPOSER)) {
       root = el.closest('[role="dialog"], .artdeco-modal, [data-test-modal]');
       if (root) break;
     }
-    if (!root) return { blocking: false, notices: [], root_found: false, root_html: "" };
+    if (!root) return { notices: [], root_found: false, root_html: "", scoped_text: "" };
     const NOTICE_SEL = [
       ".artdeco-inline-feedback", '[class*="inline-feedback"]', '[role="alert"]', '[role="status"]',
       '[data-test*="notice" i]', '[data-test*="warning" i]', '[data-test*="alert" i]',
@@ -1889,20 +1940,10 @@ async function readComposerNotices(page) {
       }
       scopedText = parts.join(" ");
     } catch { /* text walk is best-effort; tier A still applies */ }
-    const hit = (s, list) => list.find((src) => new RegExp(src, "i").test(s)) || null;
-    let matched = null, tier = null;
-    for (const t of texts) {
-      matched = hit(t, patterns.phrases) || hit(t, patterns.counts);
-      if (matched) { tier = "notice_element"; break; }
-    }
-    if (!matched) {
-      matched = hit(scopedText, patterns.phrases);
-      if (matched) tier = "composer_text";
-    }
-    return { blocking: !!matched, matched, tier, notices: texts, root_found: true,
+    return { notices: texts, root_found: true,
              scoped_text: scopedText.slice(0, 1200), root_html: (root.innerHTML || "").slice(0, 4000) };
-  }, { phrases: COMPOSER_NOTICE_PATTERNS, counts: COMPOSER_NOTICE_COUNT_PATTERNS })
-    .catch(() => ({ blocking: false, notices: [], root_found: false, root_html: "", error: true }));
+  }).catch(() => ({ notices: [], root_found: false, root_html: "", scoped_text: "", error: true }));
+  return { ...scraped, ...classifyNotices(scraped.notices, scraped.scoped_text) };
 }
 
 // Compose a bulk InMail to a project's ACTIVE candidates using a template body. The
@@ -1927,6 +1968,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   // The contact note added to each messaged page (unified loop). Empty ⇒ legacy single-page
   // behavior (message one page, no note/move) so an older backend that doesn't pass it is safe.
   const noteText = String(options.noteText || "").trim();
+  const skipNoteText = String(options.skipNoteText || "").trim();
   // Bounded batch: when set, message EXACTLY this many uncontacted candidates and do NOT
   // auto-continue (deliberate one-shot, manual/testing path). null ⇒ loop batches until the
   // time budget, then report more_remaining so the backend chains another run.
@@ -2143,8 +2185,8 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       // (no send, no note, no move): the accounting stays exact and they're retried later.
       const notices = await readComposerNotices(page);
       if (notices.blocking) {
-        await shot(`lote OMITIDO (destinatarios no contactables)`).catch(() => {});
-        return { sent: false, deferred: true, reason: "recipients_ineligible",
+        await shot(`lote OMITIDO (${notices.kind})`).catch(() => {});
+        return { sent: false, deferred: true, reason: notices.kind || "recipients_ineligible",
                  notices: notices.notices, notice_diag: notices, variableInserted, subjectSet };
       }
       if (!send) { await sleep(1200); return { sent: false, gated: true, notice_diag: notices, variableInserted, subjectSet }; }
@@ -2186,6 +2228,9 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
     const recipients = new Map();  // MESSAGED rows only (profile_url → row) — drives the Odoo update
     const skipped = new Map();     // DEFERRED rows (profile_url → {…, reason})
     let messaged = 0, noted = 0, moved = 0, batchesDone = 0;
+    // Kept SEPARATE from noted/moved: those must stay equal to `messaged` (the invariant the
+    // whole redesign exists to protect). These count the skip path's bookkeeping.
+    let skippedNoted = 0, skippedMoved = 0;
     let variableInserted = false, subjectSet = true;
     const diag = { batches: [], batch_size: batchSize, skip_urls_in: skipUrls.size };
     const MAX_ROUNDS = 12;
@@ -2225,14 +2270,23 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       const batchRows = sn.rows;
       diag.select = { want, ...sn.diag, selected: batchSel };
       if (!batchSel) {
-        // Nothing selectable: either the list is exhausted (everything left is deferred) or
-        // the checkboxes drifted. Only the FIRST round with nothing deferred is a real failure.
-        if (round === 0 && skipNow.size === 0) {
+        // Nothing selectable. With a carried skip set this is EXPECTED (everyone reachable in
+        // the list is already deferred) — a clean stop, never a failure: failing here marks the
+        // Odoo position failed for a run that did exactly what it should. Only "nothing to skip
+        // and still nothing selectable" is real checkbox/DOM drift.
+        if (skipNow.size === 0) {
           return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_none", diag };
         }
-        stopReason = "select_none";
-        moreRemaining = skipNow.size > 0 && round > 0;
-        break;
+        return { ok: true, sent: false, recipient_count: recipientCount,
+                 reason: "no_selectable_uncontacted", messaged_count: messaged,
+                 noted_count: noted, moved_count: moved,
+                 recipients: Array.from(recipients.values()),
+                 skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+                 skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
+                 batches: batchesDone, batch_size: batchSize,
+                 // Do NOT chain: another run would re-scan the same skipped list and stop again.
+                 variable_inserted: variableInserted, subject_set: subjectSet,
+                 stop_reason: "select_none", manage_url: manageUrl, diag };
       }
 
       const mr = await messageCurrentPage();
@@ -2256,21 +2310,47 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
                  var_diag: lastVarDiag, manage_url: manageUrl, diag };
       }
       if (mr.deferred) {
-        // LinkedIn flagged ineligible recipients in this batch but won't say which → skip the
-        // WHOLE batch: no send, no note, no move. They stay uncontacted and are retried by a
-        // later send (after the 24h window / once the teammate's outreach ages out).
+        // LinkedIn flagged ineligible recipients but won't say which → skip the WHOLE batch (no
+        // send). What happens next depends on WHY:
+        //   rate_limited_24h → temporary: leave them uncontacted, just don't re-pick them here.
+        //   team_contacted   → a colleague already worked them this month: RETIRE them from the
+        //     queue (note + move to 'contacted') so future sends stop re-scanning them.
+        const kind = mr.reason || "recipients_ineligible";
+        const retire = kind === "team_contacted" && !!skipNoteText;
+        await closeComposer();
+        await reloadStage();
+        let skipNoted = 0, skipMoved = 0, skipReason = null;
+        if (retire) {
+          const resel = await selectByUrls(batchRows.map((r) => r.profile_url).filter(Boolean));
+          const sel2 = resel.selected || batchSel;
+          let op = await openAddNote();
+          if (!op.opened) { await sleep(1500 + Math.floor(orand() * 500)); op = await openAddNote(); }
+          if (op.opened) {
+            await fillNote(skipNoteText);
+            const s = await saveNote();
+            if (s.ok) skipNoted = s.count || sel2; else skipReason = "skip_note_save_unverified";
+            const mv = await moveContacted();
+            if (mv.moved) skipMoved = mv.count || sel2;
+            else skipReason = skipReason || mv.reason || mv.retry_reason || "skip_move_failed";
+            await shot(`omitidos: nota+fase ${skipNoted}/${skipMoved}`).catch(() => {});
+          } else skipReason = "skip_note_open_failed";
+        }
+        skippedNoted += skipNoted;
+        skippedMoved += skipMoved;
         for (const r of batchRows) {
           if (!r.profile_url) continue;
-          skipped.set(r.profile_url, { ...r, reason: mr.reason || "recipients_ineligible" });
-          skipNow.add(r.profile_url);
+          skipped.set(r.profile_url, { ...r, reason: kind, retired: skipMoved > 0 });
+          // Retired candidates have LEFT the uncontacted stage, so they can't be re-picked and
+          // don't need to bloat skip_urls (a big skip set means a lot of scrolling per batch).
+          if (skipMoved === 0) skipNow.add(r.profile_url);
         }
         batchesDone++;
         diag.batches.push({ batch: batchesDone, selected: batchSel, deferred: batchSel,
-                            notices: mr.notices || [] });
-        await closeComposer();
-        await reloadStage();
+                            kind, retired: skipMoved, skip_noted: skipNoted,
+                            skip_reason: skipReason, notices: mr.notices || [] });
+        if (skipMoved > 0) await reloadStage();
         lastBatchMs = Date.now() - tBatch;
-        if (maxRecipients != null) { stopReason = "recipients_ineligible"; break; }
+        if (maxRecipients != null) { stopReason = kind; break; }
         continue;
       }
       if (!mr.sent) {
@@ -2281,6 +2361,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
           return { ok: false, sent: false, blocked: true, reason: stopReason,
                    recipient_count: recipientCount, messaged_count: 0, noted_count: 0, moved_count: 0,
                    recipients: [], skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+                   skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
                    batch_size: batchSize, variable_inserted: mr.variableInserted,
                    subject_set: mr.subjectSet, manage_url: manageUrl, diag };
         }
@@ -2358,6 +2439,7 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
              messaged_count: messaged, noted_count: noted, moved_count: moved,
              recipient_count: recipientCount, recipients: Array.from(recipients.values()),
              skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+             skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
              batches: batchesDone, batch_size: batchSize,
              ...(messaged === 0 && skipped.size > 0 ? { reason: "all_deferred" } : {}),
              ...(moreRemaining ? { more_remaining: true } : {}),

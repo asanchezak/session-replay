@@ -6,7 +6,36 @@
 // as a hard block. Now they defer the BATCH (LinkedIn never says WHICH recipients it drops).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { noticesAreBlocking } from "../runtime-strategies/recruiter.mjs";
+import { noticesAreBlocking, classifyNotices } from "../runtime-strategies/recruiter.mjs";
+
+// The two families need OPPOSITE handling, so misclassifying is worse than not detecting:
+// team_contacted RETIRES people (note + move to 'contacted'), rate_limited_24h must leave them
+// uncontacted for a later retry. Live proof this matters: on PROD job 290 five consecutive
+// batches were 100% team-contacted and zero were 24h.
+test("notices are classified into the right family", () => {
+  assert.equal(classifyNotices([
+    "7 recipients have been contacted by someone on your team this month. Remove",
+  ]).kind, "team_contacted");
+  assert.equal(classifyNotices([
+    "6 recipients cannot be contacted more than once within 24 hours. They will not receive this message.",
+  ]).kind, "rate_limited_24h");
+  // BOTH present → the conservative family wins; retiring a 24h-blocked person would mark
+  // someone contacted that we never messaged.
+  assert.equal(classifyNotices([
+    "7 recipients have been contacted by someone on your team this month. Remove",
+    "6 recipients cannot be contacted more than once within 24 hours. They will not receive this message.",
+  ]).kind, "rate_limited_24h");
+  // A bare count says nothing about which family → conservative.
+  assert.equal(classifyNotices(["6 recipients"]).kind, "rate_limited_24h");
+  assert.equal(classifyNotices([], "Compose Message To: View all 5 Send").kind, null);
+  // Spanish
+  assert.equal(classifyNotices([
+    "7 destinatarios han sido contactados por alguien de tu equipo este mes.",
+  ]).kind, "team_contacted");
+  assert.equal(classifyNotices([
+    "6 destinatarios no se pueden contactar más de una vez en 24 horas.",
+  ]).kind, "rate_limited_24h");
+});
 
 test("the real LinkedIn banners are detected", () => {
   assert.equal(noticesAreBlocking([
