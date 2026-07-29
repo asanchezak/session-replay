@@ -1817,25 +1817,38 @@ async function addProfileToProject(page, options, orand, runtime) {
 // postpones a batch to the next run; a false negative silently corrupts the accounting.
 // Returns { blocking, notices:[text], root_found, root_html } — root_html (truncated) is kept in
 // the run's diag so the real selectors + the Spanish strings can be tuned OFFLINE.
-// EN + ES families of the composer's ineligible-recipient notices. LinkedIn's Recruiter locale
-// flips on this seat, so both must match. Exported (with `noticesAreBlocking`) so the matcher
-// is unit-testable against the real banner strings without a browser.
+// PHRASES that unambiguously mean "LinkedIn will not deliver to some of these recipients".
+// EN + ES (the seat's Recruiter locale flips). Safe to match against the composer's whole text,
+// so detection does NOT depend on getting the notice element's selector right.
 export const COMPOSER_NOTICE_PATTERNS = [
-  "\\b\\d+\\s+recipients?\\b",
-  "cannot be contacted more than once within 24\\s*hours",
+  "cannot(?:not)? be contacted more than once within 24\\s*hours",
+  "can't be contacted more than once within 24\\s*hours",
   "will not receive this message",
-  "contacted by someone on your team",
-  "\\b\\d+\\s+destinatarios?\\b",
-  "no se puede contactar",
-  "no recibir[áa]n?\\b",
-  "24\\s*horas",
+  "won't receive this message",
+  "(?:have|has) been contacted by someone on your team",
+  "no se pued[ee]n? contactar",
+  "no recibir[áa]n? (?:este|el) mensaje",
+  "m[áa]s de una vez (?:en|dentro de) (?:las\\s*)?24\\s*horas",
   "contactad[oa]s? por (?:alguien|otra persona|otro miembro)",
-  "de tu equipo|de su equipo",
+];
+// COUNT-shaped patterns ("6 recipients …"). Only applied to a text we KNOW is a notice element —
+// the composer's own recipient row can legitimately say "25 recipients", which must not defer.
+export const COMPOSER_NOTICE_COUNT_PATTERNS = [
+  "\\b\\d+\\s+recipients?\\b",
+  "\\b\\d+\\s+destinatarios?\\b",
 ];
 
-export function noticesAreBlocking(texts) {
-  return (texts || []).some((t) =>
-    COMPOSER_NOTICE_PATTERNS.some((src) => new RegExp(src, "i").test(String(t || ""))));
+function _anyMatch(text, patterns) {
+  const s = String(text || "");
+  return patterns.some((src) => new RegExp(src, "i").test(s));
+}
+
+// `texts` = notice ELEMENTS (count patterns apply); `scopedText` = the composer's whole text
+// minus our typed body/subject (phrase patterns only).
+export function noticesAreBlocking(texts, scopedText = "") {
+  const all = [...COMPOSER_NOTICE_PATTERNS, ...COMPOSER_NOTICE_COUNT_PATTERNS];
+  if ((texts || []).some((t) => _anyMatch(t, all))) return true;
+  return _anyMatch(scopedText, COMPOSER_NOTICE_PATTERNS);
 }
 
 async function readComposerNotices(page) {
@@ -1853,6 +1866,7 @@ async function readComposerNotices(page) {
       '[data-test*="banner" i]', ".artdeco-notification",
     ].join(", ");
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    // TIER A — texts of elements we believe ARE notices (count patterns apply to these).
     const texts = [];
     for (const n of root.querySelectorAll(NOTICE_SEL)) {
       // Never read our own message body / subject back as a "notice".
@@ -1860,9 +1874,35 @@ async function readComposerNotices(page) {
       const t = clean(n.innerText || n.textContent);
       if (t && !texts.includes(t)) texts.push(t);
     }
-    const blocking = texts.some((t) => patterns.some((src) => new RegExp(src, "i").test(t)));
-    return { blocking, notices: texts, root_found: true, root_html: (root.innerHTML || "").slice(0, 4000) };
-  }, COMPOSER_NOTICE_PATTERNS).catch(() => ({ blocking: false, notices: [], root_found: false, root_html: "", error: true }));
+    // TIER B — the composer's whole text MINUS our typed body/subject. Selector-independent
+    // safety net: the notice element's markup is unverified, but these phrases are verbatim
+    // from the live composer, so phrase-matching the modal text can't miss them.
+    let scopedText = "";
+    try {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const parts = [];
+      while (walker.nextNode()) {
+        const p = walker.currentNode.parentElement;
+        if (!p || p.closest(".ql-editor, [data-test-compose-body]")) continue;
+        const t = clean(walker.currentNode.nodeValue);
+        if (t) parts.push(t);
+      }
+      scopedText = parts.join(" ");
+    } catch { /* text walk is best-effort; tier A still applies */ }
+    const hit = (s, list) => list.find((src) => new RegExp(src, "i").test(s)) || null;
+    let matched = null, tier = null;
+    for (const t of texts) {
+      matched = hit(t, patterns.phrases) || hit(t, patterns.counts);
+      if (matched) { tier = "notice_element"; break; }
+    }
+    if (!matched) {
+      matched = hit(scopedText, patterns.phrases);
+      if (matched) tier = "composer_text";
+    }
+    return { blocking: !!matched, matched, tier, notices: texts, root_found: true,
+             scoped_text: scopedText.slice(0, 1200), root_html: (root.innerHTML || "").slice(0, 4000) };
+  }, { phrases: COMPOSER_NOTICE_PATTERNS, counts: COMPOSER_NOTICE_COUNT_PATTERNS })
+    .catch(() => ({ blocking: false, notices: [], root_found: false, root_html: "", error: true }));
 }
 
 // Compose a bulk InMail to a project's ACTIVE candidates using a template body. The
