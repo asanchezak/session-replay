@@ -2350,7 +2350,10 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
                             skip_reason: skipReason, notices: mr.notices || [] });
         if (skipMoved > 0) await reloadStage();
         lastBatchMs = Date.now() - tBatch;
-        if (maxRecipients != null) { stopReason = kind; break; }
+        // A capped run caps how many are MESSAGED, so a batch that messaged nobody must not
+        // end it — otherwise a project like job 290 (60 team-contacted at the front of the
+        // queue) would retire 5 and stop, sending nothing, on every automatic tick.
+        if (maxRecipients != null && messaged >= maxRecipients) { stopReason = kind; break; }
         continue;
       }
       if (!mr.sent) {

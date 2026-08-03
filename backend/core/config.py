@@ -146,6 +146,19 @@ class Settings(BaseSettings):
     # Hard stop on the chain length so a pathological loop can't run forever.
     # Env: RECRUITER_MESSAGE_MAX_CONTINUATIONS.
     recruiter_message_max_continuations: int = 40
+    # AUTO-OUTREACH: message newly-added candidates without a human pressing the Odoo button.
+    # Fires from the recommendations terminal hook (that cron adds ~6 candidates every 30-90
+    # min). This sends REAL InMail autonomously on a sensitive account, so it is guard-heavy:
+    # it only ever reuses copy a human already sent for that position, and it is bounded by the
+    # daily cap below. KILL SWITCH: set false + restart the backend.
+    # Env: RECRUITER_AUTO_MESSAGE_ENABLED.
+    recruiter_auto_message_enabled: bool = True
+    # Max InMails per position per ROLLING 24h from the automation (manual sends count toward
+    # it too, so a human blast can't be doubled). Passed as max_recipients, which also disables
+    # the send's run-chaining — one tick can never fan out. NOTE: per POSITION, while credits
+    # and LinkedIn's limits are per ACCOUNT; revisit as a global cap if several positions
+    # switch on. Env: RECRUITER_AUTO_MESSAGE_DAILY_CAP.
+    recruiter_auto_message_daily_cap: int = 20
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True

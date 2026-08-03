@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -223,7 +224,13 @@ class RecruiterPipelineService:
         a chatter note to the Odoo position so the recruiter knows the action is queued
         (not lost). Skips when the seat is warm, or when state is briefly unknown right
         after a backend restart (before the first heartbeat) so we don't cry wolf.
-        Best-effort. Part E's dedup means this posts once per unavailable episode."""
+        Best-effort. Part E's dedup means this posts once per unavailable episode.
+
+        AUTO runs never post it: they fire unattended every 30-90 min, so a seat that stays
+        walled overnight would paper the position with notes about an action nobody asked
+        for. The run still queues and drains when the seat warms up."""
+        if pipeline.get("auto"):
+            return
         try:
             from api.v1.daemon import latest_seat_warm, operator_online
 
@@ -275,6 +282,72 @@ class RecruiterPipelineService:
                 if str((o.get("pipeline") or {}).get("job_id")) == str(job_id):
                     return r
         return None
+
+    async def _last_human_message(self, job_id) -> tuple[str, str] | None:
+        """The subject+body of the most recent send a HUMAN made for this position, or None.
+
+        This is what makes auto-outreach safe to ship without an akcr change: the backend
+        never reads `hr.job.recruiter_message_template` (that field feeds the Odoo wizard),
+        and `send_messages(body=None)` would fall back to the GENERIC DEFAULT_MESSAGE_BODY —
+        i.e. an automatic send would quietly deliver different copy than the recruiter's.
+        So the automation reuses copy a human already approved for THIS position, and a
+        position with no prior human send simply never auto-sends.
+
+        Runs stamped `pipeline.auto` are EXCLUDED: they also complete with send=True and a
+        body, so accepting them would turn "a human approved this" into "something sent this
+        before" and let a disable/re-enable cycle bootstrap from the feature's own output.
+        """
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_MESSAGE or r.status != RunStatus.COMPLETED.value:
+                continue
+            p = o.get("pipeline") or {}
+            if str(p.get("job_id")) != str(job_id) or not p.get("send") or p.get("auto"):
+                continue
+            body = (p.get("body") or "").strip()
+            if body:
+                return (p.get("subject") or "").strip(), body
+        return None
+
+    async def _sent_last_24h(self, job_id) -> int:
+        """How many candidates were actually MESSAGED for this position in the last rolling
+        24h — the automation's daily budget. Counts MANUAL sends too, so a human blast can't
+        be doubled by the automation on the same day.
+
+        Rolling window, not a calendar day: no midnight burst, and it self-heals. Only
+        COMPLETED runs are counted (an in-flight run reports nothing yet) — which is exactly
+        why the caller must check for an ACTIVE message run BEFORE consulting this."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(300)
+        )
+        runs = []
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_MESSAGE or r.status != RunStatus.COMPLETED.value:
+                continue
+            if str((o.get("pipeline") or {}).get("job_id")) != str(job_id):
+                continue
+            created = r.created_at
+            if created is not None:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created < cutoff:
+                    break  # ordered desc → everything older is out of the window
+            runs.append(r)
+            if len(runs) >= 30:  # bound the per-run extraction reads (one hook, inline)
+                break
+        total = 0
+        for r in runs:
+            try:
+                compose = await self.push.read_message_compose_result(r.id)
+                total += int(compose.get("messaged_count") or 0)
+            except Exception:  # noqa: BLE001 — a missing extraction just counts as 0
+                logger.debug("auto-message: no compose result for run %s", r.id, exc_info=True)
+        return total
 
     async def _has_active_pipeline_run(self, job_id, event_kinds=None) -> bool:
         """Bool wrapper over _find_active_pipeline_run (avoid duplicate concurrent
@@ -592,9 +665,73 @@ class RecruiterPipelineService:
             event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
             message=f"✨ Added {n_added} recommended candidate(s) to the project.",
         )
+        # New people are in the project → message them without waiting for a human to press
+        # the Odoo button. Gated on NOT having just enqueued a blacklist sweep: send_messages
+        # defers (and returns None) while an archive run is active, so sending now would be a
+        # silent no-op — the next recommendations tick picks it up instead.
+        auto = {"auto_message": False, "reason": "blacklist_sweep_enqueued"} if blacklisted else \
+            await self._auto_send_after_recommendations(
+                job_id=job_id, connector_id=connector_id, pipeline=pipeline,
+            )
+        if blacklisted:
+            logger.warning(
+                "auto-message: job %s — skipped (blacklist_sweep_enqueued, %s person(s))",
+                job_id, len(blacklisted),
+            )
         return {"stage": "recommendations", "done": True,
                 "pushed": lead_res.get("pushed"), "leads": n_added,
-                "blacklisted": [b.get("name") for b in blacklisted]}
+                "blacklisted": [b.get("name") for b in blacklisted], "auto": auto}
+
+    async def _auto_send_after_recommendations(self, *, job_id, connector_id, pipeline) -> dict:
+        """Message the position's uncontacted candidates right after new ones were added.
+
+        Fires from the recommendations hook (an akcr cron adds ~6 candidates every 30-90 min),
+        so this is REAL InMail with no human in the loop on a sensitive account. Every guard
+        fails CLOSED — skip and try again next tick — and nothing here posts Odoo chatter,
+        because at one tick per 30-90 min any per-attempt note becomes 20-40 useless lines a
+        day. Skips log at WARNING on purpose: the PROD container drops INFO, and a
+        silently-dead auto-sender is this design's most likely failure mode.
+
+        GUARD ORDER IS LOAD-BEARING — see the active-run check below.
+        """
+        def skip(reason: str, **extra) -> dict:
+            logger.warning("auto-message: job %s — skipped (%s) %s", job_id, reason, extra or "")
+            return {"auto_message": False, "reason": reason, **extra}
+
+        if not settings.recruiter_auto_message_enabled:
+            return skip("disabled")
+        # An active archive/sweep makes send_messages defer and return None, so calling it
+        # would be a no-op that also spams "⏳ Finishing a blacklist cleanup…" every tick.
+        if await self._has_active_pipeline_run(job_id, {EVENT_ARCHIVE}):
+            return skip("archive_sweep_active")
+        # MUST come before the quota: _sent_last_24h only counts COMPLETED runs, so a tick
+        # landing mid-send would see a 0 contribution from the in-flight run and hand out the
+        # full daily quota a second time. (Also, _create_pipeline_run's dedup would silently
+        # collapse this onto the running one and discard these params.)
+        if await self._has_active_pipeline_run(job_id, {EVENT_MESSAGE}):
+            return skip("message_run_active")
+        approved = await self._last_human_message(job_id)
+        if approved is None:
+            return skip("no_human_approved_copy")
+        subject, body = approved
+        sent_24h = await self._sent_last_24h(job_id)
+        cap = int(settings.recruiter_auto_message_daily_cap or 0)
+        remaining = cap - sent_24h
+        if remaining <= 0:
+            return skip("daily_cap_reached", sent_24h=sent_24h, cap=cap)
+
+        run_id = await self.send_messages(
+            job_id, subject=subject, body=body, send=True,
+            max_recipients=remaining, auto=True,
+        )
+        if not run_id:
+            return skip("send_not_started")
+        logger.warning(  # WARNING so the one line that proves it fired survives PROD's filter
+            "auto-message: job %s — queued run %s (max_recipients=%s, sent_24h=%s/%s)",
+            job_id, run_id, remaining, sent_24h, cap,
+        )
+        return {"auto_message": True, "run_id": run_id, "max_recipients": remaining,
+                "sent_24h": sent_24h, "cap": cap}
 
     # ----------------------------------------------------------------- demo button
     async def start_demo(self, job_id, *, send: bool = False,
@@ -1336,8 +1473,12 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
-                message=f"✅ All candidates in the project were already contacted "
-                        f"({compose.get('contacted_count', 0)}) — no new messages were sent.",
+                # An unattended tick that found nobody to message is a non-event — saying so
+                # every 30-90 min would bury the position's real history.
+                message="" if pipeline.get("auto") else (
+                    f"✅ All candidates in the project were already contacted "
+                    f"({compose.get('contacted_count', 0)}) — no new messages were sent."
+                ),
             )
             return {"stage": "message", "sent": False, "no_uncontacted": True}
         skipped = compose.get("skipped") or []
@@ -1350,7 +1491,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
-                message="✉️ Message preview ready (not sent).",
+                message="" if pipeline.get("auto") else "✉️ Message preview ready (not sent).",
             )
             return {"stage": "message", "sent": False, "preview": True}
         # The unified compose loop messaged + noted + moved-to-contacted the SAME candidates
@@ -1897,7 +2038,8 @@ class RecruiterPipelineService:
                             max_recipients: int | None = None,
                             batch_size: int | None = None,
                             deferred_urls: list[str] | None = None,
-                            chain: dict | None = None) -> str | None:
+                            chain: dict | None = None,
+                            auto: bool = False) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
         candidates with a template body. Fires the recruiter_message_compose run
         (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
@@ -1984,6 +2126,10 @@ class RecruiterPipelineService:
             "deferred_urls": deferred,
             "chain": chain_ctx,
             "send": bool(send),
+            # Unattended send (see _auto_send_after_recommendations). Suppresses this
+            # path's chatter, and marks the run so it is never mistaken for the
+            # human-approved copy source in _last_human_message.
+            "auto": bool(auto),
         }
         runtime_params = {
             "project_url": project_url,
@@ -2009,12 +2155,16 @@ class RecruiterPipelineService:
             "recruiter pipeline: started message-compose run %s for job %s (send=%s)",
             run.id, job_id, send,
         )
-        await self._push_flow_status(
-            job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
-            event_kind=EVENT_MESSAGE, run_id=run.id,
-            message=("✉️ Sending the outreach message to the project's candidates…"
-                     if send else "✉️ Preparing the outreach message (preview)…"),
-        )
+        if not auto:
+            # Auto sends stay silent here: one tick per 30-90 min would turn this into
+            # dozens of daily notes. _after_message posts a single line, and only when
+            # somebody was actually messaged.
+            await self._push_flow_status(
+                job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
+                event_kind=EVENT_MESSAGE, run_id=run.id,
+                message=("✉️ Sending the outreach message to the project's candidates…"
+                         if send else "✉️ Preparing the outreach message (preview)…"),
+            )
         return str(run.id)
 
     async def _recently_archived_names(self, job_id) -> set[str]:
