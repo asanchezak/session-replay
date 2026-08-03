@@ -48,6 +48,13 @@ services:
       RECRUITER_DEFAULT_LOCATION: ${RECRUITER_DEFAULT_LOCATION:-}
       RECRUITER_RECOMMENDATIONS_WORKFLOW_ID: ${RECRUITER_RECOMMENDATIONS_WORKFLOW_ID:-}
       RECRUITER_SEARCH_START_TIGHTNESS: ${RECRUITER_SEARCH_START_TIGHTNESS:-2}
+      # NOTE: this block is an ALLOW-LIST — the service does not use `env_file`, so a variable
+      # added to .env.prod but not listed here NEVER reaches the container and silently falls
+      # back to the code default. That is how the auto-message kill switch was ignored on
+      # 2026-08-03 (RECRUITER_AUTO_MESSAGE_ENABLED=false in .env.prod, sends fired anyway).
+      # Any new setting that must be operable in production has to be added HERE too.
+      RECRUITER_AUTO_MESSAGE_ENABLED: ${RECRUITER_AUTO_MESSAGE_ENABLED:-true}
+      RECRUITER_AUTO_MESSAGE_DAILY_CAP: ${RECRUITER_AUTO_MESSAGE_DAILY_CAP:-20}
     volumes:
       - artifacts:/data/artifacts
 
