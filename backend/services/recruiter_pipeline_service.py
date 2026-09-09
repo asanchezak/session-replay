@@ -1008,9 +1008,15 @@ class RecruiterPipelineService:
             # America, global→skip). Only thread it when non-empty: a blank location is
             # OMITTED so the search workflow's skip_if_blank:location steps are pruned
             # (a global/worldwide boolean-only search) — never typed as a literal.
-            location = self._resolve_search_location(job_location)
+            location = self._resolve_search_location(job_location, job_id)
             if location:
                 search_params["location"] = location
+            # Stash it on the pipeline: the calibration RERUN and the finalize summary
+            # must reuse the POSITION's geography. (They used to read
+            # recruiter_default_location instead, so a `latam` job silently recalibrated
+            # as Costa Rica only.)
+            pipeline["search_location"] = location
+            search_params.update(self._language_params())
             logger.info(
                 "recruiter pipeline: job %s job_location=%r → search location=%r",
                 job_id, job_location, location or "(skip facet)",
@@ -1158,10 +1164,52 @@ class RecruiterPipelineService:
         composed = "\n\n".join(sections).strip()
         return composed or (fallback or "")
 
-    def _resolve_search_location(self, job_location: str) -> str:
-        """Map the Odoo job_location (cr/latam/global) to a LinkedIn location facet
-        string. A KNOWN mapping wins (incl. "" = skip the facet, e.g. global); an
-        unknown/empty job_location falls back to recruiter_default_location."""
+    @staticmethod
+    def _language_params() -> dict:
+        """The spoken-language requirement every search carries. Blank config ⇒ nothing
+        threaded, and the workflow's language step skips itself (no facet at all)."""
+        lang = (settings.recruiter_search_language or "").strip()
+        if not lang:
+            return {}
+        params = {"language": lang}
+        prof = (settings.recruiter_search_language_proficiency or "").strip()
+        if prof:
+            params["language_proficiency"] = prof
+        mode = (settings.recruiter_search_language_mode or "").strip()
+        if mode:
+            params["language_mode"] = mode
+        return params
+
+    @staticmethod
+    def _location_label(spec: str) -> str:
+        """Human-readable form of a location spec for Odoo/chatter: the first spelling
+        of each entry, comma-joined ("Costa Rica;Brazil|Brasil" → "Costa Rica, Brazil")."""
+        out = []
+        for entry in str(spec or "").split(";"):
+            first = entry.split("|")[0].strip()
+            if first:
+                out.append(first)
+        return ", ".join(out)
+
+    def _resolve_search_location(self, job_location: str, job_id=None) -> str:
+        """Resolve a position's geography to a LinkedIn location facet spec.
+
+        Order:
+        1. a PER-POSITION override (settings.recruiter_job_locations, keyed by the Odoo
+           hr.job id) — a position can hire in a SUBSET of its region while Odoo's
+           job_location selection only offers cr/latam/global;
+        2. the job_location map (a KNOWN key wins, including "" = skip the facet, which
+           is what `global` means);
+        3. recruiter_default_location, for an unknown/empty job_location.
+        The result is a facet SPEC: places separated by ";", spellings by "|"."""
+        if job_id is not None:
+            override = settings.recruiter_job_locations_map.get(str(job_id), "").strip()
+            if override:
+                logger.info(
+                    "recruiter pipeline: job %s geography OVERRIDE (job_location=%r) → %r",
+                    job_id, job_location, override,
+                )
+                return override
         loc_map = settings.recruiter_location_map or {}
         key = (job_location or "").strip().lower()
         if key in loc_map:
@@ -1218,6 +1266,13 @@ class RecruiterPipelineService:
         reruns = pipeline.get("search_reruns", 0)
         prev_count = pipeline.get("search_prev_count")  # count before this run's tightness
         adv_wf = settings.recruiter_advanced_search_workflow_id
+        # The position's geography (stashed when the first search run was created).
+        # Older runs predate the stash → re-derive it from the job_location; NEVER fall
+        # back to a global default, which is how a `latam` search became a CR-only one.
+        search_location = pipeline.get("search_location")
+        if search_location is None:
+            search_location = self._resolve_search_location(
+                pipeline.get("job_location") or "", job_id)
 
         # --- count calibration: converge toward a usable set, but DON'T burn every
         # rerun. Tighten only while the count is above the acceptable ceiling AND
@@ -1243,8 +1298,9 @@ class RecruiterPipelineService:
             if new_t is not None and 0 <= new_t <= b.max_tightness(spec) and new_t != tightness:
                 query = b.assemble(spec, new_t)
                 re_params = {"boolean_query": query}
-                if settings.recruiter_default_location:
-                    re_params["location"] = settings.recruiter_default_location
+                if search_location:
+                    re_params["location"] = search_location
+                re_params.update(self._language_params())
                 # Remember the tightest search so far that still had results, so a tighten
                 # that OVERSHOOTS (e.g. 1500 → 0) can fall back to it at finalize instead of
                 # discarding a usable candidate set. We only ever tighten when count is above
@@ -1254,13 +1310,15 @@ class RecruiterPipelineService:
                     best_search = {
                         "url": result.get("url"), "count": count,
                         "query": pipeline.get("search_query"), "run_id": str(run.id),
+                        "location": search_location,
                     }
                 re_run = await self._create_pipeline_run(
                     workflow_id=adv_wf, event_kind=EVENT_SEARCH,
                     runtime_params=re_params,
                     pipeline={**pipeline, "search_tightness": new_t,
                               "search_reruns": reruns + 1, "search_query": query,
-                              "search_prev_count": count, "best_search": best_search},
+                              "search_prev_count": count, "best_search": best_search,
+                              "search_location": search_location},
                     connector_id=connector_id,
                 )
                 logger.info(
@@ -1285,6 +1343,12 @@ class RecruiterPipelineService:
         use_fallback = bool(
             best and best.get("url") and (best.get("count") or 0) > 0
             and (count is None or count < settings.recruiter_count_band_min)
+            # …and only onto a search run with the SAME geography. Falling back across
+            # facets is what put 6 candidates from India/Pakistan/Ukraine/Australia into
+            # job 296's `latam` project: the tightened (correctly faceted) search
+            # returned 4, below the band, so the pipeline reverted to the earlier
+            # search — whose location facet had silently not applied at all.
+            and (best.get("location") or "") == (search_location or "")
         )
         if use_fallback:
             logger.warning(
@@ -1307,8 +1371,8 @@ class RecruiterPipelineService:
             # Readable summary of the facet filters applied to the search (currently
             # the location facet; extend here as more facets are added).
             filter_parts = []
-            if settings.recruiter_default_location:
-                filter_parts.append(f"Location: {settings.recruiter_default_location}")
+            if search_location:
+                filter_parts.append(f"Location: {self._location_label(search_location)}")
             await self.push.push_search_link(
                 run_id=run.id, job_id=job_id, connector_id=connector_id,
                 search_url=eff_url, count=eff_count,
@@ -1904,7 +1968,8 @@ class RecruiterPipelineService:
             select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
         )
         ctx = {"connector_id": None, "project_id": None, "project_url": None,
-               "project_name": None, "position": None, "saved": []}
+               "project_name": None, "position": None, "saved": [],
+               "job_location": None, "search_location": None}
         seen = set()
         for r in result.scalars().all():
             o = r.origin or {}
@@ -1918,6 +1983,10 @@ class RecruiterPipelineService:
             ctx["project_url"] = ctx["project_url"] or p.get("project_url")
             ctx["project_name"] = ctx["project_name"] or p.get("project_name")
             ctx["position"] = ctx["position"] or p.get("position")
+            if ctx["job_location"] is None and p.get("job_location") is not None:
+                ctx["job_location"] = p.get("job_location")
+            if ctx["search_location"] is None and p.get("search_location") is not None:
+                ctx["search_location"] = p.get("search_location")
             if o.get("event_kind") == EVENT_SAVE and r.status == RunStatus.COMPLETED.value:
                 url = p.get("candidate_url")
                 if url and url not in seen:
@@ -2349,6 +2418,25 @@ class RecruiterPipelineService:
             logger.warning("recruiter pipeline: no project for job %s — can't save recommendations", job_id)
             return None
         m = _PROJECT_URL_RE.search(project_url)
+        # Geography. LinkedIn's Automated Sourcing recommends worldwide no matter what
+        # the position says (a `latam` job was handed Meta/Amazon/Microsoft engineers),
+        # so the same facet spec used by the search is threaded to the strategy, which
+        # skips out-of-geography rows BEFORE adding them to the project.
+        job_location = ctx.get("job_location")
+        if job_location is None:
+            try:
+                _, _, job_location = await self._fetch_job_corpus(job_id, connector_id)
+            except Exception:
+                logger.warning("recruiter pipeline: could not read job_location for job %s "
+                               "— recommendations run unfiltered", job_id, exc_info=True)
+                job_location = ""
+        allowed_locations = ctx.get("search_location")
+        if allowed_locations is None:
+            allowed_locations = self._resolve_search_location(job_location or "", job_id)
+        logger.info(
+            "recruiter pipeline: recommendations for job %s job_location=%r → geography=%r",
+            job_id, job_location, allowed_locations or "(no filter)",
+        )
         pipeline = {
             "job_id": str(job_id),
             "connector_id": str(connector_id) if connector_id else None,
@@ -2356,11 +2444,14 @@ class RecruiterPipelineService:
             "project_url": project_url,
             "position": ctx.get("position"),
             "project_name": ctx.get("project_name"),
+            "job_location": job_location or "",
+            "search_location": allowed_locations,
         }
         run = await self._create_pipeline_run(
             workflow_id=wf, event_kind=EVENT_RECOMMENDATIONS,
             runtime_params={"project_url": project_url, "target_count": str(max(1, int(count))),
-                            "require_open_to_work": "true" if require_open_to_work else "false"},
+                            "require_open_to_work": "true" if require_open_to_work else "false",
+                            "allowed_locations": allowed_locations},
             pipeline=pipeline, connector_id=connector_id,
         )
         logger.info("recruiter pipeline: started recommendations run %s for job %s (count=%s)",
@@ -2436,7 +2527,8 @@ class RecruiterPipelineService:
             t = max(0, min(int(tightness), b.max_tightness(spec)))
             query = b.assemble(spec, t)
         params = {"boolean_query": query}
-        location = self._resolve_search_location(job_location)
+        params.update(self._language_params())
+        location = self._resolve_search_location(job_location, job_id)
         if location:
             params["location"] = location
         run = await self.exec_svc.create_run(workflow_id=adv_wf, runtime_params=params)

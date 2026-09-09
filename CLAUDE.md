@@ -10,29 +10,24 @@ hard way and not obvious from reading code.
 into `main` when a batch of work is ready to consider "settled." Before this date, work
 went straight to feature branches off `main` — that history is unaffected.
 
-## ⏳ PENDING ACTION — verify the 2C seat-restore survived a boot (set 2026-07-08)
+## ✅ Seat survives the nightly boot on its own (2C VERIFIED 2026-09-01)
 
-**RESOLVED half:** the 2026-07-08 boot diagnostic was DECISIVE — `[seat-diag] PRE-NAV boot
-inventory: li_at=false … total=0` — the profile's cookie DB comes up **completely empty**
-after the nightly power-off (even 365d persistent cookies gone; Chrome exits 'Crashed', the
-unflushed cookie DB is lost). Client-side ⇒ **Item 2C built + shipped 2026-07-08**, entirely
-in the hot module (`daemon-behavior.mjs`, `behavior-8-seat-restore`, scp — no restart):
-warm ping → snapshot linkedin cookies to `C:\Users\Public\extension\.seat-state.json`
-(`saveSeatState`, only when li_at present); first keepalive tick after a boot → jar has no
-li_at → `restoreSeatStateIfCold` re-injects the file's cookies (<7d old) BEFORE the first
-/talent nav. Round-trip validated locally with a Playwright persistent context.
+The nightly power-off empties the profile's cookie jar completely (`[seat-diag] PRE-NAV boot
+inventory: … total=0` — even 365d cookies; Chrome exits 'Crashed', the unflushed cookie DB is
+lost). **Item 2C** (hot module `daemon-behavior.mjs`, `behavior-8-seat-restore`) fixes this
+client-side: warm ping → `saveSeatState` snapshots linkedin cookies to
+`C:\Users\Public\extension\.seat-state.json` (only when li_at present, so a walled jar never
+overwrites good state); first keepalive tick after a boot → no li_at in the jar →
+`restoreSeatStateIfCold` re-injects the file's cookies (<7d old) BEFORE the first /talent nav.
 
-**STILL PENDING:** (1) the seat was walled when 2C shipped → operator must run
-`login-talent.bat` once; after the next warm tick confirm `[seat-state] snapshot N linkedin
-cookie(s)` in the daemon log and that `.seat-state.json` exists. (2) After the NEXT nightly
-boot (~08:12 UTC), check the log for `[seat-restore] li_at absent at boot → injected …` and
-`seat_warm=true` without a human login. If warm ⇒ delete this block + update memory
-`project_recruiter_seat_keepalive`. If it re-injected but still WALLED ⇒ the cookie value
-itself doesn't survive server-side (IP/device binding?) — pivot per the old plan
-(`~/.claude/plans/check-if-the-seat-twinkly-clock.md`): automated morning re-login or
-keep-host-online.
-Note: checking "is the seat walled?" is a free read — `GET /v1/daemon/status` → fernanda
-`seat_warm` (or the dashboard "Seat walled" pill); don't run a workflow to find out.
+**Live-verified 2026-09-01** across two nightly boots after a 2026-08-28 operator login:
+`[seat-restore] li_at absent at boot → injected 17 saved cookie(s) (snapshot 82.8h old) BEFORE
+first /talent nav` → `cookie inventory (walled=false)` → `seat_warm=true`, **no human login**.
+So a human `login-talent.bat` is now only needed when the seat has been cold >7d (snapshot
+expires) or LinkedIn invalidates the session server-side.
+
+Checking "is the seat walled?" is a free read — `GET /v1/daemon/status` → fernanda `seat_warm`
+(or the dashboard "Seat walled" pill); don't run a workflow to find out.
 
 ## CURRENT GOAL — decompose the Recruiter recording into reusable sub-workflows
 
@@ -80,6 +75,120 @@ adds to the pipeline. Strategy `recruiter_save_recommendations` captures name+he
 verifies via the ACTIVE-count delta (NOT a per-url match — that under-counts and over-adds),
 and one bounded retry on shortfall. `recruiter_recommendations` event_kind → `_after_recommendations`
 reuses `push_recruiter_leads`. See [[project_recruiter_demo_e2e]].
+
+### GEOGRAPHY — `latam` positions were sourcing WORLDWIDE (fixed + LIVE-VERIFIED 2026-09-09)
+
+Odoo said `hr.job.job_location='latam'` and the pipeline still contacted people in India,
+Pakistan, Ukraine, Australia and the US (morsoft jobs **296 / 297 / 301**; 79 already
+contacted on 296). **Two independent leaks, both fixed:**
+
+1. **The search location facet never applied.** `RECRUITER_LOCATION_MAP["latam"]` was the
+   single string **"Latin America"** — a name Recruiter's candidate-location typeahead does
+   NOT offer (probe-verified: zero suggestions; every LATAM *country* resolves exactly). The
+   workflow's blind "click the first suggestion" step had no `success_condition`/`checkpoint`,
+   so the miss was a SILENT soft-miss reported as success → boolean-only worldwide search.
+   Two amplifiers: the calibration rerun re-derived the location from
+   `RECRUITER_DEFAULT_LOCATION` instead of the position (a `latam` job silently became CR-only),
+   and the overshoot fallback reverted to "the best earlier search" — including the unfaceted
+   one (that is exactly how job 296's 15 000-result worldwide search beat the correctly-faceted
+   4-result one and got bulk-saved).
+   **Now:** strategy **`recruiter_apply_locations`** (hot module) types every place, commits ONLY
+   an exact normalized typeahead match, verifies it landed in the facet, and **FAILS the run**
+   when a requested geography applied nowhere. The map enumerates 12 LATAM countries as a
+   `";"`-separated spec with `"|"`-separated spellings (`"Costa Rica;México|Mexico;Brasil|Brazil;…"`,
+   the seat answers in Spanish). Blank/unresolved ⇒ no facet (a deliberately global position).
+   Search extractions now also carry each card's `location`.
+2. **Recommendations ignored geography entirely.** LinkedIn Automated Sourcing recommended
+   Meta/Amazon/Microsoft/Apple engineers for `latam` jobs (134 of job 296's 140 leads and 38 of
+   job 297's 44 came from `source=recommendation`). `recruiter_save_recommendations` now takes
+   `allowed_locations` (same spec), reads each row's lockup caption and **skips out-of-geography
+   rows BEFORE adding them** — matching the country at the END of the location string, so
+   "Panama City, Florida, United States" is correctly rejected. Unreadable location ⇒ skipped
+   (fail closed) and reported in `skipped_examples`. "Everything was out of geography" is a
+   SUCCESSFUL run with nothing to do.
+
+**Live-verified on PROD 2026-09-09** (both halves, read-only): search run `fdd53511` applied
+**12/12** locations and returned only LATAM candidates for the same boolean that had returned
+India/Pakistan/Ukraine/Australia (139s, inside the 240s run watchdog); the recommendations gate,
+exercised with an impossible geography on job 297's project, read the real captions ("Austin y
+alrededores, Texas"), skipped every row and left ACTIVE at 40. That second test caught a bug worth
+remembering: the bounded RETRY pass re-assigned `reason` and clobbered `all_out_of_location` →
+`ok:false` → the run FAILED for doing the right thing. Classify AFTER the retry, and skip the retry
+when every row was out of geography.
+
+**FULL PIPELINE re-verified on PROD 2026-09-09** — the three affected positions were reset
+(`POST /v1/recruiter/jobs/{id}/reset`: archive project → wipe Odoo leads → create project →
+search → save) and every stage honored the geography, facet **12/12** on all five searches:
+- **296** (same boolean as the broken run): **15 000 → 208** results, tightened to 38; 143 leads
+  → **6, all LATAM** (Colombia ×2, Brasil ×4). The ONE legitimately-LATAM candidate of the
+  original six (EDILSON RIBEIRO, São Paulo) came back; the India/Pakistan/Ukraine/Australia ones
+  did not.
+- **297**: 29 results; 44 leads (38 of them Meta/Amazon/Microsoft recommendations) → **6, all
+  LATAM** (Argentina ×3, Brasil ×2, Chile).
+- **301**: **1** result. Its boolean only "found 27" before because it was searching the planet —
+  expect this on other positions too: honoring the geography exposes booleans that are too
+  strict for LATAM (loosen the JD/tightness, don't loosen the geography).
+Leads for all three were backed up before the wipe (outside the repo — 193 leads + 107 outreach
+messages).
+
+**Geography is per REGION and per POSITION (2026-09-09).** `RECRUITER_LOCATION_MAP["latam"]`
+is now **all 18 Latin American countries** (each probe-verified to resolve to an exact country
+suggestion; Cuba and Puerto Rico verified too but deliberately out — no practical hiring path /
+US jurisdiction). A position that hires in a SUBSET of its region needs more than Odoo's
+`job_location` selection can express (only cr/latam/global), so `RECRUITER_JOB_LOCATIONS`
+(JSON, keyed by hr.job id) OVERRIDES the map — live on PROD: `{"296":"Colombia;Mexico;Costa
+Rica;Brasil|Brazil;Peru"}`. It is a STRING setting parsed by `settings.recruiter_job_locations_map`
+so an empty/malformed value degrades to `{}` instead of refusing to start the container, and it
+**must** be listed in `docker-compose.prod.yml` (that file is an allow-list — verify with
+`docker exec sr-backend-1 printenv`). The self-service home for this is an `hr.job` field on the
+akcr side; until that ships, changing it means editing `.env.prod` + a redeploy.
+
+**Cost budget (measured on the live seat, don't guess):** ~3.9s per place — 12 places = 46s,
+18 places = **71s** — inside the facet step's 95s budget, and a full search run lands at
+~150-190s against the daemon's **240s whole-run** watchdog (the long boolean alone costs ~43s to
+type). Adding many more places, or a much longer boolean, will eat that margin; the escape hatch
+is `RUN_WATCHDOG_MS` on the host (needs a daemon restart + re-login, so batch it).
+
+**Every search also requires ENGLISH (2026-09-09 operator directive).** Strategy
+`recruiter_apply_languages` applies the **spoken-languages** facet
+(`[data-test-facet-spoken-languages]`) on every search — first pass, calibration rerun and
+count-only preview alike (`_language_params()` is threaded at all three sites, so a rerun can
+never silently drop the requirement). Config: `RECRUITER_SEARCH_LANGUAGE` (`"Inglés|English"`),
+`RECRUITER_SEARCH_LANGUAGE_PROFICIENCY` (`"Nivel profesional avanzado|Full Professional"`),
+`RECRUITER_SEARCH_LANGUAGE_MODE` (`"Debe tener|Must have"`). Blank language ⇒ no facet at all.
+- **The typeahead is LOCALIZED — typing "English" on this Spanish seat returns "no language
+  found"** (probe-verified). Hence `Inglés|English`; same trap as "Latin America".
+- Controls (probe-verified, they carry no useful data-test names of their own): typeahead
+  `input.ts-common-typeahead__input[role=combobox]`; proficiency
+  `button[data-test-scope-facet-dropdown-trigger]` → Cualquiera / Básico / Competente / Nivel
+  profesional / **Nivel profesional avanzado** ("Full Professional") / Nativo o bilingüe; mode
+  `button[data-test-boolean-facet-dropdown-trigger]` → Puede tener / **Debe tener** / No es
+  necesario que tenga. "Nivel profesional" and "Nivel profesional avanzado" are one word apart,
+  which is exactly why every pick demands an EXACT normalized label match.
+- **Measured, same boolean + same 5 countries (job 296):** no language **36** → can-have **31**
+  → must-have **31**. With ONE language the mode does not change the result set (AND-of-one ==
+  OR-of-one), so "Debe tener" is chosen for saying what we mean. ⚠️ If a SECOND language is ever
+  added, switch the mode to "Puede tener" or the search will require BOTH.
+- **This applies to SEARCHES only.** LinkedIn's Automated Sourcing rows expose no language, so
+  recommendations cannot be language-gated — they are only geography-gated.
+- **Watchdog margin is now the thing to watch:** 18 countries + English = 164s on a count-only
+  run (facets ~79s of it), so a full search lands ~170-205s against the 240s WHOLE-RUN watchdog.
+  Levers, in order: trim the country list, or raise `RUN_WATCHDOG_MS` on the host (daemon
+  restart + re-login — batch it). Blowing it PAUSES the run (recoverable), never sources wrong.
+
+**Probing a facet before automating it is now a tool, not an improvisation:**
+`facet-probe.json` (`72a4e33c`, DEV only) opens ONE facet and reports its expanded DOM —
+controls with their data-test attributes, dropdown menu options, typeahead suggestions —
+committing nothing and running no search. The saved snapshots only ever captured facets
+COLLAPSED, so the expanded controls exist nowhere offline. Use it BEFORE writing selectors.
+
+**Before changing the map, PROBE the seat** — workflow `location-typeahead-probe.json`
+(`c37c8059`, DEV only): `dry_run` types each term and reports the suggestions, selecting nothing
+and running no search. That is the read-only way to ask this account what geo names it accepts.
+
+⚠️ **Any `run-with-params` run that needs the /talent seat MUST pass
+`execution_options:{"use_profile":true}`** — without it the daemon drives it in a CLEAN ephemeral
+context, which lands on the Recruiter login wall and looks exactly like a walled seat.
 
 ### Reply-scanner — inbox replies → Odoo lead `responded` (2026-06-15; **v2 classification 2026-07-07**)
 

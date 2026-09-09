@@ -414,6 +414,13 @@ class RecruiterPushService:
         activates); leads are the deduped /talent/profile/ candidates."""
         url, total = None, None
         for rec in await self._extraction_rows(run_id):
+            # Only a SEARCH-RESULTS extraction may set the url the downstream bulk save
+            # navigates to. A search run posts other extractions too (the location-facet
+            # strategy), and those carry the advanced-search page URL — saving from THAT
+            # page would select the wrong people. Rows are ordered by sequence, so this
+            # is belt-and-braces, but the failure mode is silent and expensive.
+            if "people" not in rec and rec.get("total_count") is None:
+                continue
             if rec.get("url"):
                 url = rec.get("url")
             if rec.get("total_count") is not None:

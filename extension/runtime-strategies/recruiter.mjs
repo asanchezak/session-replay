@@ -7,7 +7,67 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-07-20-unified-message-note-move";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-09-09-geo-and-language-gates";
+
+// ------------------------------------------------------------------- location facet
+// A position's geography travels through the pipeline as ONE string (the existing
+// {{location}} runtime param): entries separated by ";", each entry carrying
+// "|"-separated ALTERNATIVES for the same place — the /talent seat flips ES<->EN, so
+// "Brazil|Brasil" tries both spellings. An empty value — or an unresolved
+// "{{location}}" — means NO geography filter (a deliberate worldwide search), never a
+// literal term typed into the facet.
+export function parseLocationSpec(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s || /\{\{[^}]*\}\}/.test(s)) return [];
+  return s
+    .split(";")
+    .map((entry) => entry.split("|").map((t) => t.trim()).filter(Boolean))
+    .filter((alts) => alts.length > 0);
+}
+
+// Every accepted spelling in a spec, flat — what a candidate's displayed location is
+// matched against (recommendations filter).
+export function locationSpecTerms(raw) {
+  return parseLocationSpec(raw).reduce((acc, alts) => acc.concat(alts), []);
+}
+
+// Accent/case/punctuation-insensitive form: "Sao Paulo, Brasil" -> "sao paulo brasil".
+export function normalizeLocationText(s) {
+  return String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Which typeahead suggestion to commit for `term` — FAIL-CLOSED: only an EXACT
+// (normalized) label match counts. Typing "Costa Rica" also offers metros ("Provincia
+// de San Jose, Costa Rica"), and blindly taking the first suggestion is how the facet
+// silently ended up narrower — or, when nothing matches at all ("Latin America" is not
+// a Recruiter geo), how the search silently ran WORLDWIDE. -1 = click nothing.
+export function pickExactLabel(term, labels) {
+  const want = normalizeLocationText(term);
+  if (!want) return -1;
+  const list = Array.isArray(labels) ? labels : [];
+  for (let i = 0; i < list.length; i++) {
+    if (normalizeLocationText(list[i]) === want) return i;
+  }
+  return -1;
+}
+
+// Historical name, kept because the location facet reads better with it.
+export const pickLocationSuggestion = pickExactLabel;
+
+// Is a candidate's displayed location inside the position's geography? LinkedIn writes
+// locations most-specific-first, ending on the country ("San Jose, Costa Rica"), so a
+// term only counts at the END of the string — matching anywhere would let "Panama"
+// admit "Panama City, Florida, United States". No terms => no filter (everything
+// passes); an unreadable location => NOT allowed (fail closed, and reported).
+export function locationAllowed(locationText, terms) {
+  const list = (terms || []).map(normalizeLocationText).filter(Boolean);
+  if (list.length === 0) return true;
+  const hay = normalizeLocationText(locationText);
+  if (!hay) return false;
+  return list.some((t) => hay === t || hay.endsWith(` ${t}`));
+}
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -489,6 +549,11 @@ function readSaveRecommendationsOptions(step) {
     projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
     targetCount: readPositiveInt(method.target_count ?? method.count, 10),
     requireOpenToWork: String(method.require_open_to_work ?? "").toLowerCase() === "true" || method.require_open_to_work === true,
+    // The position's geography, same ";"/"|" spec as the search facet. LinkedIn's
+    // Automated Sourcing ignores it entirely (it recommended Meta/Amazon/Microsoft
+    // engineers for a `latam` position), so rows outside it are SKIPPED here, before
+    // they are ever added to the project. Blank => no filter.
+    allowedLocations: String(method.allowed_locations ?? method.locations ?? "").trim(),
   };
 }
 
@@ -597,8 +662,60 @@ function readArchiveProjectOptions(step) {
   };
 }
 
+function readProbeFacetOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_probe_facet",
+  ) || {};
+  const sel = method.select;
+  return {
+    facet: String(method.facet ?? "").trim(),
+    typeText: String(method.type_text ?? "").trim(),
+    select: sel === true || sel === "true" || sel === 1 || sel === "1",
+    // Also open each dropdown trigger inside the facet and record its menu options —
+    // the labels a real run has to click (mode "can have/must have", proficiency), which
+    // live nowhere in the DOM until the menu is opened.
+    dropdowns: String(method.dropdowns ?? "").toLowerCase() === "true" || method.dropdowns === true,
+  };
+}
+
+function readApplyLanguagesOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_apply_languages",
+  ) || {};
+  return {
+    // Same ";"/"|" spec as the location facet: languages separated by ";", spellings by
+    // "|". The seat answers in its OWN language, so "Inglés|English" is the honest value
+    // (typing "English" on this Spanish seat returns "no language found" — probe-verified).
+    languages: String(method.languages ?? method.language ?? "").trim(),
+    proficiency: String(method.proficiency ?? "").trim(),
+    // "" leaves LinkedIn's default ("Puede tener"/"Can have" — a RANKING preference).
+    // "Debe tener|Must have" makes it an actual requirement.
+    mode: String(method.mode ?? "").trim(),
+  };
+}
+
+function readApplyLocationsOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_apply_locations",
+  ) || {};
+  const dry = method.dry_run;
+  return {
+    locations: String(method.locations ?? method.location ?? step?.value ?? "").trim(),
+    // Probe mode: type each place and REPORT what the typeahead offers, committing
+    // nothing and running no search — how we learn which geo names Recruiter accepts
+    // without burning a real search on the sensitive account.
+    dryRun: dry === true || dry === "true" || dry === 1 || dry === "1",
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
+    || strategy === "recruiter_apply_locations"
+    || strategy === "recruiter_probe_facet"
+    || strategy === "recruiter_apply_languages"
     || strategy === "recruiter_save_results_to_project"
     || strategy === "recruiter_archive_candidate"
     || strategy === "recruiter_archive_all_in_project"
@@ -624,6 +741,33 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
         },
       },
       log: `recruiter_hot_reload_probe version=${RECRUITER_RUNTIME_STRATEGY_VERSION}`,
+    };
+  }
+
+  if (strategy === "recruiter_probe_facet") {
+    const r = await probeAdvancedFacet(page, readProbeFacetOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { probe_facet_result: r },
+      log: `recruiter_probe_facet facet="${r.facet}" found=${r.found} opened=${r.opened} controls=${(r.controls || []).length} suggestions=${(r.suggestions || []).length} selected=${r.selected}`,
+    };
+  }
+
+  if (strategy === "recruiter_apply_languages") {
+    const r = await applyLanguageFacet(page, readApplyLanguagesOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { apply_languages_result: r },
+      log: `recruiter_apply_languages ok=${r.ok} applied=[${(r.applied || []).join(", ")}] missing=[${(r.missing || []).join(", ")}] proficiency="${r.proficiency_set || ""}" mode="${r.mode_set || ""}" reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_apply_locations") {
+    const r = await applyLocationFacets(page, readApplyLocationsOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { apply_locations_result: r },
+      log: `recruiter_apply_locations ok=${r.ok} applied=${(r.applied || []).length}/${r.requested} [${(r.applied || []).join(", ")}] missing=[${(r.missing || []).join(", ")}] dry=${!!r.dry_run} reason="${r.reason || ""}"`,
     };
   }
 
@@ -694,7 +838,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       // `people` at the extraction top level lets the backend push these as linkedin.lead
       // via the SAME path as search→save (RecruiterPushService._collect_recruiter_leads).
       extraction: { save_recommendations_result: r, people: r.people || [] },
-      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved} confirmed=${r.confirmed}/${r.requested} active ${r.active_before}->${r.active_after} reqOTW=${r.require_open_to_work} reason="${r.reason || ""}"`,
+      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved} confirmed=${r.confirmed}/${r.requested} active ${r.active_before}->${r.active_after} reqOTW=${r.require_open_to_work} skipped_location=${r.skipped_location ?? 0} geo="${r.allowed_locations || ""}" reason="${r.reason || ""}"`,
     };
   }
 
@@ -787,6 +931,25 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
       }
       return ok(); // other contexts (e.g. recruiter_preview_count) — don't gate
     }
+    case "recruiter_probe_facet":
+      // Read-only diagnostic — never gate a run on it.
+      return ok();
+    case "recruiter_apply_languages": {
+      // Same contract as the geography gate: a search that was told to require a
+      // language but applied none must FAIL, not quietly widen to everybody. A blank
+      // spec skips and passes.
+      const r = ex.apply_languages_result || {};
+      return r.ok ? ok() : fail(r.reason || "language_facet_not_applied");
+    }
+    case "recruiter_apply_locations": {
+      // The geography gate. A position that asked for a location but got NONE applied
+      // would search the whole planet (jobs 296/297/301: "Latin America" matched no
+      // Recruiter geo, the blind suggestion click missed, and the run sourced
+      // worldwide) — FAIL the run instead. A blank spec (a deliberately global
+      // position) skips and passes.
+      const r = ex.apply_locations_result || {};
+      return r.ok ? ok() : fail(r.reason || "location_facet_not_applied");
+    }
     case "recruiter_save_results_to_project": {
       const r = ex.save_result || {};
       if (!(Number(r.saved_count) > 0)) return fail("save_selected_none");
@@ -840,6 +1003,498 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     case "recruiter_hot_reload_probe":
     default:
       return ok();
+  }
+}
+
+// Pick a VISIBLE dropdown-menu item by exact (normalized) label, trying each spelling
+// in `wants` — the menus are localized ("Nivel profesional avanzado" vs "Full
+// Professional"). Tags the innermost matching element and clicks it. Returns the label
+// that matched, or null (fail closed: never click "some other item").
+async function clickMenuItemByLabel(page, wants, orand, runtime, sleep) {
+  const matched = await page.evaluate((list) => {
+    const norm = (x) => (x || "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    document.querySelectorAll("[data-sr-menu-t]").forEach((e) => e.removeAttribute("data-sr-menu-t"));
+    const containers = Array.from(document.querySelectorAll(
+      '.artdeco-dropdown__content, [role="menu"], [role="listbox"], .hue-menu'))
+      .filter((c) => {
+        const cs = window.getComputedStyle(c);
+        return cs.display !== "none" && cs.visibility !== "hidden"
+          && c.getAttribute("aria-hidden") !== "true";
+      });
+    for (const want of list) {
+      const w = norm(want);
+      if (!w) continue;
+      for (const c of containers) {
+        const els = Array.from(c.querySelectorAll(
+          '[role="menuitemradio"], [role="menuitem"], [role="option"], label, button, a, li'));
+        // innermost match wins: a <li> wrapping the real <button> has the same text
+        const hit = els.find((e) => norm(e.innerText || e.textContent) === w
+          && !els.some((o) => o !== e && e.contains(o) && norm(o.innerText || o.textContent) === w));
+        if (hit) {
+          hit.setAttribute("data-sr-menu-t", "1");
+          hit.scrollIntoView({ block: "center" });
+          return want;
+        }
+      }
+    }
+    return null;
+  }, wants).catch(() => null);
+  if (!matched) return null;
+  const clicked = await clickSelectorChain(
+    page, [{ type: "css", value: "[data-sr-menu-t]" }], orand, 6000, runtime);
+  await sleep(900);
+  return clicked ? matched : null;
+}
+
+// Require a SPOKEN LANGUAGE on the advanced search ("que sepan inglés"). Built from a
+// live probe of the facet, because the saved snapshots only had it collapsed and the
+// controls carry no obvious data-test names:
+//   root                [data-test-facet-spoken-languages]
+//   open                button[data-test-facet-edit]
+//   typeahead           input.ts-common-typeahead__input[role=combobox]  (localized
+//                       placeholder; typing "English" on a Spanish seat finds NOTHING —
+//                       it wants "Inglés")
+//   committed value     a facet pill (+ button[data-test-pill-dismiss])
+//   proficiency         button[data-test-scope-facet-dropdown-trigger] → Cualquiera /
+//                       Básico / Competente / Nivel profesional / Nivel profesional
+//                       avanzado ("Full Professional") / Nativo o bilingüe
+//   mode                button[data-test-boolean-facet-dropdown-trigger] → Puede tener
+//                       ("can have" = ranking only) / Debe tener ("must have" = a real
+//                       filter) / No es necesario que tenga
+// Every choice is committed only on an EXACT label match and verified afterwards;
+// nothing applied ⇒ ok:false ⇒ stageVerdict fails the run.
+async function applyLanguageFacet(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const entries = parseLocationSpec(options.languages);
+  const FACET = "[data-test-facet-spoken-languages]";
+  const INPUT_CHAIN = [
+    { type: "css", value: `${FACET} input.ts-common-typeahead__input` },
+    { type: "css", value: `${FACET} input[role="combobox"]` },
+    { type: "css", value: `${FACET} input[type="text"]` },
+  ];
+  const OPEN_CHAIN = [
+    { type: "css", value: `${FACET} button[data-test-facet-edit]` },
+    { type: "css", value: `${FACET} button.facet-edit-button` },
+  ];
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+  const SCOPE_TRIGGER = `${FACET} button[data-test-scope-facet-dropdown-trigger]`;
+  const MODE_TRIGGER = `${FACET} button[data-test-boolean-facet-dropdown-trigger]`;
+
+  if (entries.length === 0) {
+    return { ok: true, skipped: true, reason: "no_language", applied: [], missing: [] };
+  }
+
+  const facetText = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim() : "";
+  }, FACET).catch(() => "");
+  const inputPresent = () => page.evaluate(
+    (sel) => !!document.querySelector(sel),
+    `${FACET} input.ts-common-typeahead__input, ${FACET} input[role="combobox"]`).catch(() => false);
+  const triggerText = (sel) => page.evaluate(
+    (s2) => { const el = document.querySelector(s2); return el ? (el.innerText || "").replace(/\s+/g, " ").trim() : ""; },
+    sel).catch(() => "");
+
+  try {
+    if (!(await inputPresent())) {
+      await clickSelectorChain(page, OPEN_CHAIN, orand, 8000, runtime);
+      for (let i = 0; i < 14 && !(await inputPresent()); i++) await sleep(500);
+    }
+    if (!(await inputPresent())) {
+      return { ok: false, reason: "facet_not_open", applied: [], missing: entries.map((a) => a[0]) };
+    }
+
+    const applied = [], missing = [], suggestions = {};
+    for (const alts of entries) {
+      let done = false;
+      for (const term of alts) {
+        if (!(await typeSelectorChain(page, INPUT_CHAIN, term, orand, 8000, runtime))) break;
+        await sleep(600 + Math.floor(orand() * 300));
+        let labels = [];
+        for (let i = 0; i < 12; i++) {
+          labels = await page.evaluate((sg) => Array.from(document.querySelectorAll(sg))
+            .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean), SUGGESTION).catch(() => []);
+          if (pickExactLabel(term, labels) >= 0) break;
+          await sleep(450);
+        }
+        suggestions[term] = labels.slice(0, 8);
+        const idx = pickExactLabel(term, labels);
+        if (idx < 0) continue;  // this spelling isn't the seat's language → try the next
+        const before = normalizeLocationText(await facetText());
+        const tagged = await page.evaluate(({ sg, i }) => {
+          document.querySelectorAll("[data-sr-lang-t]").forEach((e) => e.removeAttribute("data-sr-lang-t"));
+          const el = Array.from(document.querySelectorAll(sg))[i];
+          if (!el) return false;
+          el.setAttribute("data-sr-lang-t", "1");
+          el.scrollIntoView({ block: "center" });
+          return true;
+        }, { sg: SUGGESTION, i: idx }).catch(() => false);
+        if (!tagged) continue;
+        await clickSelectorChain(page, [{ type: "css", value: "[data-sr-lang-t]" }], orand, 6000, runtime);
+        await sleep(1000 + Math.floor(orand() * 400));
+        const after = normalizeLocationText(await facetText());
+        const want = normalizeLocationText(labels[idx]);
+        if (want && after !== before && after.includes(want)) { applied.push(labels[idx]); done = true; break; }
+      }
+      if (!done) missing.push(alts[0]);
+    }
+
+    // Proficiency ("Full Professional" = "Nivel profesional avanzado"). Only meaningful
+    // once a language is in — and only claimed when the trigger's own label changes.
+    let proficiencySet = "";
+    if (applied.length && options.proficiency) {
+      const wants = parseLocationSpec(options.proficiency).reduce((a, x) => a.concat(x), []);
+      await clickSelectorChain(page, [{ type: "css", value: SCOPE_TRIGGER }], orand, 6000, runtime);
+      await sleep(1100);
+      const picked = await clickMenuItemByLabel(page, wants, orand, runtime, sleep);
+      const now = await triggerText(SCOPE_TRIGGER);
+      if (picked && normalizeLocationText(now) === normalizeLocationText(picked)) proficiencySet = picked;
+    }
+
+    // Mode: LinkedIn defaults to "can have", which only RANKS. "Debe tener"/"Must have"
+    // is what turns this into a filter. Left alone when unset.
+    let modeSet = "";
+    if (applied.length && options.mode) {
+      const wants = parseLocationSpec(options.mode).reduce((a, x) => a.concat(x), []);
+      await clickSelectorChain(page, [{ type: "css", value: MODE_TRIGGER }], orand, 6000, runtime);
+      await sleep(1100);
+      const picked = await clickMenuItemByLabel(page, wants, orand, runtime, sleep);
+      const now = await triggerText(MODE_TRIGGER);
+      if (picked && normalizeLocationText(now) === normalizeLocationText(picked)) modeSet = picked;
+    }
+
+    const facet_text = await facetText();
+    await shot(`idioma: ${applied.join(", ") || "ninguno"} / ${proficiencySet || "cualquiera"}`).catch(() => {});
+    const ok = applied.length > 0;
+    let reason = null;
+    if (!ok) reason = "no_language_applied";
+    else if (options.proficiency && !proficiencySet) reason = "proficiency_not_set";
+    else if (options.mode && !modeSet) reason = "mode_not_set";
+    return {
+      ok,
+      requested: entries.length,
+      applied,
+      missing,
+      suggestions,
+      proficiency_requested: options.proficiency || "",
+      proficiency_set: proficiencySet,
+      mode_requested: options.mode || "",
+      mode_set: modeSet,
+      facet_text: String(facet_text).slice(0, 300),
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, applied: [], missing: entries.map((a) => a[0]),
+             reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// READ-ONLY diagnostic: open one advanced-search facet and report its real DOM, so a new
+// facet can be automated from evidence instead of guessed selectors. Written because the
+// saved snapshots only ever captured facets COLLAPSED — the expanded controls (typeahead
+// input, "must have/can have" mode, proficiency dropdown) appear nowhere offline. Nothing
+// is committed: facet state is client-side until "Run search", which this never clicks.
+// Options: facet (a data-test suffix like "spoken-languages", or a full CSS selector),
+// typeText (type it into the facet's first input and report the suggestions), select
+// (commit the exact match too, so controls that only appear AFTER a value is added — the
+// proficiency dropdown — get captured).
+// Returns { ok, facet, found, opened, controls[], suggestions[], selected, html }.
+async function probeAdvancedFacet(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const raw = String(options.facet || "").trim();
+  if (!raw) return { ok: false, reason: "missing_facet" };
+  const root = /[[.#\s>]/.test(raw) ? raw : `[data-test-facet-${raw}]`;
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+
+  const inventory = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { found: false };
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const attrsOf = (n) => Object.fromEntries(
+      Array.from(n.attributes || [])
+        .filter((a) => /^(data-(live-)?test|aria-label|placeholder|name|type|role|value|class|id)$/.test(a.name)
+                    || a.name.startsWith("data-test") || a.name.startsWith("data-live-test"))
+        .map((a) => [a.name, clean(a.value).slice(0, 120)]));
+    const controls = Array.from(el.querySelectorAll(
+      'input, select, textarea, button, [role="combobox"], [role="button"], [role="option"]'))
+      .slice(0, 40)
+      .map((n) => ({
+        tag: n.tagName.toLowerCase(),
+        text: clean(n.innerText || n.textContent).slice(0, 60),
+        ...attrsOf(n),
+        ...(n.tagName === "SELECT"
+          ? { options: Array.from(n.options).map((o) => `${o.value}|${clean(o.textContent)}`).slice(0, 25) }
+          : {}),
+      }));
+    return {
+      found: true,
+      expanded: el.querySelector("section")?.getAttribute("aria-expanded") || null,
+      text: clean(el.innerText).slice(0, 400),
+      controls,
+      html: el.outerHTML.replace(/\s+/g, " ").slice(0, 6000),
+    };
+  }, root).catch(() => ({ found: false }));
+
+  try {
+    let inv = await inventory();
+    if (!inv.found) return { ok: false, facet: root, found: false, reason: "facet_not_present" };
+
+    // Open it (the edit/"+" button inside this facet only).
+    let opened = false;
+    if (!inv.controls?.some((c) => c.tag === "input")) {
+      opened = await clickSelectorChain(page, [
+        { type: "css", value: `${root} button[data-test-facet-edit]` },
+        { type: "css", value: `${root} button.facet-edit-button` },
+      ], orand, 8000, runtime);
+      for (let i = 0; i < 12; i++) {
+        await sleep(500);
+        inv = await inventory();
+        if (inv.controls?.some((c) => c.tag === "input")) break;
+      }
+    }
+
+    // Type + (optionally) commit, so post-value controls surface.
+    let suggestions = [], selected = false;
+    if (options.typeText) {
+      const typed = await typeSelectorChain(page, [
+        { type: "css", value: `${root} input.ts-common-typeahead__input` },
+        { type: "css", value: `${root} input[type="text"]` },
+        { type: "css", value: `${root} input` },
+      ], options.typeText, orand, 8000, runtime);
+      if (typed) {
+        for (let i = 0; i < 12; i++) {
+          await sleep(450);
+          suggestions = await page.evaluate((sg) => Array.from(document.querySelectorAll(sg))
+            .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean), SUGGESTION).catch(() => []);
+          if (suggestions.length) break;
+        }
+        if (options.select) {
+          const idx = pickLocationSuggestion(options.typeText, suggestions);
+          if (idx >= 0) {
+            const tagged = await page.evaluate(({ sg, i }) => {
+              document.querySelectorAll("[data-sr-probe-t]").forEach((e) => e.removeAttribute("data-sr-probe-t"));
+              const el = Array.from(document.querySelectorAll(sg))[i];
+              if (!el) return false;
+              el.setAttribute("data-sr-probe-t", "1");
+              el.scrollIntoView({ block: "center" });
+              return true;
+            }, { sg: SUGGESTION, i: idx }).catch(() => false);
+            if (tagged) {
+              await clickSelectorChain(page, [{ type: "css", value: "[data-sr-probe-t]" }], orand, 6000, runtime);
+              await sleep(1200);
+              selected = true;
+            }
+          }
+        }
+        inv = await inventory();   // re-read AFTER the value landed
+      }
+    }
+    // Dropdown menus: open each trigger, snapshot its items, close it again.
+    let menus = {};
+    if (options.dropdowns) {
+      const triggers = await page.evaluate((sel) => Array.from(
+        document.querySelectorAll(`${sel} button[data-test-boolean-facet-dropdown-trigger], ${sel} button[data-test-scope-facet-dropdown-trigger], ${sel} button[aria-haspopup]`))
+        .map((b, i) => {
+          b.setAttribute("data-sr-probe-dd", String(i));
+          return { i, text: (b.innerText || "").replace(/\s+/g, " ").trim(),
+                   attr: Array.from(b.attributes).map((a) => a.name).find((n) => n.includes("dropdown-trigger")) || "" };
+        }), root).catch(() => []);
+      // Dump every VISIBLE menu container, whatever flavour it is (artdeco dropdown,
+      // hue menu, listbox) — the two facet dropdowns render as `.artdeco-dropdown__content`
+      // and returned nothing when queried for [role=menuitem]/li only.
+      const dumpMenus = () => page.evaluate(() => {
+        const clean = (x) => (x || "").replace(/\s+/g, " ").trim();
+        const out = [];
+        for (const c of document.querySelectorAll(
+          '.artdeco-dropdown__content, [role="menu"], [role="listbox"], .hue-menu')) {
+          const cs = window.getComputedStyle(c);
+          if (cs.display === "none" || cs.visibility === "hidden" || c.getAttribute("aria-hidden") === "true") continue;
+          const items = Array.from(c.querySelectorAll(
+            'button, a, li, label, [role="menuitem"], [role="option"], [role="menuitemradio"]'))
+            .map((n) => clean(n.innerText || n.textContent)).filter(Boolean);
+          if (!items.length && !clean(c.innerText)) continue;
+          out.push({ id: c.id || "", text: clean(c.innerText).slice(0, 300),
+                     items: [...new Set(items)].slice(0, 24) });
+        }
+        return out;
+      }).catch(() => []);
+      for (const t of triggers) {
+        await clickSelectorChain(page, [{ type: "css", value: `[data-sr-probe-dd="${t.i}"]` }], orand, 5000, runtime);
+        await sleep(1300);
+        menus[`${t.attr || "trigger"}#${t.i} (${t.text})`] = await dumpMenus();
+        // Toggle it shut with the trigger itself (Escape sometimes collapses the facet).
+        await clickSelectorChain(page, [{ type: "css", value: `[data-sr-probe-dd="${t.i}"]` }], orand, 4000, runtime);
+        await sleep(500);
+      }
+    }
+    return { ok: true, facet: root, found: true, opened, selected, suggestions, menus, ...inv };
+  } catch (e) {
+    return { ok: false, facet: root, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Apply the position's geography to the advanced-search LOCATION facet. This replaces
+// the old blind step pair (type "{{location}}" -> click the first suggestion), which
+// reported success even when it selected NOTHING: "Latin America" is not a Recruiter
+// geo, so jobs 296/297/301 typed it, matched no suggestion, and searched the WHOLE
+// WORLD while Odoo said `job_location=latam`. Here every place is typed, committed
+// only on an EXACT typeahead match, and VERIFIED in the facet afterwards; nothing
+// applied => ok:false => stageVerdict FAILS the run instead of sourcing worldwide.
+// Options: locations (";"-separated, "|"-alternatives), dryRun (probe only).
+// Returns { ok, requested, applied[], missing[], suggestions{}, facet_text_before,
+// facet_text, reason }.
+async function applyLocationFacets(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const entries = parseLocationSpec(options.locations);
+  const dryRun = !!options.dryRun;
+
+  const FACET = "[data-test-facet-geo-locations], [data-test-facet-locations]";
+  const INPUT_SEL = "[data-test-facet-geo-locations] input.ts-common-typeahead__input, "
+    + "[data-test-facet-locations] input.ts-common-typeahead__input";
+  const INPUT_CHAIN = [
+    { type: "css", value: "[data-test-facet-geo-locations] input.ts-common-typeahead__input" },
+    { type: "css", value: "[data-test-facet-locations] input.ts-common-typeahead__input" },
+    { type: "css", value: 'input[placeholder^="Introducir una ubicaci"]' },
+    { type: "css", value: 'input[placeholder^="Add a location"]' },
+  ];
+  // Locale-proof first (data-test), localized aria-labels only as a fallback.
+  const OPEN_CHAIN = [
+    { type: "css", value: "[data-test-facet-geo-locations] button[data-test-facet-edit]" },
+    { type: "css", value: "[data-test-facet-locations] button[data-test-facet-edit]" },
+    { type: "css", value: 'button[aria-label="Add a Candidate geographic location"]' },
+    { type: "css", value: 'button[aria-label="Añadir ubicación del candidato"]' },
+  ];
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+
+  // No geography requested (a `global` position, or the param never resolved) => leave
+  // the facet alone; the caller runs a boolean-only worldwide search on purpose.
+  if (entries.length === 0) {
+    return { ok: true, skipped: true, reason: "no_location", requested: 0,
+             applied: [], missing: [], suggestions: {} };
+  }
+
+  const facetText = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim() : "";
+  }, FACET).catch(() => "");
+  const inputPresent = () => page.evaluate(
+    (sel) => !!document.querySelector(sel), INPUT_SEL).catch(() => false);
+
+  try {
+    // 1) Open the facet (idempotent — it may already be expanded).
+    if (!(await inputPresent())) {
+      await clickSelectorChain(page, OPEN_CHAIN, orand, 8000, runtime);
+      for (let i = 0; i < 16 && !(await inputPresent()); i++) await sleep(500);
+    }
+    if (!(await inputPresent())) {
+      return { ok: false, reason: "facet_not_open", requested: entries.length,
+               applied: [], missing: entries.map((a) => a[0]), suggestions: {} };
+    }
+    const facetBefore = await facetText();
+
+    // 2) Read what the typeahead offers for `term`, WAITING for the list to catch up
+    //    with what we typed — a stale list left over from the previous term must never
+    //    be what we click.
+    const suggestionsFor = async (term) => {
+      // Loosest sign the list has caught up with THIS term (a probe run only needs to
+      // see what is offered, so it must not sit out the full timeout on every miss).
+      const loose = normalizeLocationText(term).split(" ")[0] || "";
+      let labels = [];
+      for (let i = 0; i < 14; i++) {
+        labels = await page.evaluate((sel) => Array.from(document.querySelectorAll(sel))
+          .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean), SUGGESTION).catch(() => []);
+        if (pickLocationSuggestion(term, labels) >= 0) break;
+        if (dryRun && labels.length && loose
+            && labels.some((l) => normalizeLocationText(l).includes(loose))) break;
+        await sleep(450);
+      }
+      return { labels, idx: pickLocationSuggestion(term, labels) };
+    };
+
+    const applied = [], missing = [], suggestions = {};
+    const t0 = Date.now();
+    // The daemon's watchdog (240s) covers the WHOLE run. Measured on the live seat: a
+    // place costs ~3.8s (12 places = 46s of a 123s search run), so 95s fits all 18
+    // LATAM countries with slack and still leaves the run far short of the watchdog.
+    // Past the budget the remaining places are reported in `missing` — the search stays
+    // inside the geography it did apply, and never falls back to worldwide.
+    const BUDGET_MS = 95000;
+    let reason = null;
+
+    for (const alts of entries) {
+      if (Date.now() - t0 > BUDGET_MS) { reason = reason || "time_budget"; missing.push(alts[0]); continue; }
+      // Insurance: if committing a pill collapsed the facet, re-open it rather than
+      // losing every remaining place (a 1-country search is still LATAM, but a
+      // reopen is nearly free and keeps the geography whole).
+      if (!(await inputPresent())) {
+        await clickSelectorChain(page, OPEN_CHAIN, orand, 6000, runtime);
+        for (let i = 0; i < 8 && !(await inputPresent()); i++) await sleep(400);
+      }
+      let done = false;
+      for (const term of alts) {
+        const typed = await typeSelectorChain(page, INPUT_CHAIN, term, orand, 8000, runtime);
+        if (!typed) { reason = reason || "input_not_typable"; break; }
+        await sleep(500 + Math.floor(orand() * 300));
+        const { labels, idx } = await suggestionsFor(term);
+        suggestions[term] = labels.slice(0, 8);
+        if (idx < 0 || dryRun) continue;  // no exact match (or probing) -> next spelling
+        const before = normalizeLocationText(await facetText());
+        const tagged = await page.evaluate(({ sel, i }) => {
+          document.querySelectorAll("[data-sr-loc-t]").forEach((e) => e.removeAttribute("data-sr-loc-t"));
+          const el = Array.from(document.querySelectorAll(sel))[i];
+          if (!el) return false;
+          el.setAttribute("data-sr-loc-t", "1");
+          el.scrollIntoView({ block: "center" });
+          return true;
+        }, { sel: SUGGESTION, i: idx }).catch(() => false);
+        if (!tagged) continue;
+        await clickSelectorChain(page, [{ type: "css", value: "[data-sr-loc-t]" }], orand, 6000, runtime);
+        await sleep(900 + Math.floor(orand() * 400));
+        // Committed <=> the chosen label is now part of the facet (a pill), not just
+        // text sitting in the input (innerText excludes input values).
+        const after = normalizeLocationText(await facetText());
+        const want = normalizeLocationText(labels[idx]);
+        if (want && after !== before && after.includes(want)) {
+          applied.push(labels[idx]);
+          done = true;
+          break;
+        }
+      }
+      if (!done && !dryRun) missing.push(alts[0]);
+    }
+
+    // Leave no half-typed term in the input — it would ride into the committed search.
+    // Select-all + Delete, never a bare Backspace (that deletes the last applied pill).
+    await clickSelectorChain(page, INPUT_CHAIN, orand, 5000, runtime).catch(() => {});
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Delete").catch(() => {});
+    await sleep(400);
+
+    const facet_text = await facetText();
+    await shot(`ubicación: ${applied.length}/${entries.length} aplicada(s)`).catch(() => {});
+    const ok = dryRun ? true : applied.length > 0;
+    if (!ok) reason = reason || "no_location_applied";
+    else if (missing.length && !reason) reason = "partial_locations";
+    return {
+      ok,
+      dry_run: dryRun,
+      requested: entries.length,
+      applied,
+      missing,
+      suggestions,
+      facet_text_before: String(facetBefore).slice(0, 300),
+      facet_text: String(facet_text).slice(0, 300),
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, requested: entries.length, applied: [], missing: entries.map((a) => a[0]),
+             suggestions: {}, reason: `error:${(e && e.message) || e}` };
   }
 }
 
@@ -921,7 +1576,11 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
           headline = ln; break;
         }
       }
-      cards.push({ name, profile_url: url, headline });
+      // Location (lockup caption): PROOF, in the run's own extraction, that the
+      // geography facet actually applied — the signal that was missing when the
+      // "Latin America" searches quietly returned candidates from four continents.
+      const loc = card.querySelector("[data-test-row-lockup-location], [data-live-test-row-lockup-location], .artdeco-entity-lockup__caption");
+      cards.push({ name, profile_url: url, headline, location: clean(loc && (loc.innerText || loc.textContent)) });
     }
     return { cards, total };
   };
@@ -3410,12 +4069,16 @@ async function saveRecommendations(page, options, orand, runtime) {
       if (reqOTW && !otw) { row.setAttribute("data-sr-rec-done", "1"); continue; }  // quality filter
       const btn = row.querySelector(btnSel);
       const sub = row.querySelector(".artdeco-entity-lockup__subtitle");
+      // Location: the lockup caption ("San Jose, Costa Rica"). Captured for EVERY row
+      // (even with no filter configured) so a run always shows where its candidates are.
+      const cap = row.querySelector("[data-test-row-lockup-location], [data-live-test-row-lockup-location], .artdeco-entity-lockup__caption");
       row.setAttribute("data-sr-rec-r", "1");
       row.setAttribute("data-sr-rec-done", "1");
       btn.setAttribute("data-sr-rec-t", "1");
       row.scrollIntoView({ block: "center" });
       return { found: true, name: clean(link && (link.innerText || link.textContent)),
                headline: clean(sub && (sub.innerText || sub.textContent)),
+               location: clean(cap && (cap.innerText || cap.textContent)),
                profile_url: url, open_to_work: otw };
     }
     return { found: false };
@@ -3423,7 +4086,16 @@ async function saveRecommendations(page, options, orand, runtime) {
 
   const BUDGET_MS = 175000;
   const t0 = Date.now();
-  const collected = new Map();  // canonical url -> {name, headline, profile_url, open_to_work}
+  const collected = new Map();  // canonical url -> {name, headline, location, profile_url, open_to_work}
+  // Rows rejected by the geography filter. Kept across passes so a re-navigated list
+  // (doPass reloads the page, clearing the per-row done marks) doesn't re-examine them
+  // forever, and so the run can REPORT who was skipped and from where.
+  const locationTerms = locationSpecTerms(options.allowedLocations);
+  const skippedByLocation = new Map();
+  // The list DID offer rows, and every one of them was outside the position's
+  // geography: an expected "nothing to add" outcome, not a failure — and nothing a
+  // retry pass could improve.
+  const allOutOfLocation = () => collected.size === 0 && skippedByLocation.size > 0;
 
   // One pass over the recommendations: save up to `need` candidates not yet collected.
   const doPass = async (need) => {
@@ -3434,8 +4106,19 @@ async function saveRecommendations(page, options, orand, runtime) {
     await shot("recomendados: lista abierta").catch(() => {});  // visual: the review list is up
     let saved = 0, reason = null;
     while (saved < need && Date.now() - t0 < BUDGET_MS - 15000) {
-      const next = await tagNext([...collected.keys()]);
-      if (!next.found) { reason = collected.size === 0 ? "no_recommendations" : "exhausted"; break; }
+      const next = await tagNext([...collected.keys(), ...skippedByLocation.keys()]);
+      if (!next.found) {
+        reason = (collected.size === 0 && skippedByLocation.size === 0) ? "no_recommendations" : "exhausted";
+        break;
+      }
+      // Geography gate — BEFORE the row is added to the project (an unreadable location
+      // fails closed: skipped, and listed in skipped_examples so the selector can be
+      // fixed from real data instead of guessed).
+      if (!locationAllowed(next.location, locationTerms)) {
+        skippedByLocation.set(canon(next.profile_url) || `${next.name}#${skippedByLocation.size}`,
+                              { name: next.name, location: next.location || "" });
+        continue;
+      }
       await page.hover("[data-sr-rec-r]").catch(() => {});
       await sleep(380 + Math.floor(orand() * 260));
       let clicked = false;
@@ -3446,7 +4129,7 @@ async function saveRecommendations(page, options, orand, runtime) {
       if (!clicked) clicked = await clickSel("[data-sr-rec-t]");
       await sleep(1400 + Math.floor(orand() * 600));  // save applies (moves to pipeline)
       if (clicked && next.profile_url) {
-        collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, profile_url: next.profile_url, open_to_work: next.open_to_work });
+        collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, location: next.location || "", profile_url: next.profile_url, open_to_work: next.open_to_work });
         saved++;
         // visual: who was just added (label carries the running count + the name)
         await shot(`recomendados: +${collected.size} ${(next.name || "").slice(0, 40)}`).catch(() => {});
@@ -3485,15 +4168,20 @@ async function saveRecommendations(page, options, orand, runtime) {
     // (some clicks didn't persist) — failed candidates are still in the recommendations
     // list, so this re-attempts them. Triggered off the reliable count delta, not the
     // fragile url match, so it can't over-add.
-    if (added < target && reason !== "no_recommendations" && Date.now() - t0 < BUDGET_MS - 30000) {
+    if (added < target && reason !== "no_recommendations" && !allOutOfLocation()
+        && Date.now() - t0 < BUDGET_MS - 30000) {
       reason = await doPass(target - added);
       activeAfter = await readActive();
       added = addedSince(activeBefore, activeAfter, collected.size);
     }
 
+    if (allOutOfLocation() && (!reason || reason === "exhausted")) reason = "all_out_of_location";
     const people = [...collected.values()];
+    const skippedLocation = [...skippedByLocation.values()];
     const confirmed = added;  // candidates actually added to the pipeline (count delta)
-    const ok = confirmed > 0 || people.length > 0;
+    // Zero added because every recommendation was out of geography is a SUCCESSFUL run
+    // with nothing to do — never a failure (and never a reason to widen the filter).
+    const ok = confirmed > 0 || people.length > 0 || reason === "all_out_of_location";
     if (!reason && confirmed < people.length) reason = "some_clicks_unconfirmed";
     return {
       ok,
@@ -3501,6 +4189,9 @@ async function saveRecommendations(page, options, orand, runtime) {
       saved: people.length,            // clicks that appeared to succeed
       confirmed,                       // candidates actually added (pipeline count delta)
       require_open_to_work: requireOpenToWork,
+      allowed_locations: options.allowedLocations || "",
+      skipped_location: skippedLocation.length,
+      skipped_examples: skippedLocation.slice(0, 12),
       active_before: activeBefore,
       active_after: activeAfter,
       review_url: reviewUrl,
@@ -3509,7 +4200,7 @@ async function saveRecommendations(page, options, orand, runtime) {
       // "No recommendations available right now" is an EXPECTED empty outcome (the review
       // surface rendered but had nothing new to add), NOT a failure — flag it so stageVerdict
       // doesn't fail the run and the backend posts a soft note.
-      no_recommendations: reason === "no_recommendations",
+      no_recommendations: reason === "no_recommendations" || reason === "all_out_of_location",
       ...(reason ? { reason } : {}),
     };
   } catch (e) {

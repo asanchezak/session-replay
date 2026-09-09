@@ -1,6 +1,6 @@
 {
   "name": "LinkedIn Recruiter: FOCUSED boolean + location search -> extract 30",
-  "description": "Focused Recruiter advanced search plus recruiter_search_people extraction capped at 30 candidates. Use this to verify lazy-load scrolling + pagination from /talent/search without saving anything. Params: boolean_query, location. The boolean facet commits on Enter; the location facet commits by selecting the top typeahead suggestion.",
+  "description": "LIVE-VERIFIED position-driven focused search. Keyword/boolean facet (textarea + Enter-commit) + LOCATION facet applied by the `recruiter_apply_locations` strategy, then extract 30. The location step replaced a blind type+click-first-suggestion pair that reported SUCCESS while selecting nothing: `latam` was threaded as the single string \"Latin America\", which is not a Recruiter geo, so the facet stayed empty and the run sourced WORLDWIDE (jobs 296/297/301 → candidates from India, Pakistan, Ukraine, Australia, the US). The strategy types every place in the spec, commits ONLY an exact typeahead match, verifies it landed in the facet, and fails the run when a requested geography applied nowhere. Params: boolean_query (AI builder / scripts/boolean_from_odoo.py), location (\";\"-separated places, \"|\"-separated spellings, e.g. \"Costa Rica;Brazil|Brasil\"; omit entirely for a deliberately worldwide search). Also applies the SPOKEN LANGUAGE facet (`recruiter_apply_languages`): every search requires English at a proficiency floor, committed only on an exact typeahead match and verified — the seat's typeahead is localized, so \"English\" finds nothing on a Spanish seat (\"Inglés\" does). Params: language, language_proficiency, language_mode (\"Debe tener\"/\"Must have\" makes it a real filter; LinkedIn's default \"can have\" only ranks). Omit them for no language facet.",
   "target_url": "https://www.linkedin.com/talent/home",
   "steps": [
     {
@@ -68,74 +68,16 @@
       "intent": "settle keyword commit"
     },
     {
-      "action_type": "click",
-      "intent": "Open location facet",
-      "selector_chain": [
+      "action_type": "extract",
+      "intent": "Apply the position's location facet (exact geo match, verified)",
+      "methods": [
         {
-          "type": "css",
-          "value": "[data-test-facet-geo-locations] button[data-test-facet-edit]"
+          "kind": "extract_strategy",
+          "strategy": "recruiter_apply_locations"
         },
         {
-          "type": "css",
-          "value": "button[aria-label=\"Add a Candidate geographic location\"]"
-        },
-        {
-          "type": "css",
-          "value": "button[aria-label=\"Añadir ubicación del candidato\"]"
-        }
-      ],
-      "success_condition": {
-        "type": "selector_exists",
-        "selector": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
-      },
-      "checkpoint": true
-    },
-    {
-      "action_type": "scroll",
-      "intent": "delay location input 1"
-    },
-    {
-      "action_type": "scroll",
-      "intent": "delay location input 2"
-    },
-    {
-      "action_type": "type",
-      "intent": "Type location into typeahead",
-      "selector_chain": [
-        {
-          "type": "css",
-          "value": "[data-test-facet-geo-locations] input.ts-common-typeahead__input"
-        },
-        {
-          "type": "css",
-          "value": "[data-test-facet-locations] input.ts-common-typeahead__input"
-        },
-        {
-          "type": "css",
-          "value": "input[placeholder^=\"Introducir una ubicación\"]"
-        }
-      ],
-      "value": "{{location}}"
-    },
-    {
-      "action_type": "scroll",
-      "intent": "delay suggestions dropdown 1"
-    },
-    {
-      "action_type": "scroll",
-      "intent": "delay suggestions dropdown 2"
-    },
-    {
-      "action_type": "click",
-      "intent": "Select top location suggestion",
-      "selector_chain": [
-        {
-          "type": "css",
-          "value": "li[data-live-test-result=\"0\"]"
-        },
-        {
-          "type": "css",
-          "value": "[data-test-typeahead-results] li[role=\"option\"]"
+          "kind": "recruiter_apply_locations",
+          "locations": "{{location}}"
         }
       ]
     },
@@ -146,6 +88,26 @@
     {
       "action_type": "scroll",
       "intent": "settle location applied 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Require the spoken language (English, verified)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_apply_languages"
+        },
+        {
+          "kind": "recruiter_apply_languages",
+          "languages": "{{language}}",
+          "proficiency": "{{language_proficiency}}",
+          "mode": "{{language_mode}}"
+        }
+      ]
+    },
+    {
+      "action_type": "scroll",
+      "intent": "settle language applied"
     },
     {
       "action_type": "click",

@@ -1,0 +1,40 @@
+{
+  "name": "LinkedIn Recruiter: location typeahead PROBE (read-only, no search)",
+  "description": "Diagnostic. Opens the advanced-search LOCATION facet and types each place in `location` (\";\"-separated), REPORTING what the typeahead offers for it — committing nothing and running NO search. This is how we learn which geo names Recruiter actually accepts without spending a real search on the sensitive account; it is the tool that would have caught `latam` being sent as \"Latin America\" (a name the candidate-location typeahead does not offer), which made those runs source worldwide. Read the run's `apply_locations_result.suggestions`. Params: location.",
+  "target_url": "https://www.linkedin.com/talent/search/advanced",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Advanced search",
+      "value": "https://www.linkedin.com/talent/search/advanced"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 2"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Probe the location typeahead (dry run — selects nothing)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_apply_locations"
+        },
+        {
+          "kind": "recruiter_apply_locations",
+          "locations": "{{location}}",
+          "dry_run": "true"
+        }
+      ]
+    }
+  ]
+}

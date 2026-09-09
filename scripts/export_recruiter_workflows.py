@@ -20,6 +20,7 @@ Env: SR_BACKEND, SR_API_KEY (defaults = AWS prod).
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +78,16 @@ def main():
         wid = entry["workflow_id"]
         if only and not wid.startswith(only) and only != entry["spec"]:
             continue
-        wf = get("/workflows/" + wid)
+        try:
+            wf = get("/workflows/" + wid)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            # The registry spans BOTH environments, and a workflow can legitimately
+            # exist on only one of them (e.g. the DEV-only location typeahead probe).
+            # Report it and keep checking the rest instead of aborting the whole sweep.
+            print(f"  ? {entry['spec']:<46} not on this backend ({wid[:8]}) — skipped")
+            continue
         spec = normalize(wf)
         path = os.path.join(WF_DIR, entry["spec"])
         new = dumps(spec)

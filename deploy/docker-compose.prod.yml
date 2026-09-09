@@ -46,6 +46,12 @@ services:
       RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID: ${RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID:-}
       RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID: ${RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID:-}
       RECRUITER_DEFAULT_LOCATION: ${RECRUITER_DEFAULT_LOCATION:-}
+      # Per-position geography override, {"<hr.job id>":"<facet spec>"} as JSON.
+      # MUST be listed here or it never reaches the container (this file is an
+      # ALLOW-LIST, not an env_file passthrough — see the 2026-08-03 kill-switch
+      # incident). Kept a STRING in Settings so an empty value is a valid "unset"
+      # instead of a dict validation error that would refuse to start.
+      RECRUITER_JOB_LOCATIONS: ${RECRUITER_JOB_LOCATIONS:-}
       RECRUITER_RECOMMENDATIONS_WORKFLOW_ID: ${RECRUITER_RECOMMENDATIONS_WORKFLOW_ID:-}
       RECRUITER_SEARCH_START_TIGHTNESS: ${RECRUITER_SEARCH_START_TIGHTNESS:-2}
       # NOTE: this block is an ALLOW-LIST — the service does not use `env_file`, so a variable
