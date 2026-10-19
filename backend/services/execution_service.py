@@ -897,10 +897,15 @@ class ExecutionService:
         real failure notify). Non-walled failures return False (surface normally)."""
         from services.recruiter_pipeline_service import RecruiterPipelineService
 
+        from api.v1.daemon import mark_seat_walled
+
         if RecruiterPipelineService._classify_flow_error(run.error_summary or "") != (
             "walled_seat"
         ):
             return False
+        # The failure proves the seat is walled, even if the last keepalive said warm:
+        # GET /daemon/status (and the Odoo login banner that reads it) shows it at once.
+        mark_seat_walled((run.origin or {}).get("target_operator"))
         return (await self.auto_relaunch(run)) is not None
 
     async def _push_linkedin_applicants_after_completion(self, run: ExecutionRun) -> dict:

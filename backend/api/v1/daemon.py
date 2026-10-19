@@ -16,6 +16,11 @@ router = APIRouter(prefix="/daemon", tags=["daemon"])
 
 HEARTBEAT_TTL_SECONDS = 30.0
 _heartbeats: dict[str, dict[str, object]] = {}
+# operator_id → the seat_checked_at its daemon reported when one of its runs failed on the
+# seat's login wall. That run proves the seat is walled even if the last keepalive said warm
+# (on 2026-10-15 one false "warm" check let 16 runs hit the wall), so the seat reads as
+# walled until the daemon reports a NEWER keepalive check.
+_walled_by_run: dict[str, object] = {}
 
 
 def _live_heartbeats() -> list[dict]:
@@ -34,6 +39,24 @@ def operator_online(operator_id: str) -> bool:
     return any(s.get("operator_id") == operator_id for s in _live_heartbeats())
 
 
+def mark_seat_walled(operator_id: str | None) -> None:
+    """A run of this operator failed on the seat's login wall: report the seat as walled
+    until its daemon's keepalive checks it again."""
+    live = [s for s in _live_heartbeats() if operator_id and s.get("operator_id") == operator_id]
+    if not live:
+        return
+    newest = max(live, key=lambda s: float(s["last_seen_ts"]))
+    _walled_by_run[operator_id] = newest.get("seat_checked_at")
+
+
+def _seat_warm(state: dict) -> object:
+    """A heartbeat's seat verdict, unless a later run failed on the login wall."""
+    op = state.get("operator_id")
+    if op in _walled_by_run and state.get("seat_checked_at") == _walled_by_run[op]:
+        return False
+    return state.get("seat_warm")
+
+
 def latest_seat_warm(operator_id: str) -> bool | None:
     """Freshest non-stale seat_warm reported by this operator's daemon. None if the
     operator has NO live heartbeat (host offline / unknown right after a backend
@@ -43,7 +66,7 @@ def latest_seat_warm(operator_id: str) -> bool | None:
     if not live:
         return None
     newest = max(live, key=lambda s: float(s["last_seen_ts"]))
-    val = newest.get("seat_warm")
+    val = _seat_warm(newest)
     return val if isinstance(val, bool) else None
 
 
@@ -82,6 +105,7 @@ class DaemonHeartbeatRequest(BaseModel):
 
 def reset_heartbeat_state() -> None:
     _heartbeats.clear()
+    _walled_by_run.clear()
 
 
 def _isoformat_utc(ts: float) -> str:
@@ -90,6 +114,9 @@ def _isoformat_utc(ts: float) -> str:
 
 @router.post("/heartbeat")
 async def heartbeat(payload: DaemonHeartbeatRequest):
+    op = payload.operator_id
+    if op in _walled_by_run and payload.seat_checked_at != _walled_by_run[op]:
+        del _walled_by_run[op]  # a fresh keepalive verdict replaces the failed run's
     _heartbeats[payload.worker_id] = {
         "worker_id": payload.worker_id,
         "polling": payload.polling,
@@ -123,7 +150,7 @@ async def status(db: AsyncSession = Depends(get_db)):
             "circuit_open": state.get("circuit_open"),
             "circuit_reason": state.get("circuit_reason"),
             "cooldown_until": state.get("cooldown_until"),
-            "seat_warm": state.get("seat_warm"),
+            "seat_warm": _seat_warm(state),
             "seat_checked_at": state.get("seat_checked_at"),
             "last_seen": _isoformat_utc(float(state["last_seen_ts"])),
             "age_seconds": round(age_seconds, 3),

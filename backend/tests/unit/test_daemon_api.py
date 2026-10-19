@@ -140,3 +140,58 @@ async def test_daemon_status_sorts_multiple_workers_by_recency(client, monkeypat
     assert [worker["worker_id"] for worker in body["workers"]] == ["worker-b", "worker-a"]
     assert body["any_up"] is True
     assert body["workers"][0]["driving_run_id"] == "run-2"
+
+
+async def _seat_heartbeat(client, warm, checked_at, operator="fernanda", worker="fernanda-worker"):
+    response = await client.post(
+        "/v1/daemon/heartbeat",
+        json={
+            "worker_id": worker, "polling": True, "driving_run_id": None,
+            "operator_id": operator, "seat_warm": warm, "seat_checked_at": checked_at,
+        },
+        headers=_HEADERS,
+    )
+    assert response.status_code == 200
+
+
+async def _status_seat_warm(client):
+    body = (await client.get("/v1/daemon/status", headers=_HEADERS)).json()
+    return [w["seat_warm"] for w in body["workers"]]
+
+
+async def test_walled_run_reports_the_seat_walled_until_the_next_keepalive(client, monkeypatch):
+    daemon_api.reset_heartbeat_state()
+    monkeypatch.setattr(daemon_api.time, "time", lambda: 100.0)
+    await _seat_heartbeat(client, True, "2026-10-15T03:52:00Z")
+
+    daemon_api.mark_seat_walled("fernanda")
+
+    assert await _status_seat_warm(client) == [False]
+    assert daemon_api.latest_seat_warm("fernanda") is False
+    # Heartbeats keep repeating the same (stale) keepalive check: still walled.
+    await _seat_heartbeat(client, True, "2026-10-15T03:52:00Z")
+    assert await _status_seat_warm(client) == [False]
+    # The keepalive checked the seat again: its verdict wins.
+    await _seat_heartbeat(client, True, "2026-10-15T03:55:00Z")
+    assert await _status_seat_warm(client) == [True]
+    assert daemon_api.latest_seat_warm("fernanda") is True
+
+
+async def test_walled_run_only_affects_its_operator(client, monkeypatch):
+    daemon_api.reset_heartbeat_state()
+    monkeypatch.setattr(daemon_api.time, "time", lambda: 100.0)
+    await _seat_heartbeat(client, True, "t1")
+    await _seat_heartbeat(client, True, "t1", operator="andrey", worker="andrey-worker")
+
+    daemon_api.mark_seat_walled("fernanda")
+
+    assert daemon_api.latest_seat_warm("fernanda") is False
+    assert daemon_api.latest_seat_warm("andrey") is True
+
+
+async def test_walled_run_without_live_daemon_is_ignored(client, monkeypatch):
+    daemon_api.reset_heartbeat_state()
+    daemon_api.mark_seat_walled("fernanda")
+    daemon_api.mark_seat_walled(None)
+    assert daemon_api.latest_seat_warm("fernanda") is None
+    assert daemon_api._walled_by_run == {}

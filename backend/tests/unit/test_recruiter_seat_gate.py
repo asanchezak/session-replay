@@ -87,3 +87,27 @@ async def test_maybe_auto_relaunch_relaunches_walled(db_session, monkeypatch):
 
     assert await svc._maybe_auto_relaunch_walled(run) is True
     svc.auto_relaunch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_walled_failure_marks_the_seat_walled(db_session, monkeypatch):
+    """The daemon's fail-fast text from a generic step still reads as walled: the run is
+    relaunched AND its operator's seat reads walled right away (Odoo login banner)."""
+    from api.v1 import daemon as daemon_api
+
+    marked = []
+    monkeypatch.setattr(daemon_api, "mark_seat_walled", marked.append)
+    svc = ExecutionService(db_session)
+    svc.auto_relaunch = AsyncMock(return_value=SimpleNamespace(id="clone"))
+    run = SimpleNamespace(
+        id="r1", origin={"target_operator": "fernanda"},
+        error_summary="step 4 'Project name' failed: Recruiter seat walled — re-login "
+                      "(login-talent.bat) then Relaunch the run",
+    )
+    assert await svc._maybe_auto_relaunch_walled(run) is True
+    assert marked == ["fernanda"]
+
+    marked.clear()
+    run.error_summary = "selector not found on results page"
+    assert await svc._maybe_auto_relaunch_walled(run) is False
+    assert marked == []
