@@ -30,7 +30,8 @@
           "project_name": "{{project_name}}",
           "target_count": "{{target_count}}",
           "max_scroll_passes": 12,
-          "project_url": "{{project_url}}"
+          "project_url": "{{project_url}}",
+          "allowed_locations": "{{allowed_locations}}"
         }
       ]
     }

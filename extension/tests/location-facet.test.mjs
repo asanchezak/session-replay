@@ -35,6 +35,56 @@ test("suggestion pick: EXACT normalized match only (accent/case-insensitive)", (
   assert.equal(pickLocationSuggestion("Costa Rica", []), -1);
 });
 
+// City-level geography (job 303: "must be based in Bogotá or Medellín, São Paulo, the
+// GAM, or Lima"). Suggestion lists below are the live seat's, from probe run 5fea20cf.
+import { locationTypeaheadQueries } from "../runtime-strategies/recruiter.mjs";
+
+const JOB_303 = "Sao Paulo, San Pablo, Brasil;Medellín, Antioquia, Colombia;"
+  + "Bogotá, Distrito Capital, Colombia;Gran Área Metropolitana, San José, Costa Rica;"
+  + "San José, Costa Rica;Heredia, Costa Rica;Alajuela, Costa Rica;Cartago, Costa Rica;Lima, Perú";
+
+test("typeahead queries: full label first, then its most specific part", () => {
+  assert.deepEqual(locationTypeaheadQueries("Bogotá, Distrito Capital, Colombia"),
+    ["Bogotá, Distrito Capital, Colombia", "Bogotá"]);
+  // a single-segment label has nothing shorter to try
+  assert.deepEqual(locationTypeaheadQueries("Costa Rica"), ["Costa Rica"]);
+  assert.deepEqual(locationTypeaheadQueries(" Lima, Perú "), ["Lima, Perú", "Lima"]);
+});
+
+test("typeahead queries: the short query reaches labels the full one cannot", () => {
+  // typed in full, the seat offers nothing / only the region…
+  assert.equal(pickLocationSuggestion("Sao Paulo, San Pablo, Brasil", []), -1);
+  assert.equal(pickLocationSuggestion("Bogotá, Distrito Capital, Colombia",
+    ["Distrito Capital, Colombia"]), -1);
+  // …while the short query offers the exact label — and ONLY that label is committed,
+  // never the metro or the state listed next to it
+  const sp = ["São Paulo y alrededores", "Sao Paulo, San Pablo, Brasil", "San Pablo, Brasil",
+              "Campinas, San Pablo, Brasil"];
+  assert.equal(pickLocationSuggestion(locationTypeaheadQueries(
+    "Sao Paulo, San Pablo, Brasil")[0], sp), 1);
+  const bog = ["Bogotá, Distrito Capital, Colombia", "Área metropolitana de Bogotá D.C.",
+               "Distrito Capital, Colombia", "Bogotá, Capital District, Colombia"];
+  assert.equal(pickLocationSuggestion("Bogotá, Distrito Capital, Colombia", bog), 0);
+});
+
+test("location filter: city-level geography admits the city and its districts only", () => {
+  const terms = locationSpecTerms(JOB_303);
+  for (const loc of ["Sao Paulo, San Pablo, Brasil", "Medellín, Antioquia, Colombia",
+                     "Bogotá, Distrito Capital, Colombia", "Escazú, San José, Costa Rica",
+                     "Belén, Heredia, Costa Rica", "Miraflores, Lima, Perú", "Lima, Perú",
+                     "Gran Área Metropolitana, San José, Costa Rica"]) {
+    assert.equal(locationAllowed(loc, terms), true, `in-geography location rejected: ${loc}`);
+  }
+  // exactly the four out-of-geography candidates PROD saved for job 303 (run fe8dc44d)
+  for (const loc of ["Quito Metropolitan Area", "San Pablo, Brasil", "Colombia",
+                     "San Carlos, San Pablo, Brasil",
+                     // …and the neighbours the facet would never select
+                     "Campinas, San Pablo, Brasil", "Costa Rica", "Limón, Costa Rica",
+                     "Cali, Valle del Cauca, Colombia"]) {
+    assert.equal(locationAllowed(loc, terms), false, `out-of-geography location admitted: ${loc}`);
+  }
+});
+
 test("location filter: matches only at the END of the displayed location", () => {
   const latam = locationSpecTerms("Costa Rica; Panama|Panamá; Brazil|Brasil");
   assert.equal(locationAllowed("San José, Costa Rica", latam), true);
@@ -61,6 +111,16 @@ test("stage gate: nothing applied fails the run; a skipped (global) spec passes"
   assert.equal(bad.reason, "no_location_applied");
   // a facet that never opened must fail too, with its own reason
   assert.equal(v({ apply_locations_result: { ok: false, reason: "facet_not_open" } }).reason, "facet_not_open");
+});
+
+test("search save gate: out-of-geography passes, unreadable locations fail", () => {
+  const v = (r) => stageVerdict({ strategy: "recruiter_save_results_to_project", eventKind: "recruiter_save", extraction: { save_result: r } });
+  assert.equal(v({ ok: true, saved_count: 4, skipped_location: 1 }).ok, true);
+  // every row outside the position's geography: nothing SHOULD be saved
+  assert.equal(v({ ok: true, saved_count: 0, skipped_location: 3, reason: "all_out_of_location" }).ok, true);
+  // …but a selector that can no longer read locations must not pass as "nothing to do"
+  assert.equal(v({ ok: false, saved_count: 0, skipped_location: 3, reason: "location_unreadable" }).ok, false);
+  assert.equal(v({ ok: false, saved_count: 0, reason: "no_result_checkboxes_selected" }).ok, false);
 });
 
 test("recommendations gate: 'everything was out of geography' is a success, not a failure", () => {

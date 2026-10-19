@@ -127,6 +127,45 @@ Summary table lives in `CLAUDE.md`. Daemon + session ops are in `docs/recruiter-
   `RECRUITER_LOCATION_MAP["latam"]` is now the full **18** countries — verified as a set on PROD
   (`preview-count` run `bb7297ba`: **18/18** applied, `missing:[]`, facet step **71s**, run 153s).
 
+- **(2d-ter-bis) CITY-level geography (job 303) — 2026-09-25.** A position can require CITIES, not
+  countries: morsoft job 303's JD says "must be based in Bogotá or Medellín, São Paulo, the GAM, or Lima",
+  yet it is `job_location=latam`, so PROD searched all 18 countries and saved people from Quito, the São
+  Paulo *state*, "Colombia", São Carlos… (4 of 6). The spec entries are simply the typeahead's own
+  city/province labels, e.g. `RECRUITER_JOB_LOCATIONS={"303":"Sao Paulo, San Pablo, Brasil;Medellín,
+  Antioquia, Colombia;Bogotá, Distrito Capital, Colombia;Gran Área Metropolitana, San José, Costa Rica;San
+  José, Costa Rica;Heredia, Costa Rica;Alajuela, Costa Rica;Cartago, Costa Rica;Lima, Perú"}`.
+  - **The typeahead does not find every label by its own text** (probe run `5fea20cf`, DEV): typed in
+    full, `Sao Paulo, San Pablo, Brasil` returns **nothing** and `Bogotá, Distrito Capital, Colombia`
+    returns only `Distrito Capital, Colombia` — yet `Sao Paulo` / `Bogotá` offer those exact labels. The
+    other 7 resolve in full. `recruiter_apply_locations` now types the full label and, on a miss, its most
+    specific part (`locationTypeaheadQueries`: text before the first comma) — still committing ONLY the
+    exact full label, so the short query can never widen the geography. Country specs are single-segment
+    ⇒ no fallback ⇒ unchanged behavior.
+  - **The recommendations filter works unchanged** for city labels: suffix match admits the city and its
+    districts ("Escazú, San José, Costa Rica", "Miraflores, Lima, Perú") and rejects the state, the country
+    alone and neighbouring cities ("San Pablo, Brasil", "Colombia", "Campinas, San Pablo, Brasil").
+  - **LinkedIn's location facet is NOT a guarantee — the search stage is now gated too.** DEV copy of
+    303 (qaodoo job 368, search run `a9d4ee13`): facet applied 9/9, yet 1 of 5 results was "San Carlos,
+    San Pablo, Brasil" (230 km from São Paulo; also one of PROD's 4 bad saves). The same spec now gates
+    both ends of the search stage: `push_recruiter_leads(allowed_locations=…)` drops those people before
+    they become Odoo leads (Python twin of the JS matcher: `backend/services/recruiter_geography.py`,
+    recorded on the run as `origin.out_of_location_dropped`), and the results-page save
+    (`recruiter_save_results_to_project`, param `allowed_locations` — workflow `7f11deb6`) never ticks a row
+    displayed outside it. That second half matters most: the save selects rows by POSITION on the page,
+    not by lead, and the per-position InMail goes to the PROJECT's uncontacted stage — a person saved to the
+    project gets messaged whether or not they are an Odoo lead. Unreadable row location ⇒ skipped; if that
+    leaves nothing saved the run FAILS (`location_unreadable` = selector drift), while "every row was out of
+    geography" (`all_out_of_location`) passes, like the recommendations gate.
+  - **Metro-area geos exist and are NOT the city** — `Área metropolitana de Medellín`, `Área metropolitana
+    de Bogotá D.C.`, `Área metropolitana de Lima`, `São Paulo y alrededores` (and search cards can show
+    English ones like "Quito Metropolitan Area"). A profile located at the metro level is rejected by a
+    city-only spec; add the metro label as its own `;` entry if the position should include it.
+  - **Recommendations used to IGNORE a geography change.** `save_recommendations` preferred the
+    `search_location` stashed by the job's newest run, and every recommendations run re-stashes what it
+    used ⇒ a position stayed pinned to its FIRST search's geography forever (the akcr cron would have kept
+    feeding 303 recommendations from 18 countries after the override). It now resolves fresh every run:
+    override → current Odoo `job_location` → the stash only when Odoo comes back empty.
+
 - **(2d-quater) SPOKEN LANGUAGE: every search requires English — 2026-09-09.** Strategy
   `recruiter_apply_languages` on `[data-test-facet-spoken-languages]`, added as its own step
   between the location facet and "Run search" (workflow `1bc44128`, now 18 steps). Params

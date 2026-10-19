@@ -7,7 +7,7 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-09-09-geo-and-language-gates";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-09-25-geo-short-query-fallback";
 
 // ------------------------------------------------------------------- location facet
 // A position's geography travels through the pipeline as ONE string (the existing
@@ -55,6 +55,19 @@ export function pickExactLabel(term, labels) {
 
 // Historical name, kept because the location facet reads better with it.
 export const pickLocationSuggestion = pickExactLabel;
+
+// What to TYPE to reach a place's label — the full label first, then its most
+// specific part. Recruiter's typeahead does not find every label by its own text
+// (probe run 5fea20cf, 2026-09-25): "Sao Paulo, San Pablo, Brasil" typed in full
+// returns NOTHING and "Bogotá, Distrito Capital, Colombia" returns only the region,
+// yet both are offered verbatim for "Sao Paulo" / "Bogotá". The label to COMMIT stays
+// the full one either way (exact match only), so the shorter query can never widen
+// or shift the geography — it only reaches a label the long query could not.
+export function locationTypeaheadQueries(label) {
+  const full = String(label ?? "").trim();
+  const head = full.split(",")[0].trim();
+  return head && head !== full ? [full, head] : [full];
+}
 
 // Is a candidate's displayed location inside the position's geography? LinkedIn writes
 // locations most-specific-first, ending on the country ("San Jose, Costa Rica"), so a
@@ -513,6 +526,7 @@ function readSaveResultsOptions(step) {
     targetCount: readPositiveInt(method.target_count ?? method.count ?? method.max_people, 1),
     mode: String(method.mode || "bulk").trim().toLowerCase(),
     maxScrollPasses: readPositiveInt(method.max_scroll_passes, 12),
+    allowedLocations: String(method.allowed_locations ?? "").trim(),
   };
 }
 
@@ -804,7 +818,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     return {
       handled: true,
       extraction: { save_result: saveResult },
-      log: `recruiter_save_results_to_project ok=${saveResult.ok} saved=${saveResult.saved_count || 0}/${saveResult.target_count || 0} verified_in_project=${saveResult.verified_in_project} project="${saveResult.project_name || ""}" reason="${saveResult.reason || ""}"`,
+      log: `recruiter_save_results_to_project ok=${saveResult.ok} saved=${saveResult.saved_count || 0}/${saveResult.target_count || 0} verified_in_project=${saveResult.verified_in_project} skipped_location=${saveResult.skipped_location ?? 0} project="${saveResult.project_name || ""}" reason="${saveResult.reason || ""}"`,
     };
   }
 
@@ -952,6 +966,10 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     }
     case "recruiter_save_results_to_project": {
       const r = ex.save_result || {};
+      // Every row out of the position's geography: nothing SHOULD be saved — a success,
+      // like the recommendations gate. (Unreadable locations report their own reason
+      // and still fail.)
+      if (r.reason === "all_out_of_location") return ok();
       if (!(Number(r.saved_count) > 0)) return fail("save_selected_none");
       // verified_in_project: null/undefined = verification nav flaked or was skipped →
       // trust the save (PASS, no false-negative). Only an AFFIRMATIVE 0 means the
@@ -1436,35 +1454,41 @@ async function applyLocationFacets(page, options, orand, runtime) {
         await clickSelectorChain(page, OPEN_CHAIN, orand, 6000, runtime);
         for (let i = 0; i < 8 && !(await inputPresent()); i++) await sleep(400);
       }
-      let done = false;
+      let done = false, untypable = false;
       for (const term of alts) {
-        const typed = await typeSelectorChain(page, INPUT_CHAIN, term, orand, 8000, runtime);
-        if (!typed) { reason = reason || "input_not_typable"; break; }
-        await sleep(500 + Math.floor(orand() * 300));
-        const { labels, idx } = await suggestionsFor(term);
-        suggestions[term] = labels.slice(0, 8);
-        if (idx < 0 || dryRun) continue;  // no exact match (or probing) -> next spelling
-        const before = normalizeLocationText(await facetText());
-        const tagged = await page.evaluate(({ sel, i }) => {
-          document.querySelectorAll("[data-sr-loc-t]").forEach((e) => e.removeAttribute("data-sr-loc-t"));
-          const el = Array.from(document.querySelectorAll(sel))[i];
-          if (!el) return false;
-          el.setAttribute("data-sr-loc-t", "1");
-          el.scrollIntoView({ block: "center" });
-          return true;
-        }, { sel: SUGGESTION, i: idx }).catch(() => false);
-        if (!tagged) continue;
-        await clickSelectorChain(page, [{ type: "css", value: "[data-sr-loc-t]" }], orand, 6000, runtime);
-        await sleep(900 + Math.floor(orand() * 400));
-        // Committed <=> the chosen label is now part of the facet (a pill), not just
-        // text sitting in the input (innerText excludes input values).
-        const after = normalizeLocationText(await facetText());
-        const want = normalizeLocationText(labels[idx]);
-        if (want && after !== before && after.includes(want)) {
-          applied.push(labels[idx]);
-          done = true;
-          break;
+        // Full label first, then its most specific part — the label to commit is
+        // `term` either way (see locationTypeaheadQueries).
+        for (const query of locationTypeaheadQueries(term)) {
+          const typed = await typeSelectorChain(page, INPUT_CHAIN, query, orand, 8000, runtime);
+          if (!typed) { reason = reason || "input_not_typable"; untypable = true; break; }
+          await sleep(500 + Math.floor(orand() * 300));
+          const { labels, idx } = await suggestionsFor(term);
+          suggestions[query] = labels.slice(0, 8);
+          if (idx < 0) continue;  // not offered for this query -> the shorter one / next spelling
+          if (dryRun) break;      // probing: it WOULD apply, so skip the fallback query
+          const before = normalizeLocationText(await facetText());
+          const tagged = await page.evaluate(({ sel, i }) => {
+            document.querySelectorAll("[data-sr-loc-t]").forEach((e) => e.removeAttribute("data-sr-loc-t"));
+            const el = Array.from(document.querySelectorAll(sel))[i];
+            if (!el) return false;
+            el.setAttribute("data-sr-loc-t", "1");
+            el.scrollIntoView({ block: "center" });
+            return true;
+          }, { sel: SUGGESTION, i: idx }).catch(() => false);
+          if (!tagged) continue;
+          await clickSelectorChain(page, [{ type: "css", value: "[data-sr-loc-t]" }], orand, 6000, runtime);
+          await sleep(900 + Math.floor(orand() * 400));
+          // Committed <=> the chosen label is now part of the facet (a pill), not just
+          // text sitting in the input (innerText excludes input values).
+          const after = normalizeLocationText(await facetText());
+          const want = normalizeLocationText(labels[idx]);
+          if (want && after !== before && after.includes(want)) {
+            applied.push(labels[idx]);
+            done = true;
+            break;
+          }
         }
+        if (done || untypable) break;
       }
       if (!done && !dryRun) missing.push(alts[0]);
     }
@@ -1779,12 +1803,19 @@ async function clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand) {
   return true;
 }
 
-async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScrollPasses, runtime) {
+// Returns { selected, skipped }. With `locationTerms` (the position's geography), a row
+// whose displayed location is outside it is never ticked — it lands in `skipped` with
+// its location ("" = unreadable, also skipped: fail closed). LinkedIn's location facet
+// is not a guarantee: job 303's city-level search still returned São Carlos for São
+// Paulo, and this step selects by POSITION on the page, not by lead.
+async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScrollPasses, runtime, locationTerms = []) {
   const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
   const moveMouseAlongBezier = runtimeValue(runtime, "moveMouseAlongBezier", async () => {});
   const ROW = '[data-test-paginated-profile-list-item-container], article.profile-list-item';
   const selected = [];
   const selectedUrls = new Set();
+  const skipped = [];
+  const skippedUrls = new Set();
   const limit = Math.max(1, targetCount || 1);
   const passes = Math.max(1, maxScrollPasses || 12);
   // Selects ONLY the current results page (Recruiter resets the checkbox selection
@@ -1792,7 +1823,7 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
   // page — the page loop + save happens in saveRecruiterResultsToProject instead).
   let stale = 0;
   for (let pass = 0; pass < passes && selected.length < limit; pass++) {
-    const before = selected.length;
+    const before = selected.length + skipped.length;
     const targets = await page.evaluate(({ rowSelector, seen, remaining }) => {
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
       const canon = (href) => {
@@ -1830,19 +1861,27 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
         if (!box) continue;
         batchUrls.add(url);
         if (input.id) batchInputs.add(input.id);
+        // Same lockup the search extractor reads a card's location from.
+        const loc = row.querySelector("[data-test-row-lockup-location], [data-live-test-row-lockup-location], .artdeco-entity-lockup__caption");
         out.push({
           x: box.left + box.width / 2,
           y: box.top + box.height / 2,
           inputId: input.id || "",
           url,
           name: clean(link && (link.innerText || link.textContent)),
+          location: clean(loc && (loc.innerText || loc.textContent)),
         });
       }
       return out;
-    }, { rowSelector: ROW, seen: Array.from(selectedUrls), remaining: limit - selected.length }).catch(() => []);
+    }, { rowSelector: ROW, seen: [...selectedUrls, ...skippedUrls], remaining: limit - selected.length }).catch(() => []);
     for (const target of targets) {
       if (selected.length >= limit) break;
-      if (selectedUrls.has(target.url)) continue;  // defensive: never select the same profile twice
+      if (selectedUrls.has(target.url) || skippedUrls.has(target.url)) continue;  // defensive: never select the same profile twice
+      if (locationTerms.length && !locationAllowed(target.location, locationTerms)) {
+        skippedUrls.add(target.url);
+        skipped.push({ profile_url: target.url, name: target.name || "", location: target.location || "" });
+        continue;
+      }
       await moveMouseAlongBezier(page, { x: target.x, y: target.y }, orand).catch(() => {});
       await sleep(80 + Math.floor(orand() * 140));
       await page.mouse.click(target.x, target.y).catch(() => {});
@@ -1869,13 +1908,13 @@ async function selectRecruiterResultCheckboxes(page, targetCount, orand, maxScro
       await sleep(250 + Math.floor(orand() * 350));
     }
     if (selected.length >= limit) break;
-    // No new selection this pass → the current page is exhausted; after a couple of
-    // empty passes stop.
-    if (selected.length === before) { if (++stale >= 2) break; } else { stale = 0; }
+    // No new row (selected OR skipped) this pass → the current page is exhausted;
+    // after a couple of empty passes stop.
+    if (selected.length + skipped.length === before) { if (++stale >= 2) break; } else { stale = 0; }
     await page.mouse.wheel(0, 650 + Math.floor(orand() * 500)).catch(() => {});
     await sleep(900 + Math.floor(orand() * 700));
   }
-  return selected;
+  return { selected, skipped };
 }
 
 async function clickRecruiterBulkSave(page, orand, runtime) {
@@ -4222,31 +4261,39 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
   const projectId = pidMatch ? pidMatch[1] : "";
   const limit = Math.max(1, options.targetCount || 1);
   const maxPages = Math.max(1, Math.ceil(limit / 12) + 2);
+  // The position's geography: rows displayed outside it are never selected.
+  const locationTerms = locationSpecTerms(options.allowedLocations);
 
   // Save PAGE BY PAGE: Recruiter clears the checkbox selection on pagination, so we
   // select the current page, save that batch to the project, then advance — instead
   // of select-all-then-save-once (which only saved the last page).
   const savedAll = [];
+  const skippedAll = [];
   const pageResults = [];
   let firstPageDiag = null;
   for (let pg = 0; pg < maxPages && savedAll.length < limit; pg++) {
     const remaining = limit - savedAll.length;
-    const selected = await selectRecruiterResultCheckboxes(page, remaining, orand, options.maxScrollPasses, runtime);
+    const { selected, skipped } = await selectRecruiterResultCheckboxes(
+      page, remaining, orand, options.maxScrollPasses, runtime, locationTerms);
+    skippedAll.push(...skipped);
     if (!selected.length) {
-      if (pg === 0) {
+      if (pg === 0 && !skipped.length) {
         firstPageDiag = await page.evaluate(() => ({
           rows: document.querySelectorAll('[data-test-paginated-profile-list-item-container], article.profile-list-item').length,
           checkboxes: document.querySelectorAll('input.small-input[type="checkbox"], input.small-input').length,
         })).catch(() => null);
       }
-      break;
+      // A page of nothing but out-of-geography rows still has a next page worth reading.
+      if (!skipped.length) break;
+      pageResults.push({ page: pg, selected: 0, skipped: skipped.length });
+    } else {
+      const dlg = await saveSelectionToProject(page, projectName, orand, runtime, projectId);
+      pageResults.push({ page: pg, selected: selected.length, skipped: skipped.length, ...dlg });
+      if (!dlg.ok) break;  // dialog failed — stop, report what we saved so far
+      savedAll.push(...selected);
+      await shot(`guardar: página ${pg + 1}, +${selected.length} (total ${savedAll.length})`).catch(() => {});
+      if (savedAll.length >= limit) break;
     }
-    const dlg = await saveSelectionToProject(page, projectName, orand, runtime, projectId);
-    pageResults.push({ page: pg, selected: selected.length, ...dlg });
-    if (!dlg.ok) break;  // dialog failed — stop, report what we saved so far
-    savedAll.push(...selected);
-    await shot(`guardar: página ${pg + 1}, +${selected.length} (total ${savedAll.length})`).catch(() => {});
-    if (savedAll.length >= limit) break;
     const wentNext = await clickResultsNextPage(page, sleep, moveMouseAlongBezier, orand);
     if (!wentNext) break;
     await page.waitForSelector('[data-test-paginated-profile-list-item-container], article.profile-list-item', { timeout: 10000 }).catch(() => {});
@@ -4280,8 +4327,17 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
   }
 
   const savedCount = savedAll.length;
+  const unreadable = skippedAll.filter((s) => !s.location).length;
+  // Nothing saved because every row was out of geography is a correct outcome; nothing
+  // saved because locations could not be READ means the row selector drifted — fail
+  // loudly rather than report an empty "success".
+  let reason = null;
+  if (savedCount === 0) {
+    if (!skippedAll.length) reason = "no_result_checkboxes_selected";
+    else reason = unreadable ? "location_unreadable" : "all_out_of_location";
+  }
   return {
-    ok: savedCount > 0,
+    ok: savedCount > 0 || reason === "all_out_of_location",
     saved_count: savedCount,
     target_count: limit,
     selected: savedAll,
@@ -4289,6 +4345,10 @@ async function saveRecruiterResultsToProject(page, options, orand, runtime) {
     verified_in_project: verifiedInProject,
     verify_url: verifyUrl || null,
     pages: pageResults,
-    ...(savedCount === 0 ? { reason: "no_result_checkboxes_selected", diagnostics: firstPageDiag } : {}),
+    allowed_locations: options.allowedLocations || "",
+    skipped_location: skippedAll.length,
+    skipped_examples: skippedAll.slice(0, 10),
+    ...(reason ? { reason } : {}),
+    ...(reason === "no_result_checkboxes_selected" ? { diagnostics: firstPageDiag } : {}),
   };
 }

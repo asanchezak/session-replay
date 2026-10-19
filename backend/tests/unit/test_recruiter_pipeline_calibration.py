@@ -277,10 +277,39 @@ async def test_fallback_allowed_when_the_geography_matches(
     assert lead_kwargs["run_id"] == "best-run-id"
 
 
+@pytest.mark.asyncio
+async def test_search_leads_and_save_are_gated_by_the_positions_geography(
+    db_session: AsyncSession, monkeypatch,
+):
+    """The facet is not a guarantee, so the SAME spec gates the Odoo leads and the
+    results-page save (which selects rows by position, not by lead)."""
+    svc, run, pipeline = _make_svc(
+        db_session, monkeypatch, count=120,
+        pipeline_extra={"search_location": "Lima, Perú", "project_name": "-EZ Role",
+                        "project_url": "https://www.linkedin.com/talent/hire/42/discover"},
+    )
+    igor = {"name": "Igor", "location": "San Carlos, San Pablo, Brasil"}
+    svc.push.push_recruiter_leads = AsyncMock(return_value={
+        "leads": [{"profile_url": "https://x/talent/profile/a", "location": "Lima, Perú"}],
+        "blacklisted": [], "out_of_location": [igor],
+    })
+    monkeypatch.setattr(settings, "recruiter_save_results_workflow_id", "bulk-wf")
+    monkeypatch.setattr(settings, "recruiter_max_saves_per_position", 0)
+    await svc._after_search(run, pipeline, connector_id="c", job_id="1")
+    _, push_kwargs = svc.push.push_recruiter_leads.await_args
+    assert push_kwargs["allowed_locations"] == "Lima, Perú"
+    _, save_kwargs = svc._create_pipeline_run.await_args
+    assert save_kwargs["runtime_params"]["allowed_locations"] == "Lima, Perú"
+    assert save_kwargs["runtime_params"]["target_count"] == 1
+    assert run.origin["out_of_location_dropped"] == [igor]
+
+
 def test_location_label_renders_the_first_spelling_of_each_place():
     """Odoo shows the facet in prose — not the raw ";"/"|" spec."""
     label = RecruiterPipelineService._location_label
-    assert label("Costa Rica;Brazil|Brasil;Mexico|México") == "Costa Rica, Brazil, Mexico"
+    assert label("Costa Rica;Brazil|Brasil;Mexico|México") == "Costa Rica; Brazil; Mexico"
+    # city-level places carry their own commas — the separator must stay unambiguous
+    assert label("Lima, Perú;Heredia, Costa Rica") == "Lima, Perú; Heredia, Costa Rica"
     assert label("") == ""
 
 
@@ -321,6 +350,61 @@ def test_geography_falls_back_cleanly(monkeypatch):
     # malformed JSON must not take the pipeline down
     monkeypatch.setattr(settings, "recruiter_job_locations", "{not json")
     assert svc._resolve_search_location("latam", 1) == "A;B"
+
+
+# Recommendations run on an akcr cron for the life of a position, so they must follow
+# the position's CURRENT geography — not whatever an earlier run stashed (each
+# recommendations run re-stashes what it used, which pinned a position forever).
+_STALE_LATAM = "Costa Rica;México|Mexico;Colombia"
+
+
+def _recs_svc(monkeypatch, *, odoo_job_location, override=""):
+    svc = RecruiterPipelineService.__new__(RecruiterPipelineService)
+    svc._has_active_pipeline_run = AsyncMock(return_value=False)
+    svc._gather_job_context = AsyncMock(return_value={
+        "connector_id": "c", "project_url": "https://www.linkedin.com/talent/hire/42/manage/all",
+        "project_id": "42", "project_name": "-EZ Role", "position": "Role",
+        "job_location": "latam", "search_location": _STALE_LATAM,
+    })
+    svc._fetch_job_corpus = AsyncMock(return_value=("corpus", "Role", odoo_job_location))
+    svc._create_pipeline_run = AsyncMock(return_value=SimpleNamespace(id="recs-run"))
+    svc._push_flow_status = AsyncMock()
+    monkeypatch.setattr(settings, "recruiter_recommendations_workflow_id", "recs-wf")
+    monkeypatch.setattr(settings, "recruiter_location_map",
+                        {"cr": "Costa Rica", "latam": _STALE_LATAM, "global": ""})
+    monkeypatch.setattr(settings, "recruiter_job_locations", override)
+    return svc
+
+
+def _recs_geography(svc):
+    _, kwargs = svc._create_pipeline_run.await_args
+    assert kwargs["pipeline"]["search_location"] == kwargs["runtime_params"]["allowed_locations"]
+    return kwargs["runtime_params"]["allowed_locations"]
+
+
+@pytest.mark.asyncio
+async def test_recommendations_follow_an_override_added_after_the_first_search(monkeypatch):
+    """Job 303: searched as all of LATAM, then narrowed to nine cities by an override."""
+    cities = "Lima, Perú;Heredia, Costa Rica"
+    svc = _recs_svc(monkeypatch, odoo_job_location="latam", override=f'{{"303": "{cities}"}}')
+    await svc.save_recommendations("303", count=6)
+    assert _recs_geography(svc) == cities
+
+
+@pytest.mark.asyncio
+async def test_recommendations_follow_a_job_location_changed_in_odoo(monkeypatch):
+    svc = _recs_svc(monkeypatch, odoo_job_location="cr")
+    await svc.save_recommendations("303", count=6)
+    assert _recs_geography(svc) == "Costa Rica"
+
+
+@pytest.mark.asyncio
+async def test_recommendations_fall_back_to_the_last_geography_when_odoo_is_silent(monkeypatch):
+    """An empty Odoo read must not widen the filter to the global default."""
+    svc = _recs_svc(monkeypatch, odoo_job_location="")
+    monkeypatch.setattr(settings, "recruiter_default_location", "Costa Rica")
+    await svc.save_recommendations("303", count=6)
+    assert _recs_geography(svc) == _STALE_LATAM
 
 
 def test_latam_covers_the_countries_the_client_asked_for():
