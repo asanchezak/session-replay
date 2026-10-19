@@ -182,7 +182,7 @@ Pure-workflow changes (navigate/click/type/existing strategy) need NO restart �
   commit by **selecting a suggestion**; the daemon's generic `type` can send `\n` (Enter) but cannot
   blur or press other keys.
 - **Don't break the seat** casually — a daemon restart costs a human re-login. Batch daemon-code changes.
-- After backend changes, redeploy AWS (`./deploy/redeploy.sh`); never `docker compose down -v`.
+- After backend changes, redeploy AWS (`TARGET=dev ./deploy/redeploy.sh`); never `docker compose down -v`.
 - The booleans come **from Odoo positions** (the AI builder) — never hand-craft them.
 
 ## 📁 Files that matter

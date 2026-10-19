@@ -1,5 +1,6 @@
 #!/bin/bash
-# EC2 user-data bootstrap for a session-replay stack box (AL2023, arm64/Graviton).
+# EC2 user-data bootstrap for the session-replay box (AL2023, arm64/Graviton) — hosts
+# both stacks (PROD in /opt/sr, DEV in /opt/sr-dev).
 # Installs docker + the compose & buildx plugin binaries (AL2023 ships neither), a 2GB
 # swapfile (so `docker build` won't OOM on a 1GB t4g.micro), and the /opt/sr layout.
 # Pass via `aws ec2 run-instances --user-data file://deploy/ec2-bootstrap.sh`.
@@ -27,6 +28,9 @@ if [ ! -f /swapfile ]; then
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-mkdir -p /opt/sr/deploy
-chown -R ec2-user:ec2-user /opt/sr
+# PROD (/opt/sr) + co-located DEV (/opt/sr-dev) share this box; Caddy (PROD project)
+# reaches DEV's backend over the external `sr-edge` network.
+docker network create sr-edge
+mkdir -p /opt/sr/deploy /opt/sr-dev/deploy/dashboard
+chown -R ec2-user:ec2-user /opt/sr /opt/sr-dev
 touch /opt/sr/.bootstrap-done
