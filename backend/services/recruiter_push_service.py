@@ -284,6 +284,47 @@ class RecruiterPushService:
             logger.exception("outreach push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True}
 
+    async def push_leads_contacted_by_team(self, *, run_id, job_id, connector_id,
+                                          profile_urls: list[str], note: str = "") -> dict:
+        """Flag leads LinkedIn reported as "already contacted by someone on your team this
+        month" → POST /akcr/api/lead_contacted_by_team, which sets
+        outreach_status='contacted_by_team' so they leave the to-contact pool.
+
+        We never messaged these people (a colleague did), so this is NOT an outreach log.
+        Degrades QUIETLY when akcr hasn't rolled out the endpoint yet (404): the LinkedIn-side
+        note + move to 'contacted' has already retired them, so a missing status is cosmetic and
+        must never fail the send."""
+        if not job_id:
+            return {"pushed": 0, "skipped": "no_job_id"}
+        urls = [canonical_profile_url(u) for u in (profile_urls or []) if u]
+        urls = [u for u in urls if u]
+        if not urls:
+            return {"pushed": 0, "skipped": "no_valid_urls"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "job_id": job_id,
+            "source_run_id": str(run_id),
+            "profile_urls": urls,
+            "note": note or "",
+        }
+        try:
+            res = await self._post(
+                base_url, api_key, "/akcr/api/lead_contacted_by_team", payload
+            )
+            logger.info(
+                "team-contacted push: flagged %d lead(s) for run %s odoo=%s", len(urls), run_id, res,
+            )
+            return {"pushed": len(urls), **(res if isinstance(res, dict) else {})}
+        except Exception as exc:  # noqa: BLE001 — cosmetic; never fail the send
+            logger.warning(
+                "team-contacted push: POST failed for run %s (akcr endpoint not deployed yet?): %s",
+                run_id, exc,
+            )
+            return {"pushed": 0, "error": True}
+
     async def push_inbox_replies(self, *, connector_id, replied: list[dict] | list[str],
                                  run_id=None) -> dict:
         """Inbox-reply scan: a candidate REPLIED to our outreach → log an INBOUND
@@ -373,6 +414,13 @@ class RecruiterPushService:
         activates); leads are the deduped /talent/profile/ candidates."""
         url, total = None, None
         for rec in await self._extraction_rows(run_id):
+            # Only a SEARCH-RESULTS extraction may set the url the downstream bulk save
+            # navigates to. A search run posts other extractions too (the location-facet
+            # strategy), and those carry the advanced-search page URL — saving from THAT
+            # page would select the wrong people. Rows are ordered by sequence, so this
+            # is belt-and-braces, but the failure mode is silent and expensive.
+            if "people" not in rec and rec.get("total_count") is None:
+                continue
             if rec.get("url"):
                 url = rec.get("url")
             if rec.get("total_count") is not None:

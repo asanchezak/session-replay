@@ -7,7 +7,67 @@ function runtimeValue(runtime, key, fallback) {
   return runtime && runtime[key] !== undefined ? runtime[key] : fallback;
 }
 
-export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-07-20-unified-message-note-move";
+export const RECRUITER_RUNTIME_STRATEGY_VERSION = "2026-09-09-geo-and-language-gates";
+
+// ------------------------------------------------------------------- location facet
+// A position's geography travels through the pipeline as ONE string (the existing
+// {{location}} runtime param): entries separated by ";", each entry carrying
+// "|"-separated ALTERNATIVES for the same place — the /talent seat flips ES<->EN, so
+// "Brazil|Brasil" tries both spellings. An empty value — or an unresolved
+// "{{location}}" — means NO geography filter (a deliberate worldwide search), never a
+// literal term typed into the facet.
+export function parseLocationSpec(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s || /\{\{[^}]*\}\}/.test(s)) return [];
+  return s
+    .split(";")
+    .map((entry) => entry.split("|").map((t) => t.trim()).filter(Boolean))
+    .filter((alts) => alts.length > 0);
+}
+
+// Every accepted spelling in a spec, flat — what a candidate's displayed location is
+// matched against (recommendations filter).
+export function locationSpecTerms(raw) {
+  return parseLocationSpec(raw).reduce((acc, alts) => acc.concat(alts), []);
+}
+
+// Accent/case/punctuation-insensitive form: "Sao Paulo, Brasil" -> "sao paulo brasil".
+export function normalizeLocationText(s) {
+  return String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Which typeahead suggestion to commit for `term` — FAIL-CLOSED: only an EXACT
+// (normalized) label match counts. Typing "Costa Rica" also offers metros ("Provincia
+// de San Jose, Costa Rica"), and blindly taking the first suggestion is how the facet
+// silently ended up narrower — or, when nothing matches at all ("Latin America" is not
+// a Recruiter geo), how the search silently ran WORLDWIDE. -1 = click nothing.
+export function pickExactLabel(term, labels) {
+  const want = normalizeLocationText(term);
+  if (!want) return -1;
+  const list = Array.isArray(labels) ? labels : [];
+  for (let i = 0; i < list.length; i++) {
+    if (normalizeLocationText(list[i]) === want) return i;
+  }
+  return -1;
+}
+
+// Historical name, kept because the location facet reads better with it.
+export const pickLocationSuggestion = pickExactLabel;
+
+// Is a candidate's displayed location inside the position's geography? LinkedIn writes
+// locations most-specific-first, ending on the country ("San Jose, Costa Rica"), so a
+// term only counts at the END of the string — matching anywhere would let "Panama"
+// admit "Panama City, Florida, United States". No terms => no filter (everything
+// passes); an unreadable location => NOT allowed (fail closed, and reported).
+export function locationAllowed(locationText, terms) {
+  const list = (terms || []).map(normalizeLocationText).filter(Boolean);
+  if (list.length === 0) return true;
+  const hay = normalizeLocationText(locationText);
+  if (!hay) return false;
+  return list.some((t) => hay === t || hay.endsWith(` ${t}`));
+}
 
 // Read a project's pipeline counts WITHOUT matching localized label text. The
 // manage/all pipeline tabs are keyed by a locale-independent attribute
@@ -46,6 +106,13 @@ async function readPipelineCounts(page) {
 // sensitive account. A recipient count beyond this FAILS the run loudly (never sends). Realistic
 // per-position uncontacted counts are well under this; hot-reload (scp) to tune.
 const MAX_BULK_RECIPIENTS = 200;
+
+// Candidates per composer send. LinkedIn's composer reports ineligible recipients ("N recipients
+// cannot be contacted more than once within 24 hours", "N recipients have been contacted by
+// someone on your team this month") as a COUNT ONLY — it never says WHO, and it silently drops
+// them from the send. Since we must keep messaged == noted == moved EXACT, a batch showing any
+// such notice is skipped whole; a small batch keeps the collateral small.
+const DEFAULT_MESSAGE_BATCH_SIZE = 5;
 
 // Enumerate a Recruiter profile-list's rows (profile_url + name) across VIRTUALIZATION. The list
 // only renders the rows currently in the viewport (~2-3), so a one-shot scrape under-captures
@@ -300,36 +367,58 @@ function makePipelineOps(page, ctx) {
   // to render virtualized rows; clicks the first unchecked row each pass so a clicked row is skipped
   // next time. Returns { selected (bulk-bar count), rows:[{profile_url,name}] } — rows become the
   // exact recipients. Modeled on selectByName + selectRecruiterResultCheckboxes.
-  const selectN = async (n) => {
+  // `skip` (optional): canonical profile URLs to LEAVE UNSELECTED — candidates an earlier batch
+  // (or an earlier run in the chain) deferred because LinkedIn reported them ineligible. Without
+  // it the loop would re-pick the same blocked people at the top of the list forever.
+  // `only` (optional): select ONLY these canonical profile URLs — used to re-select exactly the
+  // batch we just messaged (after the post-send reload, deferred rows sit above them, so "the
+  // top N" is no longer the same people).
+  const selectN = async (n, opts) => {
     const want = Math.max(1, n | 0);
+    const skip = Array.from((opts && opts.skip) || []);
+    const only = Array.from((opts && opts.only) || []);
     const rows = new Map();
     const tried = new Set();
-    const diag = { rows_seen: 0, clicked: 0, fails: 0 };
+    const diag = { rows_seen: 0, clicked: 0, fails: 0, skipped_rows: 0 };
     const t0 = Date.now();
+    // Skipping/targeting a set means scrolling PAST those rows before anything is clickable, and
+    // the list is virtualized — so scale the patience with the set size (the defaults are tuned
+    // for "click the first N", which gave up after ~25 carried skips and reported nothing
+    // selectable → a bogus run failure).
+    const extra = Math.max(skip.length, only.length);
+    const timeBudget = Math.min(60000 + extra * 1200, 110000);
+    const stableLimit = 5 + Math.min(Math.ceil(extra / 5), 8);
     let clicked = 0, stable = 0;
-    for (let i = 0; i < 200 && Date.now() - t0 < 60000; i++) {
+    for (let i = 0; i < 200 + extra * 4 && Date.now() - t0 < timeBudget; i++) {
       if (clicked >= want) break;
       // Find the next unchecked, not-yet-tried row: capture its checkbox INPUT id (to verify
       // .checked) + a label/input click-point. The <input.small-input> is visually hidden.
-      const pick = await page.evaluate((triedIds) => {
+      const pick = await page.evaluate(({ triedIds, skipUrls, onlyUrls }) => {
         const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
         const canon = (href) => { const mm = (href || "").match(/\/talent\/(?:search\/)?profile\/[A-Za-z0-9_\-%]+/); return mm ? "https://www.linkedin.com" + mm[0] : ""; };
         const els = Array.from(document.querySelectorAll("[data-test-profile-list-view-list-row], .profile-list-item"));
+        let skipped = 0;
         for (const row of els) {
           const cb = row.querySelector("span.profile-list-item__selector input[type='checkbox'], input.small-input[type='checkbox'], input[type='checkbox']");
           if (!cb || cb.disabled || cb.checked) continue;
           if (cb.id && triedIds.includes(cb.id)) continue;
           const link = row.querySelector('a[href*="/talent/profile/"]');
+          const url = canon(link && link.getAttribute("href"));
+          // Deferred candidate (LinkedIn says ineligible) → leave it unselected and move on.
+          if (url && skipUrls.includes(url)) { skipped++; continue; }
+          // Re-selecting a specific set → everything else is off-limits.
+          if (onlyUrls.length && !(url && onlyUrls.includes(url))) { skipped++; continue; }
           const label = cb.id ? document.querySelector(`label[for='${cb.id}']`) : row.querySelector("span.profile-list-item__selector label");
           const tgt = label || cb;
           tgt.scrollIntoView({ block: "center" });
           const r = tgt.getBoundingClientRect();
-          return { id: cb.id || null, rows_total: els.length, url: canon(link && link.getAttribute("href")),
-                   name: clean(link && (link.innerText || link.textContent)),
+          return { id: cb.id || null, rows_total: els.length, url,
+                   name: clean(link && (link.innerText || link.textContent)), skipped,
                    x: r.left + r.width / 2, y: r.top + r.height / 2, has_rect: r.width > 0 && r.height > 0 };
         }
-        return { none: true, rows_total: els.length };
-      }, Array.from(tried)).catch(() => null);
+        return { none: true, rows_total: els.length, skipped };
+      }, { triedIds: Array.from(tried), skipUrls: skip, onlyUrls: only }).catch(() => null);
+      if (pick && pick.skipped) diag.skipped_rows = Math.max(diag.skipped_rows, pick.skipped);
       diag.rows_seen = Math.max(diag.rows_seen, (pick && pick.rows_total) || 0);
       if (!pick || pick.none) {
         // No fresh unchecked row rendered → scroll to load the next virtualized batch.
@@ -342,7 +431,7 @@ function makePipelineOps(page, ctx) {
           window.scrollBy(0, 500);
         }).catch(() => {});
         await sleep(500 + Math.floor(orand() * 250));
-        if (++stable >= 5) break;  // list exhausted (fewer than `want` available)
+        if (++stable >= stableLimit) break;  // list exhausted (fewer than `want` available)
         continue;
       }
       stable = 0;
@@ -381,8 +470,15 @@ function makePipelineOps(page, ctx) {
     return { selected: selected != null ? selected : clicked, clicked, rows: Array.from(rows.values()), diag };
   };
 
-  return { readSelectedCount, HEADER_CB, selectPage, selectN, nextPage, dumpBulkBar, NOTE_FIELD,
-           addNoteState, openAddNote, fillNote, saveNote, readUncontactedCount, moveContacted };
+  // Re-select an EXACT set of candidates by canonical profile URL.
+  const selectByUrls = async (urls) => {
+    const list = Array.from(new Set((urls || []).filter(Boolean)));
+    if (!list.length) return { selected: 0, clicked: 0, rows: [], diag: { empty: true } };
+    return selectN(list.length, { only: list });
+  };
+
+  return { readSelectedCount, HEADER_CB, selectPage, selectN, selectByUrls, nextPage, dumpBulkBar,
+           NOTE_FIELD, addNoteState, openAddNote, fillNote, saveNote, readUncontactedCount, moveContacted };
 }
 
 function readSearchOptions(step) {
@@ -453,6 +549,11 @@ function readSaveRecommendationsOptions(step) {
     projectUrl: String(method.project_url ?? step?.value ?? "").trim(),
     targetCount: readPositiveInt(method.target_count ?? method.count, 10),
     requireOpenToWork: String(method.require_open_to_work ?? "").toLowerCase() === "true" || method.require_open_to_work === true,
+    // The position's geography, same ";"/"|" spec as the search facet. LinkedIn's
+    // Automated Sourcing ignores it entirely (it recommended Meta/Amazon/Microsoft
+    // engineers for a `latam` position), so rows outside it are SKIPPED here, before
+    // they are ever added to the project. Blank => no filter.
+    allowedLocations: String(method.allowed_locations ?? method.locations ?? "").trim(),
   };
 }
 
@@ -489,11 +590,38 @@ function readMessageComposeOptions(step) {
     // Contact note added (and the move to "contacted") for EACH messaged page — the
     // unified loop applies message+note+move to the same selection so the three counts match.
     noteText: String(method.note_text ?? "").trim(),
+    // Note stamped on a batch skipped because a TEAMMATE already contacted them this month.
+    // Present ⇒ those candidates are also moved to 'contacted', retiring them from the queue.
+    // Empty ⇒ they're only deferred (older backend, or deliberately).
+    skipNoteText: String(method.skip_note_text ?? "").trim(),
     // Bounded batch: cap the run to EXACTLY N uncontacted candidates (per-row selection, single
-    // batch, no auto-drain). null/absent ⇒ whole-page multi-page loop (unbounded).
+    // batch, no auto-drain). null/absent ⇒ the run loops batches until its time budget and
+    // reports more_remaining so the backend chains another run.
     maxRecipients: readPositiveInt(method.max_recipients ?? method.limit, null),
+    // How many candidates per composer send. Small batches are the whole point: LinkedIn only
+    // reports "N recipients can't be contacted" as a COUNT (never who), so a batch that shows
+    // any such notice is skipped WHOLE — the smaller the batch, the less collateral.
+    batchSize: readPositiveInt(method.batch_size, DEFAULT_MESSAGE_BATCH_SIZE),
+    // Candidates deferred by earlier runs of this chain (a blocked batch). Excluded from
+    // selection so the chain converges instead of re-hitting the same blocked people.
+    skipUrls: readUrlList(method.skip_urls),
     send: send === true || send === "true" || send === 1 || send === "1",
   };
+}
+
+// Parse a list of profile URLs from a runtime param: a JSON array, or comma/whitespace
+// separated. Unresolved "{{skip_urls}}" placeholders and empties degrade to [].
+function readUrlList(raw) {
+  if (Array.isArray(raw)) return raw.map((s) => String(s || "").trim()).filter(Boolean);
+  const s = String(raw ?? "").trim();
+  if (!s || /^\{\{.*\}\}$/.test(s)) return [];
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) return arr.map((x) => String(x || "").trim()).filter(Boolean);
+    } catch { /* fall through to the split */ }
+  }
+  return s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
 }
 
 function readNoteComposeOptions(step) {
@@ -534,8 +662,60 @@ function readArchiveProjectOptions(step) {
   };
 }
 
+function readProbeFacetOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_probe_facet",
+  ) || {};
+  const sel = method.select;
+  return {
+    facet: String(method.facet ?? "").trim(),
+    typeText: String(method.type_text ?? "").trim(),
+    select: sel === true || sel === "true" || sel === 1 || sel === "1",
+    // Also open each dropdown trigger inside the facet and record its menu options —
+    // the labels a real run has to click (mode "can have/must have", proficiency), which
+    // live nowhere in the DOM until the menu is opened.
+    dropdowns: String(method.dropdowns ?? "").toLowerCase() === "true" || method.dropdowns === true,
+  };
+}
+
+function readApplyLanguagesOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_apply_languages",
+  ) || {};
+  return {
+    // Same ";"/"|" spec as the location facet: languages separated by ";", spellings by
+    // "|". The seat answers in its OWN language, so "Inglés|English" is the honest value
+    // (typing "English" on this Spanish seat returns "no language found" — probe-verified).
+    languages: String(method.languages ?? method.language ?? "").trim(),
+    proficiency: String(method.proficiency ?? "").trim(),
+    // "" leaves LinkedIn's default ("Puede tener"/"Can have" — a RANKING preference).
+    // "Debe tener|Must have" makes it an actual requirement.
+    mode: String(method.mode ?? "").trim(),
+  };
+}
+
+function readApplyLocationsOptions(step) {
+  const methods = Array.isArray(step?.methods) ? step.methods : [];
+  const method = methods.find(
+    (m) => m && typeof m === "object" && m.kind === "recruiter_apply_locations",
+  ) || {};
+  const dry = method.dry_run;
+  return {
+    locations: String(method.locations ?? method.location ?? step?.value ?? "").trim(),
+    // Probe mode: type each place and REPORT what the typeahead offers, committing
+    // nothing and running no search — how we learn which geo names Recruiter accepts
+    // without burning a real search on the sensitive account.
+    dryRun: dry === true || dry === "true" || dry === 1 || dry === "1",
+  };
+}
+
 export function handlesStrategy(strategy) {
   return strategy === "recruiter_search_people"
+    || strategy === "recruiter_apply_locations"
+    || strategy === "recruiter_probe_facet"
+    || strategy === "recruiter_apply_languages"
     || strategy === "recruiter_save_results_to_project"
     || strategy === "recruiter_archive_candidate"
     || strategy === "recruiter_archive_all_in_project"
@@ -561,6 +741,33 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
         },
       },
       log: `recruiter_hot_reload_probe version=${RECRUITER_RUNTIME_STRATEGY_VERSION}`,
+    };
+  }
+
+  if (strategy === "recruiter_probe_facet") {
+    const r = await probeAdvancedFacet(page, readProbeFacetOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { probe_facet_result: r },
+      log: `recruiter_probe_facet facet="${r.facet}" found=${r.found} opened=${r.opened} controls=${(r.controls || []).length} suggestions=${(r.suggestions || []).length} selected=${r.selected}`,
+    };
+  }
+
+  if (strategy === "recruiter_apply_languages") {
+    const r = await applyLanguageFacet(page, readApplyLanguagesOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { apply_languages_result: r },
+      log: `recruiter_apply_languages ok=${r.ok} applied=[${(r.applied || []).join(", ")}] missing=[${(r.missing || []).join(", ")}] proficiency="${r.proficiency_set || ""}" mode="${r.mode_set || ""}" reason="${r.reason || ""}"`,
+    };
+  }
+
+  if (strategy === "recruiter_apply_locations") {
+    const r = await applyLocationFacets(page, readApplyLocationsOptions(step), orand, runtime);
+    return {
+      handled: true,
+      extraction: { apply_locations_result: r },
+      log: `recruiter_apply_locations ok=${r.ok} applied=${(r.applied || []).length}/${r.requested} [${(r.applied || []).join(", ")}] missing=[${(r.missing || []).join(", ")}] dry=${!!r.dry_run} reason="${r.reason || ""}"`,
     };
   }
 
@@ -631,7 +838,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
       // `people` at the extraction top level lets the backend push these as linkedin.lead
       // via the SAME path as search→save (RecruiterPushService._collect_recruiter_leads).
       extraction: { save_recommendations_result: r, people: r.people || [] },
-      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved} confirmed=${r.confirmed}/${r.requested} active ${r.active_before}->${r.active_after} reqOTW=${r.require_open_to_work} reason="${r.reason || ""}"`,
+      log: `recruiter_save_recommendations ok=${r.ok} saved=${r.saved} confirmed=${r.confirmed}/${r.requested} active ${r.active_before}->${r.active_after} reqOTW=${r.require_open_to_work} skipped_location=${r.skipped_location ?? 0} geo="${r.allowed_locations || ""}" reason="${r.reason || ""}"`,
     };
   }
 
@@ -658,7 +865,7 @@ export async function runStrategy({ strategy, page, step, orand = Math.random, r
     return {
       handled: true,
       extraction: { message_compose_result: r },
-      log: `recruiter_message_compose ok=${r.ok} sent=${r.sent} recipients=${r.recipient_count} var_inserted=${r.variable_inserted} reason="${r.reason || ""}"`,
+      log: `recruiter_message_compose ok=${r.ok} sent=${r.sent} messaged=${r.messaged_count} noted=${r.noted_count} moved=${r.moved_count} skipped=${r.skipped_count} retired=${r.skipped_moved_count} recipients=${r.recipient_count} batches=${r.batches} more_remaining=${!!r.more_remaining} reason="${r.reason || ""}" stop="${r.stop_reason || ""}"`,
     };
   }
 
@@ -724,6 +931,25 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
       }
       return ok(); // other contexts (e.g. recruiter_preview_count) — don't gate
     }
+    case "recruiter_probe_facet":
+      // Read-only diagnostic — never gate a run on it.
+      return ok();
+    case "recruiter_apply_languages": {
+      // Same contract as the geography gate: a search that was told to require a
+      // language but applied none must FAIL, not quietly widen to everybody. A blank
+      // spec skips and passes.
+      const r = ex.apply_languages_result || {};
+      return r.ok ? ok() : fail(r.reason || "language_facet_not_applied");
+    }
+    case "recruiter_apply_locations": {
+      // The geography gate. A position that asked for a location but got NONE applied
+      // would search the whole planet (jobs 296/297/301: "Latin America" matched no
+      // Recruiter geo, the blind suggestion click missed, and the run sourced
+      // worldwide) — FAIL the run instead. A blank spec (a deliberately global
+      // position) skips and passes.
+      const r = ex.apply_locations_result || {};
+      return r.ok ? ok() : fail(r.reason || "location_facet_not_applied");
+    }
     case "recruiter_save_results_to_project": {
       const r = ex.save_result || {};
       if (!(Number(r.saved_count) > 0)) return fail("save_selected_none");
@@ -749,10 +975,13 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     case "recruiter_add_profile":
       return ex.add_profile_result && ex.add_profile_result.ok ? ok() : fail("add_profile_failed");
     case "recruiter_message_compose": {
-      // gated preview & real send → ok:true; blocked/rate_limited_24h/no_credits/structural
-      // errors → ok:false (a real send that didn't deliver IS a failure with a to-do).
+      // gated preview, real send, and an all-deferred run (every batch had ineligible
+      // recipients — a legitimate outcome that MUST complete so the backend chains the next
+      // run) → ok:true. no_credits / disabled Send / structural errors → ok:false.
       const r = ex.message_compose_result || {};
-      return r.ok ? ok() : fail(r.reason || "message_not_sent");
+      if (r.ok) return ok();
+      if (r.reason === "all_deferred" || (Number(r.skipped_count) > 0 && !r.blocked)) return ok();
+      return fail(r.reason || "message_not_sent");
     }
     case "recruiter_archive_project":
       return ex.archive_project_result && ex.archive_project_result.ok ? ok() : fail("archive_project_failed");
@@ -774,6 +1003,498 @@ export function stageVerdict({ strategy, eventKind, extraction } = {}) {
     case "recruiter_hot_reload_probe":
     default:
       return ok();
+  }
+}
+
+// Pick a VISIBLE dropdown-menu item by exact (normalized) label, trying each spelling
+// in `wants` — the menus are localized ("Nivel profesional avanzado" vs "Full
+// Professional"). Tags the innermost matching element and clicks it. Returns the label
+// that matched, or null (fail closed: never click "some other item").
+async function clickMenuItemByLabel(page, wants, orand, runtime, sleep) {
+  const matched = await page.evaluate((list) => {
+    const norm = (x) => (x || "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    document.querySelectorAll("[data-sr-menu-t]").forEach((e) => e.removeAttribute("data-sr-menu-t"));
+    const containers = Array.from(document.querySelectorAll(
+      '.artdeco-dropdown__content, [role="menu"], [role="listbox"], .hue-menu'))
+      .filter((c) => {
+        const cs = window.getComputedStyle(c);
+        return cs.display !== "none" && cs.visibility !== "hidden"
+          && c.getAttribute("aria-hidden") !== "true";
+      });
+    for (const want of list) {
+      const w = norm(want);
+      if (!w) continue;
+      for (const c of containers) {
+        const els = Array.from(c.querySelectorAll(
+          '[role="menuitemradio"], [role="menuitem"], [role="option"], label, button, a, li'));
+        // innermost match wins: a <li> wrapping the real <button> has the same text
+        const hit = els.find((e) => norm(e.innerText || e.textContent) === w
+          && !els.some((o) => o !== e && e.contains(o) && norm(o.innerText || o.textContent) === w));
+        if (hit) {
+          hit.setAttribute("data-sr-menu-t", "1");
+          hit.scrollIntoView({ block: "center" });
+          return want;
+        }
+      }
+    }
+    return null;
+  }, wants).catch(() => null);
+  if (!matched) return null;
+  const clicked = await clickSelectorChain(
+    page, [{ type: "css", value: "[data-sr-menu-t]" }], orand, 6000, runtime);
+  await sleep(900);
+  return clicked ? matched : null;
+}
+
+// Require a SPOKEN LANGUAGE on the advanced search ("que sepan inglés"). Built from a
+// live probe of the facet, because the saved snapshots only had it collapsed and the
+// controls carry no obvious data-test names:
+//   root                [data-test-facet-spoken-languages]
+//   open                button[data-test-facet-edit]
+//   typeahead           input.ts-common-typeahead__input[role=combobox]  (localized
+//                       placeholder; typing "English" on a Spanish seat finds NOTHING —
+//                       it wants "Inglés")
+//   committed value     a facet pill (+ button[data-test-pill-dismiss])
+//   proficiency         button[data-test-scope-facet-dropdown-trigger] → Cualquiera /
+//                       Básico / Competente / Nivel profesional / Nivel profesional
+//                       avanzado ("Full Professional") / Nativo o bilingüe
+//   mode                button[data-test-boolean-facet-dropdown-trigger] → Puede tener
+//                       ("can have" = ranking only) / Debe tener ("must have" = a real
+//                       filter) / No es necesario que tenga
+// Every choice is committed only on an EXACT label match and verified afterwards;
+// nothing applied ⇒ ok:false ⇒ stageVerdict fails the run.
+async function applyLanguageFacet(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const entries = parseLocationSpec(options.languages);
+  const FACET = "[data-test-facet-spoken-languages]";
+  const INPUT_CHAIN = [
+    { type: "css", value: `${FACET} input.ts-common-typeahead__input` },
+    { type: "css", value: `${FACET} input[role="combobox"]` },
+    { type: "css", value: `${FACET} input[type="text"]` },
+  ];
+  const OPEN_CHAIN = [
+    { type: "css", value: `${FACET} button[data-test-facet-edit]` },
+    { type: "css", value: `${FACET} button.facet-edit-button` },
+  ];
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+  const SCOPE_TRIGGER = `${FACET} button[data-test-scope-facet-dropdown-trigger]`;
+  const MODE_TRIGGER = `${FACET} button[data-test-boolean-facet-dropdown-trigger]`;
+
+  if (entries.length === 0) {
+    return { ok: true, skipped: true, reason: "no_language", applied: [], missing: [] };
+  }
+
+  const facetText = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim() : "";
+  }, FACET).catch(() => "");
+  const inputPresent = () => page.evaluate(
+    (sel) => !!document.querySelector(sel),
+    `${FACET} input.ts-common-typeahead__input, ${FACET} input[role="combobox"]`).catch(() => false);
+  const triggerText = (sel) => page.evaluate(
+    (s2) => { const el = document.querySelector(s2); return el ? (el.innerText || "").replace(/\s+/g, " ").trim() : ""; },
+    sel).catch(() => "");
+
+  try {
+    if (!(await inputPresent())) {
+      await clickSelectorChain(page, OPEN_CHAIN, orand, 8000, runtime);
+      for (let i = 0; i < 14 && !(await inputPresent()); i++) await sleep(500);
+    }
+    if (!(await inputPresent())) {
+      return { ok: false, reason: "facet_not_open", applied: [], missing: entries.map((a) => a[0]) };
+    }
+
+    const applied = [], missing = [], suggestions = {};
+    for (const alts of entries) {
+      let done = false;
+      for (const term of alts) {
+        if (!(await typeSelectorChain(page, INPUT_CHAIN, term, orand, 8000, runtime))) break;
+        await sleep(600 + Math.floor(orand() * 300));
+        let labels = [];
+        for (let i = 0; i < 12; i++) {
+          labels = await page.evaluate((sg) => Array.from(document.querySelectorAll(sg))
+            .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean), SUGGESTION).catch(() => []);
+          if (pickExactLabel(term, labels) >= 0) break;
+          await sleep(450);
+        }
+        suggestions[term] = labels.slice(0, 8);
+        const idx = pickExactLabel(term, labels);
+        if (idx < 0) continue;  // this spelling isn't the seat's language → try the next
+        const before = normalizeLocationText(await facetText());
+        const tagged = await page.evaluate(({ sg, i }) => {
+          document.querySelectorAll("[data-sr-lang-t]").forEach((e) => e.removeAttribute("data-sr-lang-t"));
+          const el = Array.from(document.querySelectorAll(sg))[i];
+          if (!el) return false;
+          el.setAttribute("data-sr-lang-t", "1");
+          el.scrollIntoView({ block: "center" });
+          return true;
+        }, { sg: SUGGESTION, i: idx }).catch(() => false);
+        if (!tagged) continue;
+        await clickSelectorChain(page, [{ type: "css", value: "[data-sr-lang-t]" }], orand, 6000, runtime);
+        await sleep(1000 + Math.floor(orand() * 400));
+        const after = normalizeLocationText(await facetText());
+        const want = normalizeLocationText(labels[idx]);
+        if (want && after !== before && after.includes(want)) { applied.push(labels[idx]); done = true; break; }
+      }
+      if (!done) missing.push(alts[0]);
+    }
+
+    // Proficiency ("Full Professional" = "Nivel profesional avanzado"). Only meaningful
+    // once a language is in — and only claimed when the trigger's own label changes.
+    let proficiencySet = "";
+    if (applied.length && options.proficiency) {
+      const wants = parseLocationSpec(options.proficiency).reduce((a, x) => a.concat(x), []);
+      await clickSelectorChain(page, [{ type: "css", value: SCOPE_TRIGGER }], orand, 6000, runtime);
+      await sleep(1100);
+      const picked = await clickMenuItemByLabel(page, wants, orand, runtime, sleep);
+      const now = await triggerText(SCOPE_TRIGGER);
+      if (picked && normalizeLocationText(now) === normalizeLocationText(picked)) proficiencySet = picked;
+    }
+
+    // Mode: LinkedIn defaults to "can have", which only RANKS. "Debe tener"/"Must have"
+    // is what turns this into a filter. Left alone when unset.
+    let modeSet = "";
+    if (applied.length && options.mode) {
+      const wants = parseLocationSpec(options.mode).reduce((a, x) => a.concat(x), []);
+      await clickSelectorChain(page, [{ type: "css", value: MODE_TRIGGER }], orand, 6000, runtime);
+      await sleep(1100);
+      const picked = await clickMenuItemByLabel(page, wants, orand, runtime, sleep);
+      const now = await triggerText(MODE_TRIGGER);
+      if (picked && normalizeLocationText(now) === normalizeLocationText(picked)) modeSet = picked;
+    }
+
+    const facet_text = await facetText();
+    await shot(`idioma: ${applied.join(", ") || "ninguno"} / ${proficiencySet || "cualquiera"}`).catch(() => {});
+    const ok = applied.length > 0;
+    let reason = null;
+    if (!ok) reason = "no_language_applied";
+    else if (options.proficiency && !proficiencySet) reason = "proficiency_not_set";
+    else if (options.mode && !modeSet) reason = "mode_not_set";
+    return {
+      ok,
+      requested: entries.length,
+      applied,
+      missing,
+      suggestions,
+      proficiency_requested: options.proficiency || "",
+      proficiency_set: proficiencySet,
+      mode_requested: options.mode || "",
+      mode_set: modeSet,
+      facet_text: String(facet_text).slice(0, 300),
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, applied: [], missing: entries.map((a) => a[0]),
+             reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// READ-ONLY diagnostic: open one advanced-search facet and report its real DOM, so a new
+// facet can be automated from evidence instead of guessed selectors. Written because the
+// saved snapshots only ever captured facets COLLAPSED — the expanded controls (typeahead
+// input, "must have/can have" mode, proficiency dropdown) appear nowhere offline. Nothing
+// is committed: facet state is client-side until "Run search", which this never clicks.
+// Options: facet (a data-test suffix like "spoken-languages", or a full CSS selector),
+// typeText (type it into the facet's first input and report the suggestions), select
+// (commit the exact match too, so controls that only appear AFTER a value is added — the
+// proficiency dropdown — get captured).
+// Returns { ok, facet, found, opened, controls[], suggestions[], selected, html }.
+async function probeAdvancedFacet(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const raw = String(options.facet || "").trim();
+  if (!raw) return { ok: false, reason: "missing_facet" };
+  const root = /[[.#\s>]/.test(raw) ? raw : `[data-test-facet-${raw}]`;
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+
+  const inventory = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { found: false };
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const attrsOf = (n) => Object.fromEntries(
+      Array.from(n.attributes || [])
+        .filter((a) => /^(data-(live-)?test|aria-label|placeholder|name|type|role|value|class|id)$/.test(a.name)
+                    || a.name.startsWith("data-test") || a.name.startsWith("data-live-test"))
+        .map((a) => [a.name, clean(a.value).slice(0, 120)]));
+    const controls = Array.from(el.querySelectorAll(
+      'input, select, textarea, button, [role="combobox"], [role="button"], [role="option"]'))
+      .slice(0, 40)
+      .map((n) => ({
+        tag: n.tagName.toLowerCase(),
+        text: clean(n.innerText || n.textContent).slice(0, 60),
+        ...attrsOf(n),
+        ...(n.tagName === "SELECT"
+          ? { options: Array.from(n.options).map((o) => `${o.value}|${clean(o.textContent)}`).slice(0, 25) }
+          : {}),
+      }));
+    return {
+      found: true,
+      expanded: el.querySelector("section")?.getAttribute("aria-expanded") || null,
+      text: clean(el.innerText).slice(0, 400),
+      controls,
+      html: el.outerHTML.replace(/\s+/g, " ").slice(0, 6000),
+    };
+  }, root).catch(() => ({ found: false }));
+
+  try {
+    let inv = await inventory();
+    if (!inv.found) return { ok: false, facet: root, found: false, reason: "facet_not_present" };
+
+    // Open it (the edit/"+" button inside this facet only).
+    let opened = false;
+    if (!inv.controls?.some((c) => c.tag === "input")) {
+      opened = await clickSelectorChain(page, [
+        { type: "css", value: `${root} button[data-test-facet-edit]` },
+        { type: "css", value: `${root} button.facet-edit-button` },
+      ], orand, 8000, runtime);
+      for (let i = 0; i < 12; i++) {
+        await sleep(500);
+        inv = await inventory();
+        if (inv.controls?.some((c) => c.tag === "input")) break;
+      }
+    }
+
+    // Type + (optionally) commit, so post-value controls surface.
+    let suggestions = [], selected = false;
+    if (options.typeText) {
+      const typed = await typeSelectorChain(page, [
+        { type: "css", value: `${root} input.ts-common-typeahead__input` },
+        { type: "css", value: `${root} input[type="text"]` },
+        { type: "css", value: `${root} input` },
+      ], options.typeText, orand, 8000, runtime);
+      if (typed) {
+        for (let i = 0; i < 12; i++) {
+          await sleep(450);
+          suggestions = await page.evaluate((sg) => Array.from(document.querySelectorAll(sg))
+            .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean), SUGGESTION).catch(() => []);
+          if (suggestions.length) break;
+        }
+        if (options.select) {
+          const idx = pickLocationSuggestion(options.typeText, suggestions);
+          if (idx >= 0) {
+            const tagged = await page.evaluate(({ sg, i }) => {
+              document.querySelectorAll("[data-sr-probe-t]").forEach((e) => e.removeAttribute("data-sr-probe-t"));
+              const el = Array.from(document.querySelectorAll(sg))[i];
+              if (!el) return false;
+              el.setAttribute("data-sr-probe-t", "1");
+              el.scrollIntoView({ block: "center" });
+              return true;
+            }, { sg: SUGGESTION, i: idx }).catch(() => false);
+            if (tagged) {
+              await clickSelectorChain(page, [{ type: "css", value: "[data-sr-probe-t]" }], orand, 6000, runtime);
+              await sleep(1200);
+              selected = true;
+            }
+          }
+        }
+        inv = await inventory();   // re-read AFTER the value landed
+      }
+    }
+    // Dropdown menus: open each trigger, snapshot its items, close it again.
+    let menus = {};
+    if (options.dropdowns) {
+      const triggers = await page.evaluate((sel) => Array.from(
+        document.querySelectorAll(`${sel} button[data-test-boolean-facet-dropdown-trigger], ${sel} button[data-test-scope-facet-dropdown-trigger], ${sel} button[aria-haspopup]`))
+        .map((b, i) => {
+          b.setAttribute("data-sr-probe-dd", String(i));
+          return { i, text: (b.innerText || "").replace(/\s+/g, " ").trim(),
+                   attr: Array.from(b.attributes).map((a) => a.name).find((n) => n.includes("dropdown-trigger")) || "" };
+        }), root).catch(() => []);
+      // Dump every VISIBLE menu container, whatever flavour it is (artdeco dropdown,
+      // hue menu, listbox) — the two facet dropdowns render as `.artdeco-dropdown__content`
+      // and returned nothing when queried for [role=menuitem]/li only.
+      const dumpMenus = () => page.evaluate(() => {
+        const clean = (x) => (x || "").replace(/\s+/g, " ").trim();
+        const out = [];
+        for (const c of document.querySelectorAll(
+          '.artdeco-dropdown__content, [role="menu"], [role="listbox"], .hue-menu')) {
+          const cs = window.getComputedStyle(c);
+          if (cs.display === "none" || cs.visibility === "hidden" || c.getAttribute("aria-hidden") === "true") continue;
+          const items = Array.from(c.querySelectorAll(
+            'button, a, li, label, [role="menuitem"], [role="option"], [role="menuitemradio"]'))
+            .map((n) => clean(n.innerText || n.textContent)).filter(Boolean);
+          if (!items.length && !clean(c.innerText)) continue;
+          out.push({ id: c.id || "", text: clean(c.innerText).slice(0, 300),
+                     items: [...new Set(items)].slice(0, 24) });
+        }
+        return out;
+      }).catch(() => []);
+      for (const t of triggers) {
+        await clickSelectorChain(page, [{ type: "css", value: `[data-sr-probe-dd="${t.i}"]` }], orand, 5000, runtime);
+        await sleep(1300);
+        menus[`${t.attr || "trigger"}#${t.i} (${t.text})`] = await dumpMenus();
+        // Toggle it shut with the trigger itself (Escape sometimes collapses the facet).
+        await clickSelectorChain(page, [{ type: "css", value: `[data-sr-probe-dd="${t.i}"]` }], orand, 4000, runtime);
+        await sleep(500);
+      }
+    }
+    return { ok: true, facet: root, found: true, opened, selected, suggestions, menus, ...inv };
+  } catch (e) {
+    return { ok: false, facet: root, reason: `error:${(e && e.message) || e}` };
+  }
+}
+
+// Apply the position's geography to the advanced-search LOCATION facet. This replaces
+// the old blind step pair (type "{{location}}" -> click the first suggestion), which
+// reported success even when it selected NOTHING: "Latin America" is not a Recruiter
+// geo, so jobs 296/297/301 typed it, matched no suggestion, and searched the WHOLE
+// WORLD while Odoo said `job_location=latam`. Here every place is typed, committed
+// only on an EXACT typeahead match, and VERIFIED in the facet afterwards; nothing
+// applied => ok:false => stageVerdict FAILS the run instead of sourcing worldwide.
+// Options: locations (";"-separated, "|"-alternatives), dryRun (probe only).
+// Returns { ok, requested, applied[], missing[], suggestions{}, facet_text_before,
+// facet_text, reason }.
+async function applyLocationFacets(page, options, orand, runtime) {
+  const sleep = runtimeValue(runtime, "sleep", (ms) => new Promise((r) => setTimeout(r, ms)));
+  const shot = runtimeValue(runtime, "uploadStepShot", async () => {});
+  const entries = parseLocationSpec(options.locations);
+  const dryRun = !!options.dryRun;
+
+  const FACET = "[data-test-facet-geo-locations], [data-test-facet-locations]";
+  const INPUT_SEL = "[data-test-facet-geo-locations] input.ts-common-typeahead__input, "
+    + "[data-test-facet-locations] input.ts-common-typeahead__input";
+  const INPUT_CHAIN = [
+    { type: "css", value: "[data-test-facet-geo-locations] input.ts-common-typeahead__input" },
+    { type: "css", value: "[data-test-facet-locations] input.ts-common-typeahead__input" },
+    { type: "css", value: 'input[placeholder^="Introducir una ubicaci"]' },
+    { type: "css", value: 'input[placeholder^="Add a location"]' },
+  ];
+  // Locale-proof first (data-test), localized aria-labels only as a fallback.
+  const OPEN_CHAIN = [
+    { type: "css", value: "[data-test-facet-geo-locations] button[data-test-facet-edit]" },
+    { type: "css", value: "[data-test-facet-locations] button[data-test-facet-edit]" },
+    { type: "css", value: 'button[aria-label="Add a Candidate geographic location"]' },
+    { type: "css", value: 'button[aria-label="Añadir ubicación del candidato"]' },
+  ];
+  const SUGGESTION = '[data-test-typeahead-results] li, li[data-live-test-result], [role="listbox"] li[role="option"]';
+
+  // No geography requested (a `global` position, or the param never resolved) => leave
+  // the facet alone; the caller runs a boolean-only worldwide search on purpose.
+  if (entries.length === 0) {
+    return { ok: true, skipped: true, reason: "no_location", requested: 0,
+             applied: [], missing: [], suggestions: {} };
+  }
+
+  const facetText = () => page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim() : "";
+  }, FACET).catch(() => "");
+  const inputPresent = () => page.evaluate(
+    (sel) => !!document.querySelector(sel), INPUT_SEL).catch(() => false);
+
+  try {
+    // 1) Open the facet (idempotent — it may already be expanded).
+    if (!(await inputPresent())) {
+      await clickSelectorChain(page, OPEN_CHAIN, orand, 8000, runtime);
+      for (let i = 0; i < 16 && !(await inputPresent()); i++) await sleep(500);
+    }
+    if (!(await inputPresent())) {
+      return { ok: false, reason: "facet_not_open", requested: entries.length,
+               applied: [], missing: entries.map((a) => a[0]), suggestions: {} };
+    }
+    const facetBefore = await facetText();
+
+    // 2) Read what the typeahead offers for `term`, WAITING for the list to catch up
+    //    with what we typed — a stale list left over from the previous term must never
+    //    be what we click.
+    const suggestionsFor = async (term) => {
+      // Loosest sign the list has caught up with THIS term (a probe run only needs to
+      // see what is offered, so it must not sit out the full timeout on every miss).
+      const loose = normalizeLocationText(term).split(" ")[0] || "";
+      let labels = [];
+      for (let i = 0; i < 14; i++) {
+        labels = await page.evaluate((sel) => Array.from(document.querySelectorAll(sel))
+          .map((li) => (li.innerText || li.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean), SUGGESTION).catch(() => []);
+        if (pickLocationSuggestion(term, labels) >= 0) break;
+        if (dryRun && labels.length && loose
+            && labels.some((l) => normalizeLocationText(l).includes(loose))) break;
+        await sleep(450);
+      }
+      return { labels, idx: pickLocationSuggestion(term, labels) };
+    };
+
+    const applied = [], missing = [], suggestions = {};
+    const t0 = Date.now();
+    // The daemon's watchdog (240s) covers the WHOLE run. Measured on the live seat: a
+    // place costs ~3.8s (12 places = 46s of a 123s search run), so 95s fits all 18
+    // LATAM countries with slack and still leaves the run far short of the watchdog.
+    // Past the budget the remaining places are reported in `missing` — the search stays
+    // inside the geography it did apply, and never falls back to worldwide.
+    const BUDGET_MS = 95000;
+    let reason = null;
+
+    for (const alts of entries) {
+      if (Date.now() - t0 > BUDGET_MS) { reason = reason || "time_budget"; missing.push(alts[0]); continue; }
+      // Insurance: if committing a pill collapsed the facet, re-open it rather than
+      // losing every remaining place (a 1-country search is still LATAM, but a
+      // reopen is nearly free and keeps the geography whole).
+      if (!(await inputPresent())) {
+        await clickSelectorChain(page, OPEN_CHAIN, orand, 6000, runtime);
+        for (let i = 0; i < 8 && !(await inputPresent()); i++) await sleep(400);
+      }
+      let done = false;
+      for (const term of alts) {
+        const typed = await typeSelectorChain(page, INPUT_CHAIN, term, orand, 8000, runtime);
+        if (!typed) { reason = reason || "input_not_typable"; break; }
+        await sleep(500 + Math.floor(orand() * 300));
+        const { labels, idx } = await suggestionsFor(term);
+        suggestions[term] = labels.slice(0, 8);
+        if (idx < 0 || dryRun) continue;  // no exact match (or probing) -> next spelling
+        const before = normalizeLocationText(await facetText());
+        const tagged = await page.evaluate(({ sel, i }) => {
+          document.querySelectorAll("[data-sr-loc-t]").forEach((e) => e.removeAttribute("data-sr-loc-t"));
+          const el = Array.from(document.querySelectorAll(sel))[i];
+          if (!el) return false;
+          el.setAttribute("data-sr-loc-t", "1");
+          el.scrollIntoView({ block: "center" });
+          return true;
+        }, { sel: SUGGESTION, i: idx }).catch(() => false);
+        if (!tagged) continue;
+        await clickSelectorChain(page, [{ type: "css", value: "[data-sr-loc-t]" }], orand, 6000, runtime);
+        await sleep(900 + Math.floor(orand() * 400));
+        // Committed <=> the chosen label is now part of the facet (a pill), not just
+        // text sitting in the input (innerText excludes input values).
+        const after = normalizeLocationText(await facetText());
+        const want = normalizeLocationText(labels[idx]);
+        if (want && after !== before && after.includes(want)) {
+          applied.push(labels[idx]);
+          done = true;
+          break;
+        }
+      }
+      if (!done && !dryRun) missing.push(alts[0]);
+    }
+
+    // Leave no half-typed term in the input — it would ride into the committed search.
+    // Select-all + Delete, never a bare Backspace (that deletes the last applied pill).
+    await clickSelectorChain(page, INPUT_CHAIN, orand, 5000, runtime).catch(() => {});
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Delete").catch(() => {});
+    await sleep(400);
+
+    const facet_text = await facetText();
+    await shot(`ubicación: ${applied.length}/${entries.length} aplicada(s)`).catch(() => {});
+    const ok = dryRun ? true : applied.length > 0;
+    if (!ok) reason = reason || "no_location_applied";
+    else if (missing.length && !reason) reason = "partial_locations";
+    return {
+      ok,
+      dry_run: dryRun,
+      requested: entries.length,
+      applied,
+      missing,
+      suggestions,
+      facet_text_before: String(facetBefore).slice(0, 300),
+      facet_text: String(facet_text).slice(0, 300),
+      ...(reason ? { reason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, requested: entries.length, applied: [], missing: entries.map((a) => a[0]),
+             suggestions: {}, reason: `error:${(e && e.message) || e}` };
   }
 }
 
@@ -855,7 +1576,11 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
           headline = ln; break;
         }
       }
-      cards.push({ name, profile_url: url, headline });
+      // Location (lockup caption): PROOF, in the run's own extraction, that the
+      // geography facet actually applied — the signal that was missing when the
+      // "Latin America" searches quietly returned candidates from four continents.
+      const loc = card.querySelector("[data-test-row-lockup-location], [data-live-test-row-lockup-location], .artdeco-entity-lockup__caption");
+      cards.push({ name, profile_url: url, headline, location: clean(loc && (loc.innerText || loc.textContent)) });
     }
     return { cards, total };
   };
@@ -961,6 +1686,21 @@ async function scrapeRecruiterSearch(page, options = {}, runtime = {}) {
     const wentNext = await clickNextPage();
     if (!wentNext) break;
     await page.waitForSelector(CARD, { timeout: 10000 }).catch(() => {});
+  }
+  // Zero-results disambiguation. If we read no count AND collected no cards, the search
+  // is EITHER genuinely empty (0 matches → LinkedIn's empty state carries no "N resultados"
+  // header for the regex above to catch) OR it failed to render (walled seat / DOM drift).
+  // The stage gate (stageVerdict) hard-FAILS on total_count=null + 0 people, which would
+  // otherwise mark a legitimately-empty tightened search as a broken run. Disambiguate
+  // STRUCTURALLY: the search-results scaffold (the query-summary header) only renders once
+  // a search has COMMITTED and never appears on a login/checkpoint wall — so if it's
+  // present, this is a real 0-match result → report total_count=0 (rendered, empty) and let
+  // the run complete instead of failing "did not render". Locale-independent (data-test).
+  if (totalCount == null && byUrl.size === 0) {
+    const committed = await page.evaluate(() => !!document.querySelector(
+      '[data-test-search-query-summary-container], [data-test-search-query-summary-title], [data-test-search-wrapper]',
+    )).catch(() => false);
+    if (committed) totalCount = 0;
   }
   const people = Array.from(byUrl.values());
   return {
@@ -1736,6 +2476,135 @@ async function addProfileToProject(page, options, orand, runtime) {
   }
 }
 
+// Read the composer's inline notices ("N recipients cannot be contacted more than once within
+// 24 hours", "N recipients have been contacted by someone on your team this month"). LinkedIn
+// treats these as INFORMATIONAL — Send stays enabled and it silently drops those recipients —
+// which is exactly why they matter: we cannot tell WHO was dropped, so a batch with any such
+// notice must be skipped whole to keep messaged == noted == moved exact.
+//
+// Scoped to the composer modal and EXCLUDING our own typed body/subject (a template mentioning
+// "message" or "24" must never trigger it). Biased to SENSITIVITY: a false positive only
+// postpones a batch to the next run; a false negative silently corrupts the accounting.
+// Returns { blocking, notices:[text], root_found, root_html } — root_html (truncated) is kept in
+// the run's diag so the real selectors + the Spanish strings can be tuned OFFLINE.
+// TWO notice families, because they need OPPOSITE handling:
+//
+// RATE24 — "N recipients cannot be contacted more than once within 24 hours. They will not
+//   receive this message." LinkedIn genuinely DROPS them. Temporary (24h) ⇒ defer the batch and
+//   leave everyone uncontacted so a later send retries them. NEVER mark them contacted.
+// TEAM — "N recipients have been contacted by someone on your team this month." Informational:
+//   Send stays enabled and they WOULD receive it. A colleague is already working them, so we
+//   skip them — and (user's call, 2026-07-29) take them OUT of the queue: note + move to
+//   'contacted' in LinkedIn and flag them in Odoo, so every future send doesn't re-scan them.
+//   PROD job 290 proved why this matters: 5 consecutive batches were 100% team-contacted.
+//
+// EN + ES (the seat's Recruiter locale flips). These are safe to match against the composer's
+// whole text, so detection does NOT depend on getting the notice element's selector right.
+export const COMPOSER_NOTICE_RATE24_PATTERNS = [
+  "cannot(?:not)? be contacted more than once within 24\\s*hours",
+  "can't be contacted more than once within 24\\s*hours",
+  "will not receive this message",
+  "won't receive this message",
+  "no se pued[ee]n? contactar",
+  "no recibir[áa]n? (?:este|el) mensaje",
+  "m[áa]s de una vez (?:en|dentro de) (?:las\\s*)?24\\s*horas",
+];
+export const COMPOSER_NOTICE_TEAM_PATTERNS = [
+  "(?:have|has) been contacted by someone on your team",
+  "contactad[oa]s? por (?:alguien|otra persona|otro miembro)",
+];
+export const COMPOSER_NOTICE_PATTERNS = [
+  ...COMPOSER_NOTICE_RATE24_PATTERNS, ...COMPOSER_NOTICE_TEAM_PATTERNS,
+];
+// COUNT-shaped patterns ("6 recipients …"). Only applied to a text we KNOW is a notice element —
+// the composer's own recipient row can legitimately say "25 recipients", which must not defer.
+// Kind is unknown from a count alone ⇒ treated as RATE24 (the conservative one: never marks
+// anybody contacted).
+export const COMPOSER_NOTICE_COUNT_PATTERNS = [
+  "\\b\\d+\\s+recipients?\\b",
+  "\\b\\d+\\s+destinatarios?\\b",
+];
+
+function _hit(text, patterns) {
+  const s = String(text || "");
+  return patterns.find((src) => new RegExp(src, "i").test(s)) || null;
+}
+
+// `texts` = notice ELEMENTS (count patterns apply); `scopedText` = the composer's whole text
+// minus our typed body/subject (phrase patterns only).
+// Returns { blocking, kind: "rate_limited_24h"|"team_contacted"|null, matched, tier }.
+// RATE24 WINS when both are present: moving a merely-24h-blocked person to 'contacted' would
+// wrongly retire someone we never messaged.
+export function classifyNotices(texts, scopedText = "") {
+  const list = texts || [];
+  for (const fam of [
+    { kind: "rate_limited_24h", pats: COMPOSER_NOTICE_RATE24_PATTERNS },
+    { kind: "team_contacted", pats: COMPOSER_NOTICE_TEAM_PATTERNS },
+  ]) {
+    for (const t of list) {
+      const m = _hit(t, fam.pats);
+      if (m) return { blocking: true, kind: fam.kind, matched: m, tier: "notice_element" };
+    }
+    const m = _hit(scopedText, fam.pats);
+    if (m) return { blocking: true, kind: fam.kind, matched: m, tier: "composer_text" };
+  }
+  for (const t of list) {
+    const m = _hit(t, COMPOSER_NOTICE_COUNT_PATTERNS);
+    if (m) return { blocking: true, kind: "rate_limited_24h", matched: m, tier: "notice_count" };
+  }
+  return { blocking: false, kind: null, matched: null, tier: null };
+}
+
+export function noticesAreBlocking(texts, scopedText = "") {
+  return classifyNotices(texts, scopedText).blocking;
+}
+
+// Scrapes the composer's notice texts in-page, then classifies them OUT of page context with the
+// shared (unit-tested) classifier — one source of truth for the patterns.
+async function readComposerNotices(page) {
+  const scraped = await page.evaluate(() => {
+    const COMPOSER = "[data-test-compose-body], button[data-test-messaging-submit-btn], input[data-test-compose-subject-input]";
+    let root = null;
+    for (const el of document.querySelectorAll(COMPOSER)) {
+      root = el.closest('[role="dialog"], .artdeco-modal, [data-test-modal]');
+      if (root) break;
+    }
+    if (!root) return { notices: [], root_found: false, root_html: "", scoped_text: "" };
+    const NOTICE_SEL = [
+      ".artdeco-inline-feedback", '[class*="inline-feedback"]', '[role="alert"]', '[role="status"]',
+      '[data-test*="notice" i]', '[data-test*="warning" i]', '[data-test*="alert" i]',
+      '[data-test*="banner" i]', ".artdeco-notification",
+    ].join(", ");
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    // TIER A — texts of elements we believe ARE notices (count patterns apply to these).
+    const texts = [];
+    for (const n of root.querySelectorAll(NOTICE_SEL)) {
+      // Never read our own message body / subject back as a "notice".
+      if (n.closest(".ql-editor, [data-test-compose-body]")) continue;
+      const t = clean(n.innerText || n.textContent);
+      if (t && !texts.includes(t)) texts.push(t);
+    }
+    // TIER B — the composer's whole text MINUS our typed body/subject. Selector-independent
+    // safety net: the notice element's markup is unverified, but these phrases are verbatim
+    // from the live composer, so phrase-matching the modal text can't miss them.
+    let scopedText = "";
+    try {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const parts = [];
+      while (walker.nextNode()) {
+        const p = walker.currentNode.parentElement;
+        if (!p || p.closest(".ql-editor, [data-test-compose-body]")) continue;
+        const t = clean(walker.currentNode.nodeValue);
+        if (t) parts.push(t);
+      }
+      scopedText = parts.join(" ");
+    } catch { /* text walk is best-effort; tier A still applies */ }
+    return { notices: texts, root_found: true,
+             scoped_text: scopedText.slice(0, 1200), root_html: (root.innerHTML || "").slice(0, 4000) };
+  }).catch(() => ({ notices: [], root_found: false, root_html: "", scoped_text: "", error: true }));
+  return { ...scraped, ...classifyNotices(scraped.notices, scraped.scoped_text) };
+}
+
 // Compose a bulk InMail to a project's ACTIVE candidates using a template body. The
 // literal first-name token in the body — `{Name}` (English default) or `{Nombre}`
 // (legacy Spanish) — is inserted as the LinkedIn VARIABLE CHIP (via the composer's
@@ -1758,10 +2627,17 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
   // The contact note added to each messaged page (unified loop). Empty ⇒ legacy single-page
   // behavior (message one page, no note/move) so an older backend that doesn't pass it is safe.
   const noteText = String(options.noteText || "").trim();
-  // Bounded batch: when set, select EXACTLY this many uncontacted candidates (per-row), run a
-  // SINGLE batch, and do NOT auto-continue. null ⇒ whole-page multi-page loop.
+  const skipNoteText = String(options.skipNoteText || "").trim();
+  // Bounded batch: when set, message EXACTLY this many uncontacted candidates and do NOT
+  // auto-continue (deliberate one-shot, manual/testing path). null ⇒ loop batches until the
+  // time budget, then report more_remaining so the backend chains another run.
   const maxRecipients = Number.isFinite(options.maxRecipients) && options.maxRecipients > 0
     ? Math.floor(options.maxRecipients) : null;
+  // Candidates per composer send (see DEFAULT_MESSAGE_BATCH_SIZE).
+  const batchSize = Math.max(1, Number.isFinite(options.batchSize) && options.batchSize > 0
+    ? Math.floor(options.batchSize) : DEFAULT_MESSAGE_BATCH_SIZE);
+  // Deferred by earlier runs in this chain — never re-selected.
+  const skipUrls = new Set(Array.isArray(options.skipUrls) ? options.skipUrls : []);
   const send = !!options.send;
   const m = String(options.projectUrl || "").match(/\/talent\/hire\/(\d+)/);
   if (!m) return { ok: false, sent: false, reason: "missing_project_id" };
@@ -1893,11 +2769,12 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       return { ok: false, sent: false, recipient_count: recipientCount, reason: "exceeds_max_recipients" };
     }
 
-    // UNIFIED per-page loop: for EACH page of the uncontacted stage, message → (only if the
-    // send succeeded) add the contact note → move to "contacted". This makes messaged == noted
-    // == moved by construction (the old flow messaged ONE page but noted/moved all pages, and
-    // used toast-only move verification → 25/96/46). Moving a page to "contacted" removes it
-    // from the uncontacted view, so the next round's top page is fresh.
+    // UNIFIED per-BATCH loop over the uncontacted stage: select exactly `batchSize` rows →
+    // message → (only if the send succeeded) add the contact note → move to "contacted". This
+    // makes messaged == noted == moved by construction. A batch whose composer reports
+    // ineligible recipients is DEFERRED WHOLE (never messaged/noted/moved) because LinkedIn
+    // won't say which of them it would drop. Moving a batch to "contacted" removes it from the
+    // uncontacted view, so the next batch is fresh.
     const clickPoint = async (pt) => {
       if (!pt || pt.x == null) return false;
       await moveMouseAlongBezier(page, pt, orand).catch(() => {});
@@ -1906,10 +2783,24 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
       return true;
     };
     const ops = makePipelineOps(page, { sleep, orand, clickSel, clickPoint, typeHumanLike });
-    const { selectPage, selectN, openAddNote, fillNote, saveNote, moveContacted, readUncontactedCount } = ops;
+    const { selectN, selectByUrls, openAddNote, fillNote, saveNote, moveContacted, readUncontactedCount } = ops;
+    // Re-load the uncontacted list: clears any selection and restores a clean bulk toolbar
+    // (right after the composer closes the overflow menu won't open — the note_open_failed bug).
+    const reloadStage = async () => {
+      await page.goto(stageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+      await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await sleep(1400 + Math.floor(orand() * 500));
+    };
+    // Dismiss the composer without sending (a deferred batch).
+    const closeComposer = async () => {
+      const closed = await clickSel("button[data-test-modal-close-btn], .artdeco-modal__dismiss, button[aria-label*='Dismiss' i], button[aria-label*='Descartar' i], button[aria-label*='Cerrar' i]");
+      if (!closed) await page.keyboard.press("Escape").catch(() => {});
+      await sleep(900 + Math.floor(orand() * 400));
+    };
 
-    // Compose + send the InMail to the CURRENTLY-SELECTED page. Assumes the page is selected.
-    // Returns {sent, gated?, blocked?, reason?, variableInserted, subjectSet}.
+    // Compose + send the InMail to the CURRENTLY-SELECTED batch. Assumes the batch is selected.
+    // Returns {sent, gated?, deferred?, blocked?, reason?, notices?, variableInserted, subjectSet}.
     const messageCurrentPage = async () => {
       if (!await clickSel("button[data-test-action='send-message']")) return { sent: false, reason: "composer_open_failed" };
       await page.waitForSelector(EDITOR, { timeout: 15000 }).catch(() => {});
@@ -1948,124 +2839,215 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
         }
       }
       await sleep(1200);
-      if (!send) { await sleep(1200); return { sent: false, gated: true, variableInserted, subjectSet }; }
-      // VERIFY Send is enabled before clicking (rate-limit / 0 InMail credits / disabled).
+      // Ineligible recipients in this batch? LinkedIn only gives a COUNT, never WHO, and Send
+      // stays enabled — so we can't tell who would actually receive it. DEFER the whole batch
+      // (no send, no note, no move): the accounting stays exact and they're retried later.
+      const notices = await readComposerNotices(page);
+      if (notices.blocking) {
+        await shot(`lote OMITIDO (${notices.kind})`).catch(() => {});
+        return { sent: false, deferred: true, reason: notices.kind || "recipients_ineligible",
+                 notices: notices.notices, notice_diag: notices, variableInserted, subjectSet };
+      }
+      if (!send) { await sleep(1200); return { sent: false, gated: true, notice_diag: notices, variableInserted, subjectSet }; }
+      // VERIFY Send is actually clickable (0 InMail credits / disabled button) — these are real
+      // failures, not per-batch ineligibility, so they stop the run loudly.
       const block = await page.evaluate((sel) => {
         const btn = document.querySelector(sel);
         const cs = btn ? getComputedStyle(btn) : null;
         const disabled = !btn || btn.disabled
           || btn.matches("[disabled], [aria-disabled='true']")
           || (cs && cs.pointerEvents === "none");
-        const t = (document.body.innerText || "").toLowerCase();
-        const rate = /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje|dentro de (las pr[óo]ximas )?24 horas/.test(t);
         const noCred = /\b0\s*\/\s*\d+\s*inmail/i.test(document.body.innerText || "");
-        return { disabled: !!disabled, rate, noCred };
-      }, SEND_BTN).catch(() => ({ disabled: false, rate: false, noCred: false }));
-      if (block.rate || block.disabled) {
-        const reason = block.rate ? "rate_limited_24h" : (block.noCred ? "no_inmail_credits" : "send_button_disabled");
-        // Capture the blocker banner (rate-limit / 0-credits / disabled Send) for visual proof.
+        return { disabled: !!disabled, noCred };
+      }, SEND_BTN).catch(() => ({ disabled: false, noCred: false }));
+      if (block.disabled || block.noCred) {
+        const reason = block.noCred ? "no_inmail_credits" : "send_button_disabled";
         await shot(`mensaje BLOQUEADO: ${reason}`).catch(() => {});
-        return { sent: false, blocked: true, reason, variableInserted, subjectSet };
+        return { sent: false, blocked: true, reason, notice_diag: notices, variableInserted, subjectSet };
       }
       const clicked = await clickSel(SEND_BTN);
-      await sleep(2500 + Math.floor(orand() * 1000));
-      const postRate = await page.evaluate(() =>
-        /more than once within 24 hours|will not receive this message|no se puede contactar (a esta persona )?m[áa]s de una vez|no recibir[áa] (este|el) mensaje/
-          .test((document.body.innerText || "").toLowerCase())
-      ).catch(() => false);
-      const sent = clicked && !postRate;
-      return { sent, variableInserted, subjectSet, ...(sent ? {} : { blocked: true, reason: "rate_limited_24h" }) };
+      // Success signal = the composer CLOSED. (The old check re-read the page for the
+      // "24 hours" banner, which stays on screen after a successful send → false negative →
+      // the batch was never noted/moved and got re-messaged next run.)
+      let composerGone = false;
+      for (let i = 0; i < 16 && !composerGone; i++) {
+        await sleep(500);
+        composerGone = await page.evaluate((sel) => {
+          const btn = document.querySelector(sel);
+          if (!btn) return true;
+          const r = btn.getBoundingClientRect();
+          return !(r.width > 0 && r.height > 0);
+        }, SEND_BTN).catch(() => false);
+      }
+      const sent = clicked && composerGone;
+      return { sent, variableInserted, subjectSet, notice_diag: notices,
+               ...(sent ? {} : { blocked: true, reason: "send_unconfirmed" }) };
     };
 
-    const recipients = new Map();  // union across pages (profile_url → row)
-    let messaged = 0, noted = 0, moved = 0, pagesDone = 0;
+    const recipients = new Map();  // MESSAGED rows only (profile_url → row) — drives the Odoo update
+    const skipped = new Map();     // DEFERRED rows (profile_url → {…, reason})
+    let messaged = 0, noted = 0, moved = 0, batchesDone = 0;
+    // Kept SEPARATE from noted/moved: those must stay equal to `messaged` (the invariant the
+    // whole redesign exists to protect). These count the skip path's bookkeeping.
+    let skippedNoted = 0, skippedMoved = 0;
     let variableInserted = false, subjectSet = true;
-    const diag = { pages: [] };
+    const diag = { batches: [], batch_size: batchSize, skip_urls_in: skipUrls.size };
     const MAX_ROUNDS = 12;
-    // The unified loop is much slower per page than note-only (adds compose+type+Send). Keep the
-    // whole step safely under the daemon's ~240s per-step watchdog: stop early and report
-    // more_remaining so the backend re-invokes send-messages to drain the rest (moved-to-contacted
-    // candidates leave the uncontacted stage, so a follow-up run naturally resumes).
+    // Keep the whole step safely under the daemon's ~240s per-step watchdog: stop early and
+    // report more_remaining so the backend chains another run (messaged candidates have left
+    // the uncontacted stage and deferred ones are carried in skip_urls, so the chain converges).
     const BUDGET_MS = 195000;
     const tStart = Date.now();
-    let stopReason = null, moreRemaining = false;
+    let stopReason = null, moreRemaining = false, lastBatchMs = 0;
+    // A run-local view of the deferred set: the incoming chain-wide skip list plus whatever
+    // this run defers, so the next batch never re-picks the same people.
+    const skipNow = new Set(skipUrls);
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
+      const tBatch = Date.now();
       if (round > 0) {
-        await sleep(1800 + Math.floor(orand() * 600));
+        await sleep(1500 + Math.floor(orand() * 500));
         const remaining = await readUncontactedCount();
-        if (remaining != null && remaining <= 0) break;
-        if (Date.now() - tStart > BUDGET_MS - 55000) { moreRemaining = true; stopReason = "budget"; break; }
+        // Everyone left in the uncontacted stage is deferred → nothing more this run.
+        if (remaining != null && remaining <= skipNow.size) { moreRemaining = skipNow.size > 0; break; }
+        // Adaptive budget: a sent batch costs ~2x a deferred one, so measure instead of guessing.
+        const elapsed = Date.now() - tStart;
+        if (elapsed + Math.max(lastBatchMs, 45000) * 1.15 > BUDGET_MS) {
+          moreRemaining = true; stopReason = "budget"; break;
+        }
       }
-      let pageSel, pageRows;
-      if (maxRecipients != null) {
-        // BOUNDED batch: select EXACTLY up to maxRecipients rows (per-row checkboxes). selectN
-        // returns the selected rows, which are the exact recipients (no separate enumeration).
-        const remaining = round === 0 ? recipientCount : (await readUncontactedCount());
-        const want = Math.min(maxRecipients, (remaining != null && remaining > 0) ? remaining : maxRecipients);
-        const sn = await selectN(want);
-        pageSel = sn.selected;
-        pageRows = sn.rows;
-        diag.select = { want, ...sn.diag, selected: sn.selected };
-        if (!pageSel) {
-          if (round === 0) return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_none", diag };
-          stopReason = "select_none"; break;
+      // How many to take: the batch size, capped by a one-shot maxRecipients (which also
+      // disables chaining) and by what's actually left.
+      const remainingNow = round === 0 ? recipientCount : (await readUncontactedCount());
+      let want = batchSize;
+      if (maxRecipients != null) want = Math.min(want, maxRecipients - messaged);
+      if (remainingNow != null && remainingNow > 0) want = Math.min(want, Math.max(remainingNow - skipNow.size, 1));
+      if (want <= 0) break;
+
+      const sn = await selectN(want, { skip: skipNow });
+      const batchSel = sn.selected;
+      const batchRows = sn.rows;
+      diag.select = { want, ...sn.diag, selected: batchSel };
+      if (!batchSel) {
+        // Nothing selectable. With a carried skip set this is EXPECTED (everyone reachable in
+        // the list is already deferred) — a clean stop, never a failure: failing here marks the
+        // Odoo position failed for a run that did exactly what it should. Only "nothing to skip
+        // and still nothing selectable" is real checkbox/DOM drift.
+        if (skipNow.size === 0) {
+          return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_none", diag };
         }
-      } else {
-        pageSel = await selectPage();
-        if (pageSel == null) {
-          if (round === 0) return { ok: false, sent: false, recipient_count: recipientCount, reason: "select_all_not_found" };
-          stopReason = "select_all_not_found"; break;
-        }
-        // Enumerate THIS page's rows so the backend marks EXACTLY the messaged profiles in Odoo.
-        // The list is VIRTUALIZED (~2 rows rendered), so a one-shot scrape under-captures — scroll
-        // to collect the full page (~25). collectListRows returns to the top; selection persists.
-        pageRows = await collectListRows(page, sleep, Math.min((pageSel || 25) + 5, 40), orand);
+        return { ok: true, sent: false, recipient_count: recipientCount,
+                 reason: "no_selectable_uncontacted", messaged_count: messaged,
+                 noted_count: noted, moved_count: moved,
+                 recipients: Array.from(recipients.values()),
+                 skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+                 skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
+                 batches: batchesDone, batch_size: batchSize,
+                 // Do NOT chain: another run would re-scan the same skipped list and stop again.
+                 variable_inserted: variableInserted, subject_set: subjectSet,
+                 stop_reason: "select_none", manage_url: manageUrl, diag };
       }
 
       const mr = await messageCurrentPage();
+      if (mr.notice_diag && !diag.notice_sample) diag.notice_sample = mr.notice_diag;
       if (mr.gated) {
-        for (const r of pageRows) if (r.profile_url) recipients.set(r.profile_url, r);
-        await shot(`mensaje: preview página 1 (${pageSel}), sin enviar`).catch(() => {});
+        for (const r of batchRows) if (r.profile_url) recipients.set(r.profile_url, r);
+        await shot(`mensaje: preview de ${batchSel} destinatario(s), sin enviar`).catch(() => {});
         return { ok: true, sent: false, gated: true, recipient_count: recipientCount,
-                 recipients: Array.from(recipients.values()), variable_inserted: mr.variableInserted,
-                 subject_set: mr.subjectSet, var_diag: lastVarDiag, manage_url: manageUrl };
+                 recipients: Array.from(recipients.values()), batch_size: batchSize,
+                 variable_inserted: mr.variableInserted,
+                 subject_set: mr.subjectSet, var_diag: lastVarDiag, manage_url: manageUrl, diag };
+      }
+      if (mr.deferred && !send) {
+        // Gated preview of a batch LinkedIn would refuse — report it (with the notice text +
+        // the composer HTML for offline selector tuning) and STOP. A preview never mutates.
+        await closeComposer();
+        return { ok: true, sent: false, gated: true, recipient_count: recipientCount,
+                 recipients: [], skipped: batchRows.map((r) => ({ ...r, reason: mr.reason })),
+                 skipped_count: batchRows.length, batch_size: batchSize,
+                 variable_inserted: mr.variableInserted, subject_set: mr.subjectSet,
+                 var_diag: lastVarDiag, manage_url: manageUrl, diag };
+      }
+      if (mr.deferred) {
+        // LinkedIn flagged ineligible recipients but won't say which → skip the WHOLE batch (no
+        // send). What happens next depends on WHY:
+        //   rate_limited_24h → temporary: leave them uncontacted, just don't re-pick them here.
+        //   team_contacted   → a colleague already worked them this month: RETIRE them from the
+        //     queue (note + move to 'contacted') so future sends stop re-scanning them.
+        const kind = mr.reason || "recipients_ineligible";
+        const retire = kind === "team_contacted" && !!skipNoteText;
+        await closeComposer();
+        await reloadStage();
+        let skipNoted = 0, skipMoved = 0, skipReason = null;
+        if (retire) {
+          const resel = await selectByUrls(batchRows.map((r) => r.profile_url).filter(Boolean));
+          const sel2 = resel.selected || batchSel;
+          let op = await openAddNote();
+          if (!op.opened) { await sleep(1500 + Math.floor(orand() * 500)); op = await openAddNote(); }
+          if (op.opened) {
+            await fillNote(skipNoteText);
+            const s = await saveNote();
+            if (s.ok) skipNoted = s.count || sel2; else skipReason = "skip_note_save_unverified";
+            const mv = await moveContacted();
+            if (mv.moved) skipMoved = mv.count || sel2;
+            else skipReason = skipReason || mv.reason || mv.retry_reason || "skip_move_failed";
+            await shot(`omitidos: nota+fase ${skipNoted}/${skipMoved}`).catch(() => {});
+          } else skipReason = "skip_note_open_failed";
+        }
+        skippedNoted += skipNoted;
+        skippedMoved += skipMoved;
+        for (const r of batchRows) {
+          if (!r.profile_url) continue;
+          skipped.set(r.profile_url, { ...r, reason: kind, retired: skipMoved > 0 });
+          // Retired candidates have LEFT the uncontacted stage, so they can't be re-picked and
+          // don't need to bloat skip_urls (a big skip set means a lot of scrolling per batch).
+          if (skipMoved === 0) skipNow.add(r.profile_url);
+        }
+        batchesDone++;
+        diag.batches.push({ batch: batchesDone, selected: batchSel, deferred: batchSel,
+                            kind, retired: skipMoved, skip_noted: skipNoted,
+                            skip_reason: skipReason, notices: mr.notices || [] });
+        if (skipMoved > 0) await reloadStage();
+        lastBatchMs = Date.now() - tBatch;
+        // A capped run caps how many are MESSAGED, so a batch that messaged nobody must not
+        // end it — otherwise a project like job 290 (60 team-contacted at the front of the
+        // queue) would retire 5 and stop, sending nothing, on every automatic tick.
+        if (maxRecipients != null && messaged >= maxRecipients) { stopReason = kind; break; }
+        continue;
       }
       if (!mr.sent) {
-        // Send blocked → do NOT note/move this page, and STOP (gate keeps the counts equal).
+        // A REAL blocker (0 credits / disabled Send / unconfirmed send) → never note/move, stop.
         stopReason = mr.reason || "send_blocked";
         moreRemaining = true;
         if (messaged === 0) {
           return { ok: false, sent: false, blocked: true, reason: stopReason,
                    recipient_count: recipientCount, messaged_count: 0, noted_count: 0, moved_count: 0,
-                   recipients: Array.from(recipients.values()), variable_inserted: mr.variableInserted,
+                   recipients: [], skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+                   skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
+                   batch_size: batchSize, variable_inserted: mr.variableInserted,
                    subject_set: mr.subjectSet, manage_url: manageUrl, diag };
         }
         break;
       }
-      messaged += pageSel;
+      messaged += batchSel;
       variableInserted = variableInserted || mr.variableInserted;
       subjectSet = subjectSet && mr.subjectSet;
-      for (const r of pageRows) if (r.profile_url) recipients.set(r.profile_url, r);
-      await shot(`mensaje: enviado página ${pagesDone + 1} (${pageSel} destinatario(s))`).catch(() => {});
+      for (const r of batchRows) if (r.profile_url) recipients.set(r.profile_url, r);
+      await shot(`mensaje: enviado a ${batchSel} destinatario(s)`).catch(() => {});
 
       // RELOAD a clean uncontacted list before noting: right after the composer closes, the bulk
       // toolbar is in a state where the add-note overflow won't open (observed: messaged>0 but
       // note_open_failed → 0 noted/0 moved). A fresh nav restores a clean toolbar. The messaged
       // candidates are STILL in the uncontacted stage (messaging ≠ stage change), so re-selecting
-      // the page targets the same set. Then re-select + note + move.
+      // the same rows targets the same set. Then re-select + note + move.
       await sleep(1200 + Math.floor(orand() * 500));
-      await page.goto(stageUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-      await page.waitForSelector("[data-live-test-select-all], .profile-list__select-all, input.small-input", { timeout: 20000 }).catch(() => {});
-      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
-      await sleep(1400 + Math.floor(orand() * 500));
-      // Re-select the SAME set for the note+move. Capped ⇒ re-select exactly N per-row (the same
-      // top-N messaged rows — order is stable and nothing has moved yet); else the whole page.
-      const pageSel2 = maxRecipients != null ? (await selectN(pageSel)).selected : await selectPage();
-      const sel2 = pageSel2 || pageSel;
+      await reloadStage();
+      // Re-select the SAME people by URL (not "the top N" — deferred rows sit above them).
+      const resel = await selectByUrls(batchRows.map((r) => r.profile_url).filter(Boolean));
+      const sel2 = resel.selected || batchSel;
 
-      // Add the contact note + move THIS page to "contacted" (same selection, gated on the send).
-      let pageNoted = 0, pageMoved = 0, noteReason = null, moveReason = null;
+      // Add the contact note + move THIS batch to "contacted" (same selection, gated on the send).
+      let batchNoted = 0, batchMoved = 0, noteReason = null, moveReason = null;
       if (noteText) {
         let op = await openAddNote();
         if (!op.opened) {  // one retry after a short settle — the toolbar can lag the reload
@@ -2075,40 +3057,54 @@ async function composeRecruiterMessage(page, options, orand, runtime) {
         if (op.opened) {
           await fillNote(noteText);
           const s = await saveNote();
-          if (s.ok) { pageNoted = s.count || sel2; noted += pageNoted; } else noteReason = "note_save_unverified";
+          if (s.ok) { batchNoted = s.count || sel2; noted += batchNoted; } else noteReason = "note_save_unverified";
           const mv = await moveContacted();
-          if (mv.moved) { pageMoved = mv.count || sel2; moved += pageMoved; }
+          if (mv.moved) { batchMoved = mv.count || sel2; moved += batchMoved; }
           else moveReason = mv.reason || mv.retry_reason || "move_failed_after_send";
-          await shot(`nota+fase página ${pagesDone + 1}: noted=${pageNoted} moved=${pageMoved}`).catch(() => {});
+          await shot(`nota+fase lote ${batchesDone + 1}: noted=${batchNoted} moved=${batchMoved}`).catch(() => {});
         } else noteReason = "note_open_failed";
       }
-      pagesDone++;
-      diag.pages.push({ page: pagesDone, selected: pageSel, messaged: pageSel, noted: pageNoted,
-                        moved: pageMoved, note_reason: noteReason, move_reason: moveReason });
+      batchesDone++;
+      diag.batches.push({ batch: batchesDone, selected: batchSel, messaged: batchSel, noted: batchNoted,
+                          moved: batchMoved, reselected: resel.selected,
+                          note_reason: noteReason, move_reason: moveReason });
+      lastBatchMs = Date.now() - tBatch;
 
-      if (maxRecipients != null) {
-        // BOUNDED batch complete — one deliberate batch, never auto-drain (no more_remaining).
+      if (maxRecipients != null && messaged >= maxRecipients) {
+        // One deliberate bounded batch — never auto-drain (no more_remaining).
         if (noteText && (noteReason || moveReason)) stopReason = moveReason || noteReason;
         break;
       }
       if (noteText) {
-        // A failed note/move AFTER a successful send: stop honestly (the page is still
-        // uncontacted; continuing would re-message it). Counts diverge for this page only.
+        // A failed note/move AFTER a successful send: stop honestly (the batch is still
+        // uncontacted; continuing would re-message it). Counts diverge for this batch only.
         if (noteReason || moveReason) { stopReason = moveReason || noteReason; moreRemaining = true; break; }
-        // Success: the moved page left the uncontacted view → loop re-reads the count and drains.
+        // Success: the moved batch left the uncontacted view → loop re-reads the count and drains.
       } else {
-        // BACKWARD-COMPAT: no note_text configured (an older backend that hasn't rolled out the
-        // unified flow) → behave like the legacy single-page send: message ONE page and STOP.
-        // We do NOT paginate here, so this never messages more people than the old code did.
-        if (recipientCount != null && recipientCount > pageSel) moreRemaining = true;
+        // BACKWARD-COMPAT: no note_text (older backend) → message ONE batch and STOP, since
+        // without the move the same people would be re-selected forever.
+        if (recipientCount != null && recipientCount > batchSel) moreRemaining = true;
         break;
       }
     }
 
-    return { ok: messaged > 0, sent: messaged > 0,
+    // Uncontacted people remain that this run neither messaged nor deferred → chain another run.
+    if (!moreRemaining && maxRecipients == null) {
+      const left = await readUncontactedCount().catch(() => null);
+      if (left != null && left > skipNow.size) moreRemaining = true;
+    }
+    // Deferring is a legitimate outcome, not a failure: the run must COMPLETE so the backend's
+    // terminal hook can chain the next one (a FAILED run stalls the whole flow — the bug that
+    // left 97 candidates unmessaged on job 290).
+    const ok = messaged > 0 || skipped.size > 0;
+    return { ok, sent: messaged > 0,
              messaged_count: messaged, noted_count: noted, moved_count: moved,
              recipient_count: recipientCount, recipients: Array.from(recipients.values()),
-             pages: pagesDone, ...(moreRemaining ? { more_remaining: true } : {}),
+             skipped: Array.from(skipped.values()), skipped_count: skipped.size,
+             skipped_noted_count: skippedNoted, skipped_moved_count: skippedMoved,
+             batches: batchesDone, batch_size: batchSize,
+             ...(messaged === 0 && skipped.size > 0 ? { reason: "all_deferred" } : {}),
+             ...(moreRemaining ? { more_remaining: true } : {}),
              variable_inserted: variableInserted, subject_set: subjectSet,
              ...(stopReason ? { stop_reason: stopReason } : {}), manage_url: manageUrl, diag };
   } catch (e) {
@@ -3073,12 +4069,16 @@ async function saveRecommendations(page, options, orand, runtime) {
       if (reqOTW && !otw) { row.setAttribute("data-sr-rec-done", "1"); continue; }  // quality filter
       const btn = row.querySelector(btnSel);
       const sub = row.querySelector(".artdeco-entity-lockup__subtitle");
+      // Location: the lockup caption ("San Jose, Costa Rica"). Captured for EVERY row
+      // (even with no filter configured) so a run always shows where its candidates are.
+      const cap = row.querySelector("[data-test-row-lockup-location], [data-live-test-row-lockup-location], .artdeco-entity-lockup__caption");
       row.setAttribute("data-sr-rec-r", "1");
       row.setAttribute("data-sr-rec-done", "1");
       btn.setAttribute("data-sr-rec-t", "1");
       row.scrollIntoView({ block: "center" });
       return { found: true, name: clean(link && (link.innerText || link.textContent)),
                headline: clean(sub && (sub.innerText || sub.textContent)),
+               location: clean(cap && (cap.innerText || cap.textContent)),
                profile_url: url, open_to_work: otw };
     }
     return { found: false };
@@ -3086,7 +4086,16 @@ async function saveRecommendations(page, options, orand, runtime) {
 
   const BUDGET_MS = 175000;
   const t0 = Date.now();
-  const collected = new Map();  // canonical url -> {name, headline, profile_url, open_to_work}
+  const collected = new Map();  // canonical url -> {name, headline, location, profile_url, open_to_work}
+  // Rows rejected by the geography filter. Kept across passes so a re-navigated list
+  // (doPass reloads the page, clearing the per-row done marks) doesn't re-examine them
+  // forever, and so the run can REPORT who was skipped and from where.
+  const locationTerms = locationSpecTerms(options.allowedLocations);
+  const skippedByLocation = new Map();
+  // The list DID offer rows, and every one of them was outside the position's
+  // geography: an expected "nothing to add" outcome, not a failure — and nothing a
+  // retry pass could improve.
+  const allOutOfLocation = () => collected.size === 0 && skippedByLocation.size > 0;
 
   // One pass over the recommendations: save up to `need` candidates not yet collected.
   const doPass = async (need) => {
@@ -3097,8 +4106,19 @@ async function saveRecommendations(page, options, orand, runtime) {
     await shot("recomendados: lista abierta").catch(() => {});  // visual: the review list is up
     let saved = 0, reason = null;
     while (saved < need && Date.now() - t0 < BUDGET_MS - 15000) {
-      const next = await tagNext([...collected.keys()]);
-      if (!next.found) { reason = collected.size === 0 ? "no_recommendations" : "exhausted"; break; }
+      const next = await tagNext([...collected.keys(), ...skippedByLocation.keys()]);
+      if (!next.found) {
+        reason = (collected.size === 0 && skippedByLocation.size === 0) ? "no_recommendations" : "exhausted";
+        break;
+      }
+      // Geography gate — BEFORE the row is added to the project (an unreadable location
+      // fails closed: skipped, and listed in skipped_examples so the selector can be
+      // fixed from real data instead of guessed).
+      if (!locationAllowed(next.location, locationTerms)) {
+        skippedByLocation.set(canon(next.profile_url) || `${next.name}#${skippedByLocation.size}`,
+                              { name: next.name, location: next.location || "" });
+        continue;
+      }
       await page.hover("[data-sr-rec-r]").catch(() => {});
       await sleep(380 + Math.floor(orand() * 260));
       let clicked = false;
@@ -3109,7 +4129,7 @@ async function saveRecommendations(page, options, orand, runtime) {
       if (!clicked) clicked = await clickSel("[data-sr-rec-t]");
       await sleep(1400 + Math.floor(orand() * 600));  // save applies (moves to pipeline)
       if (clicked && next.profile_url) {
-        collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, profile_url: next.profile_url, open_to_work: next.open_to_work });
+        collected.set(canon(next.profile_url), { name: next.name, headline: next.headline, location: next.location || "", profile_url: next.profile_url, open_to_work: next.open_to_work });
         saved++;
         // visual: who was just added (label carries the running count + the name)
         await shot(`recomendados: +${collected.size} ${(next.name || "").slice(0, 40)}`).catch(() => {});
@@ -3148,15 +4168,20 @@ async function saveRecommendations(page, options, orand, runtime) {
     // (some clicks didn't persist) — failed candidates are still in the recommendations
     // list, so this re-attempts them. Triggered off the reliable count delta, not the
     // fragile url match, so it can't over-add.
-    if (added < target && reason !== "no_recommendations" && Date.now() - t0 < BUDGET_MS - 30000) {
+    if (added < target && reason !== "no_recommendations" && !allOutOfLocation()
+        && Date.now() - t0 < BUDGET_MS - 30000) {
       reason = await doPass(target - added);
       activeAfter = await readActive();
       added = addedSince(activeBefore, activeAfter, collected.size);
     }
 
+    if (allOutOfLocation() && (!reason || reason === "exhausted")) reason = "all_out_of_location";
     const people = [...collected.values()];
+    const skippedLocation = [...skippedByLocation.values()];
     const confirmed = added;  // candidates actually added to the pipeline (count delta)
-    const ok = confirmed > 0 || people.length > 0;
+    // Zero added because every recommendation was out of geography is a SUCCESSFUL run
+    // with nothing to do — never a failure (and never a reason to widen the filter).
+    const ok = confirmed > 0 || people.length > 0 || reason === "all_out_of_location";
     if (!reason && confirmed < people.length) reason = "some_clicks_unconfirmed";
     return {
       ok,
@@ -3164,6 +4189,9 @@ async function saveRecommendations(page, options, orand, runtime) {
       saved: people.length,            // clicks that appeared to succeed
       confirmed,                       // candidates actually added (pipeline count delta)
       require_open_to_work: requireOpenToWork,
+      allowed_locations: options.allowedLocations || "",
+      skipped_location: skippedLocation.length,
+      skipped_examples: skippedLocation.slice(0, 12),
       active_before: activeBefore,
       active_after: activeAfter,
       review_url: reviewUrl,
@@ -3172,7 +4200,7 @@ async function saveRecommendations(page, options, orand, runtime) {
       // "No recommendations available right now" is an EXPECTED empty outcome (the review
       // surface rendered but had nothing new to add), NOT a failure — flag it so stageVerdict
       // doesn't fail the run and the backend posts a soft note.
-      no_recommendations: reason === "no_recommendations",
+      no_recommendations: reason === "no_recommendations" || reason === "all_out_of_location",
       ...(reason ? { reason } : {}),
     };
   } catch (e) {
