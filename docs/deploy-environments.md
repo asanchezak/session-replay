@@ -333,13 +333,11 @@ aws ec2 delete-security-group --region us-east-1 --group-id <sg>
 aws ec2 delete-key-pair --region us-east-1 --key-name <name>
 ```
 
-**Pending from the 2026-10-19 merge (rollback window):** the old DEV box
-`i-00c3bdac0e1f2624d` is STOPPED (not terminated), with SG `sg-071bbeb1cb8d55d71` + keypair
-`sr-ec2` still there, and EBS snapshots `snap-02355ce6f9ef4a605` (old DEV) /
-`snap-02a168299c8ce2117` (PROD) taken before the merge. Rollback = start the old box →
-`associate-address` 52.5.45.84 back to it → `up -d backend` there (it was stopped, and
-`unless-stopped` won't revive it). After ~1 week stable: terminate it (its root volume has
-DeleteOnTermination=true), delete the SG + `sr-ec2` keypair; delete the snapshots after ~2 weeks.
+**The 2026-10-19 merge is fully cleaned up (same day, at the user's request).** The old DEV
+box `i-00c3bdac0e1f2624d` was terminated, along with its 30GB volume, SG
+`sg-071bbeb1cb8d55d71` and keypair `sr-ec2`. The pre-merge EBS snapshots were deleted too.
+There is no instant rollback any more. The only pre-merge copies are the `pg_dump`s in
+Andrey's `~/Documents/sr-backups/2026-10-19-colocate/` (outside the repo).
 
 ---
 
