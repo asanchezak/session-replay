@@ -1,7 +1,8 @@
 name: sr
 
-# Single-box production stack: Postgres + backend + Caddy (auto-TLS reverse proxy).
-# Secrets come from deploy/.env.prod (gitignored) on the EC2 host.
+# PROD stack: Postgres + backend + Caddy (auto-TLS reverse proxy). Since 2026-10-19 the
+# DEV stack runs on the SAME box as project `sr-dev` (docker-compose.dev.yml), fronted by
+# this Caddy. Secrets come from deploy/.env.prod (gitignored) on the EC2 host.
 services:
   postgres:
     image: postgres:16
@@ -46,11 +47,29 @@ services:
       RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID: ${RECRUITER_ARCHIVE_CANDIDATE_WORKFLOW_ID:-}
       RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID: ${RECRUITER_ARCHIVE_PROJECT_WORKFLOW_ID:-}
       RECRUITER_DEFAULT_LOCATION: ${RECRUITER_DEFAULT_LOCATION:-}
+      # Per-position geography override, {"<hr.job id>":"<facet spec>"} as JSON.
+      # MUST be listed here or it never reaches the container (this file is an
+      # ALLOW-LIST, not an env_file passthrough — see the 2026-08-03 kill-switch
+      # incident). Kept a STRING in Settings so an empty value is a valid "unset"
+      # instead of a dict validation error that would refuse to start.
+      RECRUITER_JOB_LOCATIONS: ${RECRUITER_JOB_LOCATIONS:-}
       RECRUITER_RECOMMENDATIONS_WORKFLOW_ID: ${RECRUITER_RECOMMENDATIONS_WORKFLOW_ID:-}
       RECRUITER_SEARCH_START_TIGHTNESS: ${RECRUITER_SEARCH_START_TIGHTNESS:-2}
+      # NOTE: this block is an ALLOW-LIST — the service does not use `env_file`, so a variable
+      # added to .env.prod but not listed here NEVER reaches the container and silently falls
+      # back to the code default. That is how the auto-message kill switch was ignored on
+      # 2026-08-03 (RECRUITER_AUTO_MESSAGE_ENABLED=false in .env.prod, sends fired anyway).
+      # Any new setting that must be operable in production has to be added HERE too.
+      RECRUITER_AUTO_MESSAGE_ENABLED: ${RECRUITER_AUTO_MESSAGE_ENABLED:-true}
+      RECRUITER_AUTO_MESSAGE_DAILY_CAP: ${RECRUITER_AUTO_MESSAGE_DAILY_CAP:-20}
     volumes:
       - artifacts:/data/artifacts
 
+  # The ONE edge proxy on the box: serves PROD ($DOMAIN) and the co-located DEV stack
+  # ($DOMAIN_DEV, project sr-dev in /opt/sr-dev — see docker-compose.dev.yml). It reaches
+  # DEV's backend over the `sr-edge` network, which ONLY caddy and `backend-dev` join:
+  # `backend` stays unambiguous (PROD's, on this project's default network) and DEV can
+  # never resolve PROD's postgres.
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -61,11 +80,21 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
+      DOMAIN_DEV: ${DOMAIN_DEV}
+    networks:
+      - default
+      - edge
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./dashboard:/srv/dashboard:ro
+      - /opt/sr-dev/deploy/dashboard:/srv/dashboard-dev:ro
       - caddy_data:/data
       - caddy_config:/config
+
+networks:
+  edge:
+    name: sr-edge
+    external: true
 
 volumes:
   pgdata:

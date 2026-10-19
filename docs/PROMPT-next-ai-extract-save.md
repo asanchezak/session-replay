@@ -85,7 +85,7 @@ success even on a soft-miss — don't trust it; re-read the page).
   prefer pure-workflow (navigate/click/type/existing-strategy) changes that need no restart.
 - Spanish UI. Free-text facets commit on **Enter**; typeaheads commit by **selecting a suggestion**;
   the daemon's generic `type` can send `\n` (Enter) but cannot blur or press other keys.
-- After backend changes redeploy AWS (`./deploy/redeploy.sh`); never `docker compose down -v`.
+- After backend changes redeploy AWS (`TARGET=dev ./deploy/redeploy.sh`); never `docker compose down -v`.
 - **"Easy Recruit" sandbox project only** (id `2051206850`) — never a real recruiting project.
 
 **Full briefing (all detail): `docs/NEXT-TASK-recruiter-extract-and-save.md` in this repo. Read it first.**

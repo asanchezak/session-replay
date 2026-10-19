@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models.connector import ConnectorConfig
 from core.models.event import EventLog
 from core.models.run import ExecutionRun
+from services.recruiter_geography import location_allowed, spec_terms
 from services.profile_url_utils import (
     RECRUITER_PROFILE_MARKERS,
     canonical_profile_url,
@@ -116,7 +117,7 @@ class RecruiterPushService:
 
     async def _collect_recruiter_leads(self, run_id) -> list[dict]:
         """Flatten `people` from the search run's extractions; dedup by canonical
-        /talent/profile/ URL. First non-empty name/headline per URL wins."""
+        /talent/profile/ URL. First non-empty name/headline/location per URL wins."""
         by_url: dict[str, dict] = {}
         order: list[str] = []
         for rec in await self._extraction_rows(run_id):
@@ -129,13 +130,12 @@ class RecruiterPushService:
                 canon = canonical_profile_url(url)
                 lead = by_url.get(canon)
                 if lead is None:
-                    lead = {"profile_url": canon, "name": "", "headline": ""}
+                    lead = {"profile_url": canon, "name": "", "headline": "", "location": ""}
                     by_url[canon] = lead
                     order.append(canon)
-                if not lead["name"] and person.get("name"):
-                    lead["name"] = str(person["name"]).strip()
-                if not lead["headline"] and person.get("headline"):
-                    lead["headline"] = str(person["headline"]).strip()
+                for key in ("name", "headline", "location"):
+                    if not lead[key] and person.get(key):
+                        lead[key] = str(person[key]).strip()
         return [by_url[u] for u in order]
 
     # -------------------------------------------------------------- the pushes
@@ -168,7 +168,7 @@ class RecruiterPushService:
 
     async def push_recruiter_leads(self, *, run_id, job_id, connector_id,
                                    mode: str = "live", source: str = "",
-                                   blacklist=None) -> dict:
+                                   blacklist=None, allowed_locations: str = "") -> dict:
         """Requirement A: create linkedin.lead rows from the search run's candidates.
 
         Always returns the collected candidates under "leads" (even when the Odoo
@@ -184,11 +184,34 @@ class RecruiterPushService:
         return path so the caller can drive the post-add sweep (the bulk results-page
         save select-alls the LinkedIn page independent of leads, so a person filtered
         here can still land in the project and must be swept out).
+
+        `allowed_locations` (the position's ";"/"|" geography spec, optional) drops
+        people whose displayed location is outside it — returned under
+        "out_of_location". LinkedIn's location facet is not a guarantee: a city-level
+        search for job 303 still returned "San Carlos, San Pablo, Brasil" (230 km from
+        the São Paulo it asked for). Unreadable location ⇒ dropped (fail closed).
         """
         leads = await self._collect_recruiter_leads(run_id)
         if not leads:
             logger.info("recruiter lead push: no candidates for run %s", run_id)
-            return {"pushed": 0, "skipped": "no_leads", "leads": [], "blacklisted": []}
+            return {"pushed": 0, "skipped": "no_leads", "leads": [], "blacklisted": [],
+                    "out_of_location": []}
+        out_of_location: list[dict] = []
+        terms = spec_terms(allowed_locations)
+        if terms:
+            kept = []
+            for lead in leads:
+                (kept if location_allowed(lead.get("location"), terms) else out_of_location).append(lead)
+            if out_of_location:
+                logger.warning(
+                    "recruiter lead push: dropped %d/%d candidate(s) outside the position's "
+                    "geography for run %s: %s", len(out_of_location), len(leads), run_id,
+                    [f"{o.get('name')} ({o.get('location') or '?'})" for o in out_of_location],
+                )
+            leads = kept
+        if not leads:
+            return {"pushed": 0, "skipped": "no_leads", "leads": [], "blacklisted": [],
+                    "out_of_location": out_of_location}
         blacklisted: list[dict] = []
         if blacklist:
             kept: list[dict] = []
@@ -212,15 +235,18 @@ class RecruiterPushService:
             leads = kept
         if not leads:
             return {"pushed": 0, "skipped": "no_leads", "leads": [],
-                    "blacklisted": blacklisted}
+                    "blacklisted": blacklisted,
+                    "out_of_location": out_of_location}
         leads = leads[:DEFAULT_MAX_LEADS_PER_RUN]
         if not job_id:
             return {"pushed": 0, "skipped": "no_job_id", "leads": leads,
-                    "blacklisted": blacklisted}
+                    "blacklisted": blacklisted,
+                    "out_of_location": out_of_location}
         ep = await self._connector_endpoint(connector_id)
         if ep is None:
             return {"pushed": 0, "skipped": "connector_unconfigured", "leads": leads,
-                    "blacklisted": blacklisted}
+                    "blacklisted": blacklisted,
+                    "out_of_location": out_of_location}
         base_url, api_key = ep
         payload = {
             "job_id": job_id,
@@ -236,11 +262,13 @@ class RecruiterPushService:
                 len(leads), run_id, res,
             )
             return {"pushed": len(leads), "leads": leads,
-                    "blacklisted": blacklisted, **res}
+                    "blacklisted": blacklisted,
+                    "out_of_location": out_of_location, **res}
         except Exception:
             logger.exception("recruiter lead push: POST failed for run %s", run_id)
             return {"pushed": 0, "error": True, "leads": leads,
-                    "blacklisted": blacklisted}
+                    "blacklisted": blacklisted,
+                    "out_of_location": out_of_location}
 
     async def push_outreach_update(self, *, run_id, job_id, connector_id,
                                    messaged: list[dict] | list[str]) -> dict:
@@ -282,6 +310,47 @@ class RecruiterPushService:
             return {"pushed": len(messages), **res}
         except Exception:
             logger.exception("outreach push: POST failed for run %s", run_id)
+            return {"pushed": 0, "error": True}
+
+    async def push_leads_contacted_by_team(self, *, run_id, job_id, connector_id,
+                                          profile_urls: list[str], note: str = "") -> dict:
+        """Flag leads LinkedIn reported as "already contacted by someone on your team this
+        month" → POST /akcr/api/lead_contacted_by_team, which sets
+        outreach_status='contacted_by_team' so they leave the to-contact pool.
+
+        We never messaged these people (a colleague did), so this is NOT an outreach log.
+        Degrades QUIETLY when akcr hasn't rolled out the endpoint yet (404): the LinkedIn-side
+        note + move to 'contacted' has already retired them, so a missing status is cosmetic and
+        must never fail the send."""
+        if not job_id:
+            return {"pushed": 0, "skipped": "no_job_id"}
+        urls = [canonical_profile_url(u) for u in (profile_urls or []) if u]
+        urls = [u for u in urls if u]
+        if not urls:
+            return {"pushed": 0, "skipped": "no_valid_urls"}
+        ep = await self._connector_endpoint(connector_id)
+        if ep is None:
+            return {"pushed": 0, "skipped": "connector_unconfigured"}
+        base_url, api_key = ep
+        payload = {
+            "job_id": job_id,
+            "source_run_id": str(run_id),
+            "profile_urls": urls,
+            "note": note or "",
+        }
+        try:
+            res = await self._post(
+                base_url, api_key, "/akcr/api/lead_contacted_by_team", payload
+            )
+            logger.info(
+                "team-contacted push: flagged %d lead(s) for run %s odoo=%s", len(urls), run_id, res,
+            )
+            return {"pushed": len(urls), **(res if isinstance(res, dict) else {})}
+        except Exception as exc:  # noqa: BLE001 — cosmetic; never fail the send
+            logger.warning(
+                "team-contacted push: POST failed for run %s (akcr endpoint not deployed yet?): %s",
+                run_id, exc,
+            )
             return {"pushed": 0, "error": True}
 
     async def push_inbox_replies(self, *, connector_id, replied: list[dict] | list[str],
@@ -373,6 +442,13 @@ class RecruiterPushService:
         activates); leads are the deduped /talent/profile/ candidates."""
         url, total = None, None
         for rec in await self._extraction_rows(run_id):
+            # Only a SEARCH-RESULTS extraction may set the url the downstream bulk save
+            # navigates to. A search run posts other extractions too (the location-facet
+            # strategy), and those carry the advanced-search page URL — saving from THAT
+            # page would select the wrong people. Rows are ordered by sequence, so this
+            # is belt-and-braces, but the failure mode is silent and expensive.
+            if "people" not in rec and rec.get("total_count") is None:
+                continue
             if rec.get("url"):
                 url = rec.get("url")
             if rec.get("total_count") is not None:

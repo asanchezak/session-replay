@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const BEHAVIOR_VERSION = "2026-07-22-behavior-10-reply-scan-multi-backend";
+export const BEHAVIOR_VERSION = "2026-10-19-behavior-11-login-wall-fail-fast";
 
 // ── Seat-warmth gate state ───────────────────────────────────────────────────
 // The daemon must NOT drive /talent runs on a cold/walled seat (they'd fail and
@@ -373,8 +373,28 @@ function needsSeat(r) {
 // reportStepResult. On a non-checkpoint soft-miss the module logs and returns
 // { acted:false, critFail:null } so the host advances (the backend has no
 // per-step retry/heal — a success:false would FAIL the whole run).
+// The host's own failure text for a walled seat (driver-daemon.mjs): the backend reads
+// "walled" in it to relaunch the run once the seat is back.
+const SEAT_WALLED_REASON = "Recruiter seat walled — re-login (login-talent.bat) then Relaunch the run";
+
+// isBlockerUrl alone matches any site's /login, and generic runs may log into other sites.
+function isLinkedInLoginWall(h, url) {
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return false; }
+  return /(^|\.)linkedin\.com$/i.test(host) && (h.isBlockerUrl(url) || /login-cap/i.test(url));
+}
+
 export async function driveGenericStep({ step, page, idx, action, value, orand, api }) {
   const h = api.helpers;
+  // On LinkedIn's login wall every click/type lands on the login form: on 2026-10-15
+  // create-project typed the project name into it and only failed 90s later, and the gate,
+  // still trusting the last "warm" keepalive, handed the wall 15 more runs. Fail at the
+  // first step and hold seat runs until the next keepalive verdict.
+  if (isLinkedInLoginWall(h, page.url())) {
+    seatWarm = false;
+    console.log(`  step ${idx}: ${action} — page is on the LinkedIn login wall → failing run, holding seat runs`);
+    return { acted: false, critFail: SEAT_WALLED_REASON };
+  }
   const attempts = [{ selector_chain: step.selector_chain, action_type: action, value }];
   if (Array.isArray(step.methods)) {
     for (const m of step.methods) {

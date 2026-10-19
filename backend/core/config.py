@@ -88,16 +88,74 @@ class Settings(BaseSettings):
     # Env: RECRUITER_DEFAULT_LOCATION.
     recruiter_default_location: str = ""
     # Maps the Odoo hr.job.job_location selection (cr/latam/global) to the LinkedIn
-    # location facet string typed into the search. A value of "" means "skip the
-    # location facet entirely" (worldwide) — the search workflow's location block is
-    # marked skip_if_blank:location so it's pruned when no location is threaded. An
-    # unknown/empty job_location falls back to recruiter_default_location. Pydantic
+    # location facet spec: ";"-separated PLACES, each with "|"-separated spellings (the
+    # /talent seat flips ES↔EN). Every place must be a real Recruiter geo — the facet
+    # strategy commits only an EXACT typeahead match and FAILS the run when nothing
+    # applies, instead of silently searching the planet.
+    #
+    # `latam` used to be the single string "Latin America", which Recruiter's candidate-
+    # location typeahead does not offer: the old workflow typed it, matched nothing,
+    # clicked nothing, and the run sourced WORLDWIDE while Odoo said `latam` (jobs
+    # 296/297/301 → candidates from India, Pakistan, Ukraine, Australia, the US). LATAM
+    # is therefore enumerated country by country.
+    #
+    # "" means "skip the location facet entirely" (a deliberately worldwide position).
+    # An unknown/empty job_location falls back to recruiter_default_location. Pydantic
     # parses the env value as JSON. Env: RECRUITER_LOCATION_MAP.
     recruiter_location_map: dict[str, str] = {
         "cr": "Costa Rica",
-        "latam": "Latin America",
+        # ALL of Latin America, verified term by term against the live typeahead (probe
+        # workflow "location typeahead PROBE", 2026-09-08/09): every one of these
+        # resolves to an exact country suggestion, while "Latin America" /
+        # "Latinoamérica" / "América Latina" return ZERO suggestions — which is the whole
+        # reason this is a country list. Spanish spelling first (the seat's current
+        # language, so the match lands on the first try); the English alternate covers a
+        # seat that flips. Ordered by market size: the facet strategy applies them in
+        # order and reports any it could not reach inside its time budget, so a slow seat
+        # truncates the smallest markets rather than the biggest.
+        # Cuba and Puerto Rico are probe-verified too but deliberately OUT (no practical
+        # hiring path / US jurisdiction) — add them here if that changes.
+        # Cost: ~3.8s per place on the live seat (measured), so 18 places ≈ 69s of the
+        # facet step's 95s budget inside a ~145s search run (240s run watchdog).
+        "latam": (
+            "Costa Rica;México|Mexico;Colombia;Argentina;Brasil|Brazil;Chile;"
+            "Perú|Peru;Uruguay;Guatemala;Panamá|Panama;"
+            "República Dominicana|Dominican Republic;Ecuador;"
+            "Bolivia;Paraguay;Venezuela;El Salvador;Honduras;Nicaragua"
+        ),
         "global": "",
     }
+    # PER-POSITION geography override, keyed by the Odoo hr.job id, in the same
+    # ";"/"|" spec as recruiter_location_map. Wins over the job_location map, because a
+    # position can hire in a SUBSET of its region while Odoo's job_location selection
+    # only offers cr/latam/global: job 296 sources data engineers in Colombia, Mexico,
+    # Costa Rica, Brasil and Peru only, though the position is LATAM.
+    #
+    # A JSON object, kept as a STRING and parsed by recruiter_job_locations_map (below)
+    # on purpose: this is a live prod env var, and an unset/empty value must not be a
+    # container-crashing validation error the way an empty dict[str,str] field would be.
+    # Env: RECRUITER_JOB_LOCATIONS, e.g.
+    #   {"296":"Colombia;Mexico;Costa Rica;Brasil|Brazil;Peru"}
+    # The self-service home for this is an hr.job field on the Odoo side (needs akcr) —
+    # see docs/recruiter-subworkflows.md.
+    recruiter_job_locations: str = ""
+    # EVERY search also requires a spoken language ("que sepan inglés", operator
+    # directive 2026-09-09). Same ";"/"|" spec as the location facets: the seat answers
+    # in ITS OWN language, and typing "English" into a Spanish seat's language typeahead
+    # finds NOTHING (probe-verified) — hence both spellings.
+    # Empty ⇒ no language facet at all (the workflow step skips).
+    # Env: RECRUITER_SEARCH_LANGUAGE.
+    recruiter_search_language: str = "Inglés|English"
+    # Proficiency floor. LinkedIn's ES/EN ladder is Básico / Competente / Nivel
+    # profesional / Nivel profesional avanzado / Nativo o bilingüe = Elementary /
+    # Limited working / Professional working / FULL PROFESSIONAL / Native or bilingual.
+    # Empty leaves it at "Cualquiera" (any). Env: RECRUITER_SEARCH_LANGUAGE_PROFICIENCY.
+    recruiter_search_language_proficiency: str = "Nivel profesional avanzado|Full Professional"
+    # Facet MODE. LinkedIn defaults a new language to "Puede tener" ("can have"), which
+    # only RANKS — it does not exclude anyone. "Debe tener"/"Must have" is what makes the
+    # language an actual requirement. Empty ⇒ leave LinkedIn's default.
+    # Env: RECRUITER_SEARCH_LANGUAGE_MODE.
+    recruiter_search_language_mode: str = "Debe tener|Must have"
     # How many skills the INITIAL boolean AND's (musts first, then optionals) on top
     # of the (title OR …) clause — i.e. how STRICT the first search is. The builder's
     # default is 2 (title + 2 skills); raise it for a tighter first pass on rich JDs.
@@ -136,6 +194,29 @@ class Settings(BaseSettings):
     # the anti-bot load on the sensitive seat; the remainder drains over subsequent
     # searches (re-detection + dedup). Env: RECRUITER_MAX_SWEEP_ARCHIVES_PER_RUN.
     recruiter_max_sweep_archives_per_run: int = 10
+    # Bulk outreach batching. LinkedIn's composer reports ineligible recipients ("N recipients
+    # cannot be contacted more than once within 24 hours", "…contacted by someone on your team")
+    # as a COUNT ONLY and silently drops them, so a batch showing any such notice is skipped
+    # WHOLE to keep messaged == noted == moved exact. Small batches keep that collateral small.
+    # Env: RECRUITER_MESSAGE_BATCH_SIZE.
+    recruiter_message_batch_size: int = 5
+    # A send spans many chained runs (each bounded by the daemon's 240s per-step watchdog).
+    # Hard stop on the chain length so a pathological loop can't run forever.
+    # Env: RECRUITER_MESSAGE_MAX_CONTINUATIONS.
+    recruiter_message_max_continuations: int = 40
+    # AUTO-OUTREACH: message newly-added candidates without a human pressing the Odoo button.
+    # Fires from the recommendations terminal hook (that cron adds ~6 candidates every 30-90
+    # min). This sends REAL InMail autonomously on a sensitive account, so it is guard-heavy:
+    # it only ever reuses copy a human already sent for that position, and it is bounded by the
+    # daily cap below. KILL SWITCH: set false + restart the backend.
+    # Env: RECRUITER_AUTO_MESSAGE_ENABLED.
+    recruiter_auto_message_enabled: bool = True
+    # Max InMails per position per ROLLING 24h from the automation (manual sends count toward
+    # it too, so a human blast can't be doubled). Passed as max_recipients, which also disables
+    # the send's run-chaining — one tick can never fan out. NOTE: per POSITION, while credits
+    # and LinkedIn's limits are per ACCOUNT; revisit as a global cap if several positions
+    # switch on. Env: RECRUITER_AUTO_MESSAGE_DAILY_CAP.
+    recruiter_auto_message_daily_cap: int = 20
     log_level: str = "INFO"
     debug: bool = False
     rate_limit_enabled: bool = True
@@ -173,6 +254,23 @@ class Settings(BaseSettings):
                 return json.loads(s)
             return [o.strip() for o in s.split(",") if o.strip()]
         return v
+
+    @property
+    def recruiter_job_locations_map(self) -> dict[str, str]:
+        """RECRUITER_JOB_LOCATIONS parsed: {job_id: location spec}. Empty or malformed
+        degrades to {} (the job_location map then applies) instead of taking the backend
+        down — the caller logs the miss."""
+        raw = (self.recruiter_job_locations or "").strip()
+        if not raw:
+            return {}
+        import json
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {str(k): str(v) for k, v in parsed.items()}
 
     def check_insecure_defaults(self):
         if self.api_key.get_secret_value() == "dev-api-key-change-in-production":

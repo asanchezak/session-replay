@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,7 +103,15 @@ _PROJECT_URL_RE = re.compile(r"/talent/hire/(\d+)")
 # Prefix marking projects this automation created (so they're findable/cleanable).
 PROJECT_NAME_PREFIX = "EasyRecruit - "
 # Max chars to type into the LinkedIn project "Descripción del proyecto" textarea.
-_PROJECT_DESC_MAX = 2000
+# Kept SMALL on purpose: the create-project run is bounded by the daemon's per-RUN
+# watchdog (RUN_WATCHDOG_MS=240s), and the description is typed character-by-character
+# (humanized). A long JD (the old 2000-char cap) pushed a single create run past 240s
+# → the run was watchdog-aborted mid-create, so the project was left uncommitted and its
+# /talent/hire/<id> URL was never captured (no project_url/pid threaded downstream, which
+# in turn broke the bulk-save project picker). ~500 chars types in well under a minute,
+# leaving ample budget for the navigations/scrolls/extract in the same run. The project
+# description is informational only, so a trimmed blurb is fine.
+_PROJECT_DESC_MAX = 500
 # Default outreach copy for req B (send_messages); overridable per call.
 # Subject defaults to "{position} Opportunity"; falls back to this when the
 # job's position title isn't known.
@@ -118,6 +127,10 @@ DEFAULT_MESSAGE_BODY = (
 # the Odoo position — composed in _default_note_text from the job context + connector URL.
 DEFAULT_NOTE_PREFIX = "Contacted - "
 DEFAULT_CONTACTED_BY = "Automation"
+# Stamped on candidates a TEAMMATE already contacted this month (LinkedIn's composer says so).
+# We don't message them; this note + the move to 'contacted' retires them from the send queue so
+# every future send stops re-scanning them (PROD job 290: 5 straight batches were 100% these).
+DEFAULT_SKIP_NOTE_PREFIX = "Already contacted this month by the team - "
 
 
 def _default_subject(position: str | None) -> str:
@@ -211,7 +224,13 @@ class RecruiterPipelineService:
         a chatter note to the Odoo position so the recruiter knows the action is queued
         (not lost). Skips when the seat is warm, or when state is briefly unknown right
         after a backend restart (before the first heartbeat) so we don't cry wolf.
-        Best-effort. Part E's dedup means this posts once per unavailable episode."""
+        Best-effort. Part E's dedup means this posts once per unavailable episode.
+
+        AUTO runs never post it: they fire unattended every 30-90 min, so a seat that stays
+        walled overnight would paper the position with notes about an action nobody asked
+        for. The run still queues and drains when the seat warms up."""
+        if pipeline.get("auto"):
+            return
         try:
             from api.v1.daemon import latest_seat_warm, operator_online
 
@@ -263,6 +282,72 @@ class RecruiterPipelineService:
                 if str((o.get("pipeline") or {}).get("job_id")) == str(job_id):
                     return r
         return None
+
+    async def _last_human_message(self, job_id) -> tuple[str, str] | None:
+        """The subject+body of the most recent send a HUMAN made for this position, or None.
+
+        This is what makes auto-outreach safe to ship without an akcr change: the backend
+        never reads `hr.job.recruiter_message_template` (that field feeds the Odoo wizard),
+        and `send_messages(body=None)` would fall back to the GENERIC DEFAULT_MESSAGE_BODY —
+        i.e. an automatic send would quietly deliver different copy than the recruiter's.
+        So the automation reuses copy a human already approved for THIS position, and a
+        position with no prior human send simply never auto-sends.
+
+        Runs stamped `pipeline.auto` are EXCLUDED: they also complete with send=True and a
+        body, so accepting them would turn "a human approved this" into "something sent this
+        before" and let a disable/re-enable cycle bootstrap from the feature's own output.
+        """
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
+        )
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_MESSAGE or r.status != RunStatus.COMPLETED.value:
+                continue
+            p = o.get("pipeline") or {}
+            if str(p.get("job_id")) != str(job_id) or not p.get("send") or p.get("auto"):
+                continue
+            body = (p.get("body") or "").strip()
+            if body:
+                return (p.get("subject") or "").strip(), body
+        return None
+
+    async def _sent_last_24h(self, job_id) -> int:
+        """How many candidates were actually MESSAGED for this position in the last rolling
+        24h — the automation's daily budget. Counts MANUAL sends too, so a human blast can't
+        be doubled by the automation on the same day.
+
+        Rolling window, not a calendar day: no midnight burst, and it self-heals. Only
+        COMPLETED runs are counted (an in-flight run reports nothing yet) — which is exactly
+        why the caller must check for an ACTIVE message run BEFORE consulting this."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        result = await self.session.execute(
+            select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(300)
+        )
+        runs = []
+        for r in result.scalars().all():
+            o = r.origin or {}
+            if o.get("event_kind") != EVENT_MESSAGE or r.status != RunStatus.COMPLETED.value:
+                continue
+            if str((o.get("pipeline") or {}).get("job_id")) != str(job_id):
+                continue
+            created = r.created_at
+            if created is not None:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created < cutoff:
+                    break  # ordered desc → everything older is out of the window
+            runs.append(r)
+            if len(runs) >= 30:  # bound the per-run extraction reads (one hook, inline)
+                break
+        total = 0
+        for r in runs:
+            try:
+                compose = await self.push.read_message_compose_result(r.id)
+                total += int(compose.get("messaged_count") or 0)
+            except Exception:  # noqa: BLE001 — a missing extraction just counts as 0
+                logger.debug("auto-message: no compose result for run %s", r.id, exc_info=True)
+        return total
 
     async def _has_active_pipeline_run(self, job_id, event_kinds=None) -> bool:
         """Bool wrapper over _find_active_pipeline_run (avoid duplicate concurrent
@@ -580,9 +665,73 @@ class RecruiterPipelineService:
             event_kind=EVENT_RECOMMENDATIONS, run_id=run.id,
             message=f"✨ Added {n_added} recommended candidate(s) to the project.",
         )
+        # New people are in the project → message them without waiting for a human to press
+        # the Odoo button. Gated on NOT having just enqueued a blacklist sweep: send_messages
+        # defers (and returns None) while an archive run is active, so sending now would be a
+        # silent no-op — the next recommendations tick picks it up instead.
+        auto = {"auto_message": False, "reason": "blacklist_sweep_enqueued"} if blacklisted else \
+            await self._auto_send_after_recommendations(
+                job_id=job_id, connector_id=connector_id, pipeline=pipeline,
+            )
+        if blacklisted:
+            logger.warning(
+                "auto-message: job %s — skipped (blacklist_sweep_enqueued, %s person(s))",
+                job_id, len(blacklisted),
+            )
         return {"stage": "recommendations", "done": True,
                 "pushed": lead_res.get("pushed"), "leads": n_added,
-                "blacklisted": [b.get("name") for b in blacklisted]}
+                "blacklisted": [b.get("name") for b in blacklisted], "auto": auto}
+
+    async def _auto_send_after_recommendations(self, *, job_id, connector_id, pipeline) -> dict:
+        """Message the position's uncontacted candidates right after new ones were added.
+
+        Fires from the recommendations hook (an akcr cron adds ~6 candidates every 30-90 min),
+        so this is REAL InMail with no human in the loop on a sensitive account. Every guard
+        fails CLOSED — skip and try again next tick — and nothing here posts Odoo chatter,
+        because at one tick per 30-90 min any per-attempt note becomes 20-40 useless lines a
+        day. Skips log at WARNING on purpose: the PROD container drops INFO, and a
+        silently-dead auto-sender is this design's most likely failure mode.
+
+        GUARD ORDER IS LOAD-BEARING — see the active-run check below.
+        """
+        def skip(reason: str, **extra) -> dict:
+            logger.warning("auto-message: job %s — skipped (%s) %s", job_id, reason, extra or "")
+            return {"auto_message": False, "reason": reason, **extra}
+
+        if not settings.recruiter_auto_message_enabled:
+            return skip("disabled")
+        # An active archive/sweep makes send_messages defer and return None, so calling it
+        # would be a no-op that also spams "⏳ Finishing a blacklist cleanup…" every tick.
+        if await self._has_active_pipeline_run(job_id, {EVENT_ARCHIVE}):
+            return skip("archive_sweep_active")
+        # MUST come before the quota: _sent_last_24h only counts COMPLETED runs, so a tick
+        # landing mid-send would see a 0 contribution from the in-flight run and hand out the
+        # full daily quota a second time. (Also, _create_pipeline_run's dedup would silently
+        # collapse this onto the running one and discard these params.)
+        if await self._has_active_pipeline_run(job_id, {EVENT_MESSAGE}):
+            return skip("message_run_active")
+        approved = await self._last_human_message(job_id)
+        if approved is None:
+            return skip("no_human_approved_copy")
+        subject, body = approved
+        sent_24h = await self._sent_last_24h(job_id)
+        cap = int(settings.recruiter_auto_message_daily_cap or 0)
+        remaining = cap - sent_24h
+        if remaining <= 0:
+            return skip("daily_cap_reached", sent_24h=sent_24h, cap=cap)
+
+        run_id = await self.send_messages(
+            job_id, subject=subject, body=body, send=True,
+            max_recipients=remaining, auto=True,
+        )
+        if not run_id:
+            return skip("send_not_started")
+        logger.warning(  # WARNING so the one line that proves it fired survives PROD's filter
+            "auto-message: job %s — queued run %s (max_recipients=%s, sent_24h=%s/%s)",
+            job_id, run_id, remaining, sent_24h, cap,
+        )
+        return {"auto_message": True, "run_id": run_id, "max_recipients": remaining,
+                "sent_24h": sent_24h, "cap": cap}
 
     # ----------------------------------------------------------------- demo button
     async def start_demo(self, job_id, *, send: bool = False,
@@ -859,9 +1008,15 @@ class RecruiterPipelineService:
             # America, global→skip). Only thread it when non-empty: a blank location is
             # OMITTED so the search workflow's skip_if_blank:location steps are pruned
             # (a global/worldwide boolean-only search) — never typed as a literal.
-            location = self._resolve_search_location(job_location)
+            location = self._resolve_search_location(job_location, job_id)
             if location:
                 search_params["location"] = location
+            # Stash it on the pipeline: the calibration RERUN and the finalize summary
+            # must reuse the POSITION's geography. (They used to read
+            # recruiter_default_location instead, so a `latam` job silently recalibrated
+            # as Costa Rica only.)
+            pipeline["search_location"] = location
+            search_params.update(self._language_params())
             logger.info(
                 "recruiter pipeline: job %s job_location=%r → search location=%r",
                 job_id, job_location, location or "(skip facet)",
@@ -1009,10 +1164,53 @@ class RecruiterPipelineService:
         composed = "\n\n".join(sections).strip()
         return composed or (fallback or "")
 
-    def _resolve_search_location(self, job_location: str) -> str:
-        """Map the Odoo job_location (cr/latam/global) to a LinkedIn location facet
-        string. A KNOWN mapping wins (incl. "" = skip the facet, e.g. global); an
-        unknown/empty job_location falls back to recruiter_default_location."""
+    @staticmethod
+    def _language_params() -> dict:
+        """The spoken-language requirement every search carries. Blank config ⇒ nothing
+        threaded, and the workflow's language step skips itself (no facet at all)."""
+        lang = (settings.recruiter_search_language or "").strip()
+        if not lang:
+            return {}
+        params = {"language": lang}
+        prof = (settings.recruiter_search_language_proficiency or "").strip()
+        if prof:
+            params["language_proficiency"] = prof
+        mode = (settings.recruiter_search_language_mode or "").strip()
+        if mode:
+            params["language_mode"] = mode
+        return params
+
+    @staticmethod
+    def _location_label(spec: str) -> str:
+        """Human-readable form of a location spec for Odoo/chatter: the first spelling
+        of each entry, "; "-joined ("Costa Rica;Brazil|Brasil" → "Costa Rica; Brazil").
+        Not commas: city-level places carry their own ("Lima, Perú; Heredia, Costa Rica")."""
+        out = []
+        for entry in str(spec or "").split(";"):
+            first = entry.split("|")[0].strip()
+            if first:
+                out.append(first)
+        return "; ".join(out)
+
+    def _resolve_search_location(self, job_location: str, job_id=None) -> str:
+        """Resolve a position's geography to a LinkedIn location facet spec.
+
+        Order:
+        1. a PER-POSITION override (settings.recruiter_job_locations, keyed by the Odoo
+           hr.job id) — a position can hire in a SUBSET of its region while Odoo's
+           job_location selection only offers cr/latam/global;
+        2. the job_location map (a KNOWN key wins, including "" = skip the facet, which
+           is what `global` means);
+        3. recruiter_default_location, for an unknown/empty job_location.
+        The result is a facet SPEC: places separated by ";", spellings by "|"."""
+        if job_id is not None:
+            override = settings.recruiter_job_locations_map.get(str(job_id), "").strip()
+            if override:
+                logger.info(
+                    "recruiter pipeline: job %s geography OVERRIDE (job_location=%r) → %r",
+                    job_id, job_location, override,
+                )
+                return override
         loc_map = settings.recruiter_location_map or {}
         key = (job_location or "").strip().lower()
         if key in loc_map:
@@ -1069,6 +1267,13 @@ class RecruiterPipelineService:
         reruns = pipeline.get("search_reruns", 0)
         prev_count = pipeline.get("search_prev_count")  # count before this run's tightness
         adv_wf = settings.recruiter_advanced_search_workflow_id
+        # The position's geography (stashed when the first search run was created).
+        # Older runs predate the stash → re-derive it from the job_location; NEVER fall
+        # back to a global default, which is how a `latam` search became a CR-only one.
+        search_location = pipeline.get("search_location")
+        if search_location is None:
+            search_location = self._resolve_search_location(
+                pipeline.get("job_location") or "", job_id)
 
         # --- count calibration: converge toward a usable set, but DON'T burn every
         # rerun. Tighten only while the count is above the acceptable ceiling AND
@@ -1094,14 +1299,27 @@ class RecruiterPipelineService:
             if new_t is not None and 0 <= new_t <= b.max_tightness(spec) and new_t != tightness:
                 query = b.assemble(spec, new_t)
                 re_params = {"boolean_query": query}
-                if settings.recruiter_default_location:
-                    re_params["location"] = settings.recruiter_default_location
+                if search_location:
+                    re_params["location"] = search_location
+                re_params.update(self._language_params())
+                # Remember the tightest search so far that still had results, so a tighten
+                # that OVERSHOOTS (e.g. 1500 → 0) can fall back to it at finalize instead of
+                # discarding a usable candidate set. We only ever tighten when count is above
+                # the acceptable ceiling, so count here is always > 0 → a valid fallback.
+                best_search = pipeline.get("best_search")
+                if count and count > 0:
+                    best_search = {
+                        "url": result.get("url"), "count": count,
+                        "query": pipeline.get("search_query"), "run_id": str(run.id),
+                        "location": search_location,
+                    }
                 re_run = await self._create_pipeline_run(
                     workflow_id=adv_wf, event_kind=EVENT_SEARCH,
                     runtime_params=re_params,
                     pipeline={**pipeline, "search_tightness": new_t,
                               "search_reruns": reruns + 1, "search_query": query,
-                              "search_prev_count": count},
+                              "search_prev_count": count, "best_search": best_search,
+                              "search_location": search_location},
                     connector_id=connector_id,
                 )
                 logger.info(
@@ -1117,31 +1335,75 @@ class RecruiterPipelineService:
             )
 
         # --- in band (or no count / reruns exhausted): finalize ---
-        if pipeline.get("search_query"):
+        # Overshoot fallback: if the LAST search tightened below the usable band (typically
+        # a genuine 0-match result now that the extractor reports total_count=0 for an empty
+        # search) but an earlier, looser search DID have results, finalize on that best prior
+        # search instead of on the empty one — otherwise a single overshooting tighten throws
+        # away a perfectly good candidate set and the whole position ends with zero leads.
+        best = pipeline.get("best_search")
+        use_fallback = bool(
+            best and best.get("url") and (best.get("count") or 0) > 0
+            and (count is None or count < settings.recruiter_count_band_min)
+            # …and only onto a search run with the SAME geography. Falling back across
+            # facets is what put 6 candidates from India/Pakistan/Ukraine/Australia into
+            # job 296's `latam` project: the tightened (correctly faceted) search
+            # returned 4, below the band, so the pipeline reverted to the earlier
+            # search — whose location facet had silently not applied at all.
+            and (best.get("location") or "") == (search_location or "")
+        )
+        if use_fallback:
+            logger.warning(
+                "recruiter pipeline: job %s tighten overshot (count=%s < band_min=%s) — "
+                "falling back to best prior search run=%s count=%s",
+                job_id, count, settings.recruiter_count_band_min,
+                best.get("run_id"), best.get("count"),
+            )
+            eff_url = best.get("url")
+            eff_count = best.get("count")
+            eff_query = best.get("query") or pipeline.get("search_query")
+            lead_run_id = best.get("run_id") or run.id
+        else:
+            eff_url = result.get("url")
+            eff_count = count
+            eff_query = pipeline.get("search_query")
+            lead_run_id = run.id
+
+        if eff_query:
             # Readable summary of the facet filters applied to the search (currently
             # the location facet; extend here as more facets are added).
             filter_parts = []
-            if settings.recruiter_default_location:
-                filter_parts.append(f"Location: {settings.recruiter_default_location}")
+            if search_location:
+                filter_parts.append(f"Location: {self._location_label(search_location)}")
             await self.push.push_search_link(
                 run_id=run.id, job_id=job_id, connector_id=connector_id,
-                search_url=result.get("url"), count=count,
-                query=pipeline.get("search_query"),
+                search_url=eff_url, count=eff_count,
+                query=eff_query,
                 filters=" · ".join(filter_parts),
             )
         # Blacklist: fetch once for this run and pre-filter blocked people out of the
         # leads before they reach Odoo (empty/failed fetch ⇒ no-op).
         matcher = BlacklistMatcher(await self.push.fetch_lead_blacklist(connector_id))
         # Requirement A: candidates → linkedin.lead.
+        # Geography gate: LinkedIn's location facet narrows the search but does not
+        # guarantee it (job 303's city-level facet still returned a São Carlos profile
+        # for São Paulo), so people displayed outside the position's geography never
+        # become leads — and the save step below skips the same rows.
         lead_res = await self.push.push_recruiter_leads(
-            run_id=run.id, job_id=job_id, connector_id=connector_id,
+            run_id=lead_run_id, job_id=job_id, connector_id=connector_id,
             source="boolean_search", blacklist=matcher,
+            allowed_locations=search_location or "",
         )
         candidates = lead_res.get("leads") or []
         blacklisted = lead_res.get("blacklisted") or []
-        if blacklisted:
+        out_of_location = lead_res.get("out_of_location") or []
+        if blacklisted or out_of_location:
             origin = dict(run.origin or {})
-            origin["blacklist_dropped"] = [b.get("name") for b in blacklisted]
+            if blacklisted:
+                origin["blacklist_dropped"] = [b.get("name") for b in blacklisted]
+            if out_of_location:
+                origin["out_of_location_dropped"] = [
+                    {"name": o.get("name"), "location": o.get("location")} for o in out_of_location
+                ]
             run.origin = origin
             flag_modified(run, "origin")
             await self.session.flush()
@@ -1168,7 +1430,9 @@ class RecruiterPipelineService:
         # "found N; saving M…" when a save is enqueued, or a terminal "search complete"
         # note when there's nothing to save.
         n_cands = len(candidates)
-        found_str = f"found {count} result(s); " if count is not None else ""
+        found_str = f"found {eff_count} result(s); " if eff_count is not None else ""
+        if out_of_location:
+            found_str += f"{len(out_of_location)} outside the position's locations skipped; "
 
         # Save EVERY extracted candidate to the project: the count saved == the count
         # the search extracted (the extraction is itself bounded by the search
@@ -1187,7 +1451,7 @@ class RecruiterPipelineService:
         # The search extractor stores the LAST page it landed on (often start=25).
         # Normalize to start=0 so the bulk save begins on page 1 and can paginate
         # forward over the whole result set.
-        search_url = re.sub(r"([?&]start=)\d+", r"\g<1>0", result.get("url") or "")
+        search_url = re.sub(r"([?&]start=)\d+", r"\g<1>0", eff_url or "")
         if bulk_wf and project_name and to_save and search_url:
             target_count = len(to_save)
             save_run = await self._create_pipeline_run(
@@ -1200,6 +1464,9 @@ class RecruiterPipelineService:
                     # Lets the save step VERIFY: it navigates to the project's candidate
                     # list at the end (snapshot proof) and reads back the saved count.
                     "project_url": pipeline.get("project_url") or "",
+                    # The save selects rows on the LinkedIn results page by position,
+                    # not by lead — it skips the same out-of-geography rows itself.
+                    "allowed_locations": search_location or "",
                 },
                 pipeline={**pipeline, "bulk_save_target": target_count},
                 connector_id=connector_id,
@@ -1287,11 +1554,17 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
-                message=f"✅ All candidates in the project were already contacted "
-                        f"({compose.get('contacted_count', 0)}) — no new messages were sent.",
+                # An unattended tick that found nobody to message is a non-event — saying so
+                # every 30-90 min would bury the position's real history.
+                message="" if pipeline.get("auto") else (
+                    f"✅ All candidates in the project were already contacted "
+                    f"({compose.get('contacted_count', 0)}) — no new messages were sent."
+                ),
             )
             return {"stage": "message", "sent": False, "no_uncontacted": True}
-        if not pipeline.get("send") or not compose.get("sent"):
+        skipped = compose.get("skipped") or []
+        skipped_n = int(compose.get("skipped_count") or len(skipped))
+        if not pipeline.get("send") or (not compose.get("sent") and not skipped_n):
             logger.info(
                 "recruiter pipeline: message preview for job %s (send=%s sent=%s) — "
                 "no Odoo outreach update", job_id, pipeline.get("send"), compose.get("sent"),
@@ -1299,7 +1572,7 @@ class RecruiterPipelineService:
             await self._push_flow_status(
                 job_id=job_id, connector_id=connector_id, status="done",
                 event_kind=EVENT_MESSAGE, run_id=run.id,
-                message="✉️ Message preview ready (not sent).",
+                message="" if pipeline.get("auto") else "✉️ Message preview ready (not sent).",
             )
             return {"stage": "message", "sent": False, "preview": True}
         # The unified compose loop messaged + noted + moved-to-contacted the SAME candidates
@@ -1341,34 +1614,119 @@ class RecruiterPipelineService:
                     )
                 except Exception:  # noqa: BLE001 — mirroring is best-effort
                     logger.exception("recruiter pipeline: failed to mirror contact note for %s (run %s)", purl, run.id)
-        # ONE consistent chatter line. Happy path: the three counts agree. If a page's note/move
-        # failed after its send (stop_reason), report the honest three numbers instead of hiding it.
+        # Candidates a TEAMMATE already contacted this month: not messaged, but the strategy
+        # retired them from the queue (note + move to 'contacted'). Mirror that into Odoo so the
+        # position shows WHY they were skipped and they stop looking like untouched leads.
+        team_rows = [r for r in skipped
+                     if isinstance(r, dict) and r.get("reason") == "team_contacted"]
+        team_urls = [(r.get("profile_url") or "").strip() for r in team_rows]
+        team_urls = [u for u in team_urls if u]
+        if team_urls:
+            skip_note = pipeline.get("skip_note_text") or ""
+            if skip_note:
+                lkey = f"team-contacted-note:job{job_id}"
+                for purl in team_urls:
+                    try:
+                        await self.push.push_candidate_notes(
+                            run_id=run.id, connector_id=connector_id, profile_url=purl,
+                            notes=[{"body": skip_note, "key": lkey}], pushed=[],
+                        )
+                    except Exception:  # noqa: BLE001 — mirroring is best-effort
+                        logger.exception(
+                            "recruiter pipeline: failed to mirror team-contacted note for %s (run %s)",
+                            purl, run.id,
+                        )
+            # Flip the leads' outreach_status so they leave the "to contact" pool. Degrades
+            # quietly while akcr hasn't rolled out the new status (endpoint 404) — the LinkedIn
+            # move + the candidate note already retired them.
+            try:
+                res_skip = await self.push.push_leads_contacted_by_team(
+                    run_id=run.id, job_id=job_id, connector_id=connector_id,
+                    profile_urls=team_urls, note=pipeline.get("skip_note_text") or "",
+                )
+                logger.info(
+                    "recruiter pipeline: job %s — %s candidate(s) already contacted by the team → %s",
+                    job_id, len(team_urls), res_skip,
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "recruiter pipeline: failed to push team-contacted leads (job %s)", job_id
+                )
+        # Accumulate the CHAIN totals: one send spans many runs (5 candidates per composer,
+        # ~2 batches per run under the daemon watchdog), and only the LAST run posts chatter.
+        chain = dict(pipeline.get("chain") or {})
+        chain_index = int(chain.get("index") or 0)
+        totals = {
+            "messaged": int(chain.get("messaged") or 0) + messaged_n,
+            "noted": int(chain.get("noted") or 0) + noted_n,
+            "moved": int(chain.get("moved") or 0) + moved_n,
+            "skipped": int(chain.get("skipped") or 0) + skipped_n,
+            "retired": int(chain.get("retired") or 0) + int(compose.get("skipped_moved_count") or 0),
+        }
+        # Deferred candidates carry forward so the next run doesn't re-pick the same blocked
+        # people (that would burn its whole budget on them and never drain the stage). RETIRED
+        # ones are excluded: they already left the uncontacted stage, so carrying them would only
+        # bloat the skip list the strategy has to scroll past on every batch.
+        deferred_urls = list(pipeline.get("deferred_urls") or [])
+        for row in skipped:
+            if isinstance(row, dict) and row.get("retired"):
+                continue
+            url = (row.get("profile_url") or "").strip() if isinstance(row, dict) else str(row or "").strip()
+            if url and url not in deferred_urls:
+                deferred_urls.append(url)
+
         more = bool(compose.get("more_remaining"))
-        consistent = (messaged_n == noted_n == moved_n) and not compose.get("stop_reason")
-        if consistent:
-            msg = f"✉️📝 Messaged + noted + moved to 'contacted': {messaged_n} candidate(s)."
-        else:
-            msg = (f"✉️ Messaged {messaged_n} · 📝 noted {noted_n} · moved to 'contacted' {moved_n}"
-                   + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
-        if more:
-            msg += " Continuing with the remaining uncontacted candidates…"
-        await self._push_flow_status(
-            job_id=job_id, connector_id=connector_id, status="running" if more else "done",
-            event_kind=EVENT_MESSAGE, run_id=run.id, message=msg,
+        progressed = bool(messaged_n or skipped_n)
+        can_chain = (
+            more and pipeline.get("send") and progressed
+            and not pipeline.get("max_recipients")
+            and chain_index < settings.recruiter_message_max_continuations
         )
-        # More uncontacted pages remain (the run stopped at its time budget). Re-invoke the same
-        # send so a fresh daemon claim drains the rest — moved-to-contacted candidates have left
-        # the uncontacted stage, so this strictly converges (ends in "no_uncontacted").
         cont_run_id = None
-        if more and pipeline.get("send") and messaged_n and not pipeline.get("max_recipients"):
+        if can_chain:
             try:
                 cont_run_id = await self.send_messages(
                     job_id, subject=subject, body=pipeline.get("body"), send=True,
+                    batch_size=pipeline.get("batch_size"),
+                    deferred_urls=deferred_urls,
+                    chain={**totals, "index": chain_index + 1},
                 )
             except Exception:  # noqa: BLE001 — continuation is best-effort
                 logger.exception("recruiter pipeline: failed to continue message drain (job %s)", job_id)
-        return {"stage": "message", "sent": True, "outreach": res,
+        # Chatter: ONE final summary for the whole chain (intermediate runs update the status
+        # only — an empty `message` posts no chatter line).
+        if cont_run_id:
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="running",
+                event_kind=EVENT_MESSAGE, run_id=run.id, message="",
+            )
+        else:
+            consistent = (totals["messaged"] == totals["noted"] == totals["moved"]) and not compose.get("stop_reason")
+            if consistent:
+                msg = (f"✉️📝 Outreach complete — messaged + noted + moved to 'contacted': "
+                       f"{totals['messaged']} candidate(s).")
+            else:
+                msg = (f"✉️ Messaged {totals['messaged']} · 📝 noted {totals['noted']} · moved to "
+                       f"'contacted' {totals['moved']}"
+                       + (f" (stopped: {compose.get('stop_reason')})" if compose.get("stop_reason") else "") + ".")
+            retired = totals.get("retired") or 0
+            if retired:
+                msg += (f" 🤝 {retired} skipped because a teammate already contacted them this "
+                        f"month — noted and moved to 'contacted' so they're out of the queue.")
+            deferred_only = (totals["skipped"] or 0) - retired
+            if deferred_only > 0:
+                msg += (f" ⏭️ {deferred_only} skipped — LinkedIn won't message them again within "
+                        f"24h; they stay uncontacted and the next send picks them up.")
+            if more and not can_chain:
+                msg += " Uncontacted candidates remain — run the send again to continue."
+            await self._push_flow_status(
+                job_id=job_id, connector_id=connector_id, status="done",
+                event_kind=EVENT_MESSAGE, run_id=run.id, message=msg,
+            )
+        return {"stage": "message", "sent": bool(messaged_n), "outreach": res,
                 "messaged_count": messaged_n, "noted_count": noted_n, "moved_count": moved_n,
+                "skipped_count": skipped_n, "team_contacted_count": len(team_urls),
+                "chain_totals": totals, "chain_index": chain_index,
                 "more_remaining": more, "continuation_run_id": cont_run_id}
 
     async def _default_note_text(self, job_id, position: str | None,
@@ -1379,6 +1737,19 @@ class RecruiterPipelineService:
         pos = (position or "").strip()
         parts = [f"{DEFAULT_NOTE_PREFIX}{pos}".strip(" -") if pos else "Contacted",
                  f"by: {contacted_by}"]
+        ep = await self.push._connector_endpoint(connector_id)
+        if ep:
+            base, _key = ep
+            parts.append(f"{base.rstrip('/')}/web#id={job_id}&model=hr.job&view_type=form")
+        return " · ".join(parts)
+
+    async def _default_skip_note_text(self, job_id, position: str | None, connector_id) -> str:
+        """The note stamped on candidates skipped because a teammate already contacted them:
+        "Already contacted this month by the team - <position> · skipped by: Automation · <link>"."""
+        pos = (position or "").strip()
+        parts = [f"{DEFAULT_SKIP_NOTE_PREFIX}{pos}".strip(" -") if pos
+                 else DEFAULT_SKIP_NOTE_PREFIX.strip(" -"),
+                 f"skipped by: {DEFAULT_CONTACTED_BY}"]
         ep = await self.push._connector_endpoint(connector_id)
         if ep:
             base, _key = ep
@@ -1614,7 +1985,8 @@ class RecruiterPipelineService:
             select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(500)
         )
         ctx = {"connector_id": None, "project_id": None, "project_url": None,
-               "project_name": None, "position": None, "saved": []}
+               "project_name": None, "position": None, "saved": [],
+               "job_location": None, "search_location": None}
         seen = set()
         for r in result.scalars().all():
             o = r.origin or {}
@@ -1628,6 +2000,10 @@ class RecruiterPipelineService:
             ctx["project_url"] = ctx["project_url"] or p.get("project_url")
             ctx["project_name"] = ctx["project_name"] or p.get("project_name")
             ctx["position"] = ctx["position"] or p.get("position")
+            if ctx["job_location"] is None and p.get("job_location") is not None:
+                ctx["job_location"] = p.get("job_location")
+            if ctx["search_location"] is None and p.get("search_location") is not None:
+                ctx["search_location"] = p.get("search_location")
             if o.get("event_kind") == EVENT_SAVE and r.status == RunStatus.COMPLETED.value:
                 url = p.get("candidate_url")
                 if url and url not in seen:
@@ -1745,7 +2121,11 @@ class RecruiterPipelineService:
 
     async def send_messages(self, job_id, subject: str | None = None,
                             body: str | None = None, send: bool = False,
-                            max_recipients: int | None = None) -> str | None:
+                            max_recipients: int | None = None,
+                            batch_size: int | None = None,
+                            deferred_urls: list[str] | None = None,
+                            chain: dict | None = None,
+                            auto: bool = False) -> str | None:
         """Deliberate (manual/gated) req B trigger: bulk-message a job's project
         candidates with a template body. Fires the recruiter_message_compose run
         (GATED by `send`: send=False types everything + STOPS for a snapshot preview;
@@ -1754,9 +2134,19 @@ class RecruiterPipelineService:
         → _after_message → push_outreach_update marks the messaged leads in Odoo.
 
         Recipients = the project's UNCONTACTED candidates: the compose strategy switches
-        to LinkedIn's native "uncontacted" pipeline stage and select-alls it, so
-        already-contacted/replied candidates are never re-messaged. It reports exactly
-        the rows it selected so the backend marks precisely those in Odoo.
+        to LinkedIn's native "uncontacted" pipeline stage and works through it in small
+        batches (`batch_size`, default `recruiter_message_batch_size`), reporting exactly
+        the rows it messaged so the backend marks precisely those in Odoo.
+
+        A batch whose composer reports ineligible recipients ("N recipients cannot be
+        contacted more than once within 24 hours" / "…contacted by someone on your team")
+        is DEFERRED WHOLE — LinkedIn never says WHICH of them it would silently drop, so
+        messaging it would break the messaged == noted == moved guarantee. Deferred URLs
+        come back in the result and are carried forward via `deferred_urls` so the chain
+        converges instead of re-hitting the same blocked people.
+
+        `chain` accumulates the running totals across the chained runs so only the LAST
+        run posts a summary to the Odoo chatter.
         """
         wf = settings.recruiter_message_workflow_id
         if not wf:
@@ -1794,10 +2184,19 @@ class RecruiterPipelineService:
         note_text = await self._default_note_text(
             job_id, ctx.get("position"), ctx.get("connector_id"),
         )
+        # Note for a batch skipped because a teammate already contacted them this month — the
+        # strategy also moves those to 'contacted', retiring them from the queue.
+        skip_note_text = await self._default_skip_note_text(
+            job_id, ctx.get("position"), ctx.get("connector_id"),
+        )
         project_url = (
             f"https://www.linkedin.com/talent/hire/{ctx['project_id']}/manage/all"
         )
         cap = int(max_recipients) if max_recipients and int(max_recipients) > 0 else None
+        batch = int(batch_size) if batch_size and int(batch_size) > 0 else settings.recruiter_message_batch_size
+        deferred = [u for u in (deferred_urls or []) if u]
+        chain_ctx = dict(chain or {})
+        chain_ctx.setdefault("index", 0)
         pipeline_ctx = {
             "job_id": str(job_id),
             "connector_id": ctx.get("connector_id"),
@@ -1807,14 +2206,25 @@ class RecruiterPipelineService:
             "subject": subject,
             "body": body,
             "note_text": note_text,
+            "skip_note_text": skip_note_text,
             "max_recipients": cap,
+            "batch_size": batch,
+            "deferred_urls": deferred,
+            "chain": chain_ctx,
             "send": bool(send),
+            # Unattended send (see _auto_send_after_recommendations). Suppresses this
+            # path's chatter, and marks the run so it is never mistaken for the
+            # human-approved copy source in _last_human_message.
+            "auto": bool(auto),
         }
         runtime_params = {
             "project_url": project_url,
             "subject": subject,
             "body": body,
             "note_text": note_text,
+            "skip_note_text": skip_note_text,
+            "batch_size": str(batch),
+            "skip_urls": json.dumps(deferred) if deferred else "",
             "send": "true" if send else "false",
         }
         if cap is not None:
@@ -1831,12 +2241,16 @@ class RecruiterPipelineService:
             "recruiter pipeline: started message-compose run %s for job %s (send=%s)",
             run.id, job_id, send,
         )
-        await self._push_flow_status(
-            job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
-            event_kind=EVENT_MESSAGE, run_id=run.id,
-            message=("✉️ Sending the outreach message to the project's candidates…"
-                     if send else "✉️ Preparing the outreach message (preview)…"),
-        )
+        if not auto:
+            # Auto sends stay silent here: one tick per 30-90 min would turn this into
+            # dozens of daily notes. _after_message posts a single line, and only when
+            # somebody was actually messaged.
+            await self._push_flow_status(
+                job_id=str(job_id), connector_id=ctx.get("connector_id"), status="running",
+                event_kind=EVENT_MESSAGE, run_id=run.id,
+                message=("✉️ Sending the outreach message to the project's candidates…"
+                         if send else "✉️ Preparing the outreach message (preview)…"),
+            )
         return str(run.id)
 
     async def _recently_archived_names(self, job_id) -> set[str]:
@@ -2021,6 +2435,36 @@ class RecruiterPipelineService:
             logger.warning("recruiter pipeline: no project for job %s — can't save recommendations", job_id)
             return None
         m = _PROJECT_URL_RE.search(project_url)
+        # Geography. LinkedIn's Automated Sourcing recommends worldwide no matter what
+        # the position says (a `latam` job was handed Meta/Amazon/Microsoft engineers),
+        # so the position's facet spec is threaded to the strategy, which skips
+        # out-of-geography rows BEFORE adding them to the project.
+        #
+        # Resolved FRESH on every run — the akcr cron calls this for the life of a
+        # position: the per-position override wins, then the position's CURRENT Odoo
+        # job_location. The spec stashed by an earlier run is only a fallback for an
+        # Odoo read that came back empty. It used to be consulted FIRST, and since
+        # every recommendations run re-stashes what it used, a position stayed pinned
+        # to its first search's geography forever: job 303, narrowed from all of LATAM
+        # to nine cities, would have kept being fed recommendations from 18 countries.
+        override = settings.recruiter_job_locations_map.get(str(job_id), "").strip()
+        try:
+            _, _, job_location = await self._fetch_job_corpus(job_id, connector_id)
+        except Exception:
+            logger.warning("recruiter pipeline: could not read job_location for job %s",
+                           job_id, exc_info=True)
+            job_location = ""
+        if override or job_location:
+            allowed_locations = self._resolve_search_location(job_location, job_id)
+        else:
+            job_location = ctx.get("job_location") or ""
+            allowed_locations = ctx.get("search_location")
+            if allowed_locations is None:
+                allowed_locations = self._resolve_search_location(job_location, job_id)
+        logger.info(
+            "recruiter pipeline: recommendations for job %s job_location=%r → geography=%r",
+            job_id, job_location, allowed_locations or "(no filter)",
+        )
         pipeline = {
             "job_id": str(job_id),
             "connector_id": str(connector_id) if connector_id else None,
@@ -2028,11 +2472,14 @@ class RecruiterPipelineService:
             "project_url": project_url,
             "position": ctx.get("position"),
             "project_name": ctx.get("project_name"),
+            "job_location": job_location or "",
+            "search_location": allowed_locations,
         }
         run = await self._create_pipeline_run(
             workflow_id=wf, event_kind=EVENT_RECOMMENDATIONS,
             runtime_params={"project_url": project_url, "target_count": str(max(1, int(count))),
-                            "require_open_to_work": "true" if require_open_to_work else "false"},
+                            "require_open_to_work": "true" if require_open_to_work else "false",
+                            "allowed_locations": allowed_locations},
             pipeline=pipeline, connector_id=connector_id,
         )
         logger.info("recruiter pipeline: started recommendations run %s for job %s (count=%s)",
@@ -2108,7 +2555,8 @@ class RecruiterPipelineService:
             t = max(0, min(int(tightness), b.max_tightness(spec)))
             query = b.assemble(spec, t)
         params = {"boolean_query": query}
-        location = self._resolve_search_location(job_location)
+        params.update(self._language_params())
+        location = self._resolve_search_location(job_location, job_id)
         if location:
             params["location"] = location
         run = await self.exec_svc.create_run(workflow_id=adv_wf, runtime_params=params)

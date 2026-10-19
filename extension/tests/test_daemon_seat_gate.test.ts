@@ -55,6 +55,7 @@ function makeKeepAliveApi(walled: boolean) {
     helpers: {
       sleep: async () => {},
       isBlockerUrl: (u: string) => /login|checkpoint/i.test(u),
+      assertNoBlocker: async () => {},
       moveMouseAlongBezier: async () => {},
       humanScrollSeeded: async () => {},
     },
@@ -93,5 +94,54 @@ describe("daemon seat gate (pickPendingRun)", () => {
     await behavior.keepAliveTick(makeKeepAliveApi(false)); // seat now warm
     const picked = behavior.pickPendingRun([seatRun("s1")], api);
     expect(picked?.id).toBe("s1");
+  });
+});
+
+// A run that lands on LinkedIn's login wall fails at its first click/type (instead of
+// typing into the login form) and closes the gate, even though the last keepalive said warm.
+describe("daemon login wall in a generic step (driveGenericStep)", () => {
+  function stepApi() {
+    return {
+      helpers: {
+        isBlockerUrl: (u: string) => /\/checkpoint\/|\/uas\/login|\/login\?|\/login$|authwall|\/challenge/i.test(u),
+        resolveLocatorWithWait: async () => null,
+        resolveLocator: async () => null,
+      },
+      config: { STEP_RESOLVE_TIMEOUT_MS: 10 },
+    } as any;
+  }
+  const drive = (url: string) =>
+    behavior.driveGenericStep({
+      step: { selector_chain: [{ type: "css", value: "#name" }] },
+      page: { url: () => url },
+      idx: 4,
+      action: "type",
+      value: "x",
+      orand: Math.random,
+      api: stepApi(),
+    });
+
+  beforeEach(async () => {
+    await behavior.keepAliveTick(makeKeepAliveApi(false)); // last keepalive: warm
+  });
+
+  it("fails on the Recruiter login wall with the walled reason and holds seat runs", async () => {
+    const res = await drive(
+      "https://www.linkedin.com/uas/login-cap?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Ftalent%2Fcreate%2Fget-started",
+    );
+    expect(res.critFail).toMatch(/Recruiter seat walled/);
+    expect(behavior.pickPendingRun([seatRun("s1")], api)).toBeNull();
+  });
+
+  it("leaves another site's login page alone", async () => {
+    const res = await drive("https://app.example.com/login");
+    expect(res.critFail).toBeNull();
+    expect(behavior.pickPendingRun([seatRun("s1")], api)?.id).toBe("s1");
+  });
+
+  it("acts normally on a warm /talent page", async () => {
+    const res = await drive("https://www.linkedin.com/talent/create/get-started");
+    expect(res.critFail).toBeNull();
+    expect(behavior.pickPendingRun([seatRun("s1")], api)?.id).toBe("s1");
   });
 });

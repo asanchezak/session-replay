@@ -1,0 +1,43 @@
+name: sr-dev
+
+# DEV stack, co-located on the PROD box since 2026-10-19 (one t4g.micro serves both).
+# Lives in /opt/sr-dev with its OWN .env.prod, Postgres volume and backend source; only
+# the edge (Caddy) is shared — PROD's Caddy serves $DOMAIN_DEV and reaches `backend-dev`
+# over the `sr-edge` network.
+#
+# Service definitions are EXTENDED from docker-compose.prod.yml so the backend env
+# ALLOW-LIST stays in one place (a var added there reaches both envs).
+#
+# The name `sr-dev` is hardcoded on purpose: this file can never act on the PROD project
+# (`sr`), whichever directory it is run from. The backend service is `backend-dev` (not
+# `backend`) so the name `backend` on the shared network can only ever mean PROD's.
+#
+#   cd /opt/sr-dev/deploy && sudo docker compose -f docker-compose.dev.yml --env-file .env.prod <ps|logs|up -d ...>
+services:
+  postgres:
+    extends:
+      file: docker-compose.prod.yml
+      service: postgres
+    # Caps keep a DEV leak/build from starving PROD on the shared 1GB box.
+    mem_limit: 200m
+
+  backend-dev:
+    extends:
+      file: docker-compose.prod.yml
+      service: backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+      - edge
+    mem_limit: 400m
+
+networks:
+  edge:
+    name: sr-edge
+    external: true
+
+volumes:
+  pgdata:
+  artifacts:

@@ -1,0 +1,46 @@
+{
+  "name": "LinkedIn Recruiter: advanced-search FACET probe (read-only, no search)",
+  "description": "Diagnostic. Opens ONE advanced-search facet and reports its real expanded DOM — control inventory (inputs/selects/buttons with their data-test attributes and <select> options) plus trimmed outerHTML — so a new facet can be automated from evidence instead of guessed selectors. Written because the saved snapshots only ever captured facets COLLAPSED, so the expanded controls (typeahead input, must-have/can-have mode, proficiency dropdown) exist nowhere offline. With type_text it types a value and reports the typeahead suggestions; with select=true it also commits the exact match, so controls that only appear once a value is added get captured. Nothing is persisted: facet state is client-side until \"Run search\", which this workflow never clicks. Params: facet (a data-test suffix like \"spoken-languages\", or a full CSS selector), type_text, select.",
+  "target_url": "https://www.linkedin.com/talent/search/advanced",
+  "steps": [
+    {
+      "action_type": "navigate",
+      "intent": "Warm: Talent home",
+      "value": "https://www.linkedin.com/talent/home"
+    },
+    {
+      "action_type": "navigate",
+      "intent": "Advanced search",
+      "value": "https://www.linkedin.com/talent/search/advanced"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 1"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 2"
+    },
+    {
+      "action_type": "scroll",
+      "intent": "load 3 (facets below the fold)"
+    },
+    {
+      "action_type": "extract",
+      "intent": "Probe the facet (read-only — never runs the search)",
+      "methods": [
+        {
+          "kind": "extract_strategy",
+          "strategy": "recruiter_probe_facet"
+        },
+        {
+          "kind": "recruiter_probe_facet",
+          "facet": "{{facet}}",
+          "type_text": "{{type_text}}",
+          "select": "{{select}}",
+          "dropdowns": "{{dropdowns}}"
+        }
+      ]
+    }
+  ]
+}

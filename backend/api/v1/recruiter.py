@@ -31,8 +31,11 @@ class SendMessagesRequest(BaseModel):
     # no preview pre-step). Pass send=false explicitly only for a deliberate dry-run preview.
     send: bool = True
     # Bound the run to EXACTLY this many uncontacted candidates (per-row selection, one batch,
-    # no auto-drain). None ⇒ whole uncontacted stage across pages.
+    # no auto-drain). None ⇒ the whole uncontacted stage, drained by chained runs.
     max_recipients: int | None = None
+    # Candidates per composer send. None ⇒ settings.recruiter_message_batch_size (5). A batch
+    # whose composer reports ineligible recipients is skipped whole, so smaller = less collateral.
+    batch_size: int | None = None
 
 
 class AddNoteRequest(BaseModel):
@@ -141,6 +144,7 @@ async def send_messages(
         body=(req.body if req else None),
         send=(req.send if req else False),
         max_recipients=(req.max_recipients if req else None),
+        batch_size=(req.batch_size if req else None),
     )
     await db.commit()
     if not run_id:

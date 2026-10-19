@@ -60,15 +60,26 @@ test("archive / archive_all / recommendations / add_profile gate on result.ok", 
   assert.equal(v("recruiter_add_profile", "recruiter_demo_add", { add_profile_result: { ok: false } }).ok, false);
 });
 
-test("message: gated preview & sent pass; blocked/rate-limited fail with reason", () => {
+test("message: gated preview, sent & all-deferred pass; real blockers fail with reason", () => {
   assert.equal(v("recruiter_message_compose", "recruiter_message",
     { message_compose_result: { ok: true, sent: false, gated: true } }).ok, true);
   assert.equal(v("recruiter_message_compose", "recruiter_message",
     { message_compose_result: { ok: true, sent: true } }).ok, true);
+  // Every batch deferred (LinkedIn reported ineligible recipients) is a legitimate outcome:
+  // the run must COMPLETE so the backend chains the next one. Failing here stalled the whole
+  // outreach on job 290 (0 of 97 messaged, 2026-07-27).
+  assert.equal(v("recruiter_message_compose", "recruiter_message",
+    { message_compose_result: { ok: true, sent: false, reason: "all_deferred", skipped_count: 5 } }).ok, true);
+  assert.equal(v("recruiter_message_compose", "recruiter_message",
+    { message_compose_result: { ok: false, sent: false, reason: "all_deferred", skipped_count: 5 } }).ok, true);
+  // 0 InMail credits / a genuinely disabled Send button are still hard failures.
   const blocked = v("recruiter_message_compose", "recruiter_message",
-    { message_compose_result: { ok: false, blocked: true, reason: "rate_limited_24h" } });
+    { message_compose_result: { ok: false, blocked: true, reason: "no_inmail_credits" } });
   assert.equal(blocked.ok, false);
-  assert.equal(blocked.reason, "rate_limited_24h");
+  assert.equal(blocked.reason, "no_inmail_credits");
+  const unconfirmed = v("recruiter_message_compose", "recruiter_message",
+    { message_compose_result: { ok: false, blocked: true, reason: "send_unconfirmed", skipped_count: 2 } });
+  assert.equal(unconfirmed.ok, false);
   // Safety cap: an over-large uncontacted set FAILS the run loudly (never sends unbounded).
   const capped = v("recruiter_message_compose", "recruiter_message",
     { message_compose_result: { ok: false, sent: false, reason: "exceeds_max_recipients", recipient_count: 500 } });

@@ -63,6 +63,134 @@ Summary table lives in `CLAUDE.md`. Daemon + session ops are in `docs/recruiter-
   AND terms don't over-narrow. To go 146 → ~15: raise tightness / add the years facet (`input[name="range-from"]`/
   `[name="range-to"]` + "Update" `button.button-small-primary[type="submit"]`, per the recording) — the calibration knob.
 
+- **(2d-bis) GEOGRAPHY: the location facet is now a verified strategy, not a blind click — 2026-09-08.**
+  The blind pair above (type `{{location}}` → click `li[data-live-test-result="0"]`) reported SUCCESS even when
+  it selected NOTHING: a non-checkpoint step that resolves no selector is a silent soft-miss. Combined with
+  `RECRUITER_LOCATION_MAP["latam"] = "Latin America"` — **a name Recruiter's candidate-location typeahead does
+  not offer** — every `latam` position searched the ENTIRE WORLD while Odoo said LATAM. Live damage (morsoft):
+  jobs **296 / 297 / 301** sourced candidates from India, Pakistan, Ukraine, Australia and the US; job 296 had
+  79 of them already contacted.
+  - **Probe first, then decide.** Workflow `location-typeahead-probe.json` (`recruiter_apply_locations` with
+    `dry_run:true`) types each term and REPORTS the suggestions, committing nothing and running no search —
+    a read-only way to ask the live seat what it accepts. Verified 2026-09-08 (runs `5adab31a`, `96f84b04`):
+    `Latin America` / `Latinoamérica` / `América Latina` → **[] (zero suggestions)**; every LATAM country →
+    an exact country suggestion at index 0. The seat answers in **Spanish** ("Brasil", "México", "República
+    Dominicana") even when typed in English, so a spec carries `|`-alternatives per place.
+  - **Strategy `recruiter_apply_locations`** (`recruiter.mjs`): opens the facet, types each place, commits ONLY
+    an **exact normalized typeahead match** (accent/case-insensitive — so "Mexico" still matches "México", but
+    "Costa Rica" never silently becomes "Costa Rica, Mato Grosso del Sur, **Brasil**", which the typeahead really
+    does offer), then verifies the label landed in the facet's own text before counting it applied. Nothing
+    applied ⇒ `ok:false` ⇒ `stageVerdict` **FAILS the run** — a run that cannot honor the position's geography
+    must never fall through to a worldwide search. Bounded at 65s (the daemon watchdog covers the WHOLE run at
+    240s and a search already costs 105-135s); a truncated tail is reported in `missing`, still LATAM-only.
+  - **Spec format** (one string, threads through the existing `{{location}}` param): places separated by `;`,
+    spellings by `|` — `"Costa Rica;México|Mexico;Brasil|Brazil"`. Empty / unresolved `{{location}}` ⇒ no facet
+    at all (a deliberately global position). `RECRUITER_LOCATION_MAP["latam"]` now enumerates 12 countries.
+  - **The two other leaks fixed with it:** the calibration RERUN used to re-derive the location from
+    `recruiter_default_location` (so a `latam` job silently recalibrated as Costa Rica only) — it now reuses the
+    position's own spec, stashed as `pipeline.search_location`; and the overshoot fallback used to revert to
+    "the best earlier search", **including one whose facet never applied** (exactly how job 296's worldwide
+    15 000-result search won over the correctly-faceted 4-result one and got bulk-saved) — it now only falls back
+    onto a prior search with the SAME geography.
+  - Search results now also carry each card's `location` in the extraction (`data-test-row-lockup-location`,
+    NOT the caption class — verified offline against the saved snapshots): proof, in the run's own data, that
+    the facet applied.
+  - **LIVE-VERIFIED on PROD 2026-09-09**, run `fdd53511` (read-only: no project, no save, no Odoo push) with
+    job 296's own boolean: **applied 12/12**, `missing:[]`, the facet text listing all twelve pills, and every
+    extracted candidate in LATAM (Brasil, Argentina, República Dominicana) where the same boolean had returned
+    India/Bangladesh/Pakistan/Ukraine/Australia. **139s** total — inside the 240s run watchdog (the twelve
+    places replaced the old ~20s facet block, so the run grew only marginally).
+  - **Recommendations filter live-verified the same day** on job 297's project by running it with an impossible
+    geography (`Antártida|Antarctica`) — a zero-write way to exercise the gate: it read the real captions
+    ("Austin y alrededores, Texas" ×2), skipped both, and the project's ACTIVE count stayed at 40. It also
+    caught a real bug: the bounded RETRY pass re-assigned `reason`, clobbering `all_out_of_location` back to
+    `"exhausted"` → `ok:false` → the run FAILED (run `7f9be90b`) even though skipping every row was correct,
+    which in a pipeline run would have marked the Odoo position failed for nothing. The classification now
+    happens AFTER the retry, and the retry is skipped entirely when every row was out of geography (run
+    `78e30407`: `ok:true`, `reason:all_out_of_location`, 55s).
+
+- **(2d-ter) Per-POSITION geography override — 2026-09-09.** Odoo's `hr.job.job_location` is a
+  3-value selection (`cr` / `latam` / `global`), so it cannot say "this position hires in five of
+  the eighteen LATAM countries". `settings.recruiter_job_locations` (env `RECRUITER_JOB_LOCATIONS`,
+  a JSON object keyed by hr.job id) is consulted FIRST by `_resolve_search_location(job_location,
+  job_id)` and wins over the map; every call site threads the job id (create-project, calibration
+  rerun, preview-count, recommendations). Live on PROD for job 296:
+  `{"296":"Colombia;Mexico;Costa Rica;Brasil|Brazil;Peru"}` → verified via `preview-count` run
+  `52eb00c9` (the BACKEND resolved the spec, not the caller): facet applied **5/5**
+  (Colombia, México, Costa Rica, Brasil, Perú), 36 results. All-ASCII spellings are enough —
+  matching is accent-insensitive, so "Mexico" hits "México" and "Peru" hits "Perú"; only
+  Brasil/Brazil and República Dominicana/Dominican Republic genuinely need the `|` alternate.
+  Two deployment traps, both hit before: the var must be added to `docker-compose.prod.yml`'s
+  `environment:` allow-list or it never reaches the container, and it is typed `str` (parsed by
+  `recruiter_job_locations_map`) because a `dict[str,str]` pydantic field turns an empty env
+  value into a validation error that refuses to boot.
+  `RECRUITER_LOCATION_MAP["latam"]` is now the full **18** countries — verified as a set on PROD
+  (`preview-count` run `bb7297ba`: **18/18** applied, `missing:[]`, facet step **71s**, run 153s).
+
+- **(2d-ter-bis) CITY-level geography (job 303) — 2026-09-25.** A position can require CITIES, not
+  countries: morsoft job 303's JD says "must be based in Bogotá or Medellín, São Paulo, the GAM, or Lima",
+  yet it is `job_location=latam`, so PROD searched all 18 countries and saved people from Quito, the São
+  Paulo *state*, "Colombia", São Carlos… (4 of 6). The spec entries are simply the typeahead's own
+  city/province labels, e.g. `RECRUITER_JOB_LOCATIONS={"303":"Sao Paulo, San Pablo, Brasil;Medellín,
+  Antioquia, Colombia;Bogotá, Distrito Capital, Colombia;Gran Área Metropolitana, San José, Costa Rica;San
+  José, Costa Rica;Heredia, Costa Rica;Alajuela, Costa Rica;Cartago, Costa Rica;Lima, Perú"}`.
+  - **The typeahead does not find every label by its own text** (probe run `5fea20cf`, DEV): typed in
+    full, `Sao Paulo, San Pablo, Brasil` returns **nothing** and `Bogotá, Distrito Capital, Colombia`
+    returns only `Distrito Capital, Colombia` — yet `Sao Paulo` / `Bogotá` offer those exact labels. The
+    other 7 resolve in full. `recruiter_apply_locations` now types the full label and, on a miss, its most
+    specific part (`locationTypeaheadQueries`: text before the first comma) — still committing ONLY the
+    exact full label, so the short query can never widen the geography. Country specs are single-segment
+    ⇒ no fallback ⇒ unchanged behavior.
+  - **The recommendations filter works unchanged** for city labels: suffix match admits the city and its
+    districts ("Escazú, San José, Costa Rica", "Miraflores, Lima, Perú") and rejects the state, the country
+    alone and neighbouring cities ("San Pablo, Brasil", "Colombia", "Campinas, San Pablo, Brasil").
+  - **LinkedIn's location facet is NOT a guarantee — the search stage is now gated too.** DEV copy of
+    303 (qaodoo job 368, search run `a9d4ee13`): facet applied 9/9, yet 1 of 5 results was "San Carlos,
+    San Pablo, Brasil" (230 km from São Paulo; also one of PROD's 4 bad saves). The same spec now gates
+    both ends of the search stage: `push_recruiter_leads(allowed_locations=…)` drops those people before
+    they become Odoo leads (Python twin of the JS matcher: `backend/services/recruiter_geography.py`,
+    recorded on the run as `origin.out_of_location_dropped`), and the results-page save
+    (`recruiter_save_results_to_project`, param `allowed_locations` — workflow `7f11deb6`) never ticks a row
+    displayed outside it. That second half matters most: the save selects rows by POSITION on the page,
+    not by lead, and the per-position InMail goes to the PROJECT's uncontacted stage — a person saved to the
+    project gets messaged whether or not they are an Odoo lead. Unreadable row location ⇒ skipped; if that
+    leaves nothing saved the run FAILS (`location_unreadable` = selector drift), while "every row was out of
+    geography" (`all_out_of_location`) passes, like the recommendations gate.
+  - **Metro-area geos exist and are NOT the city** — `Área metropolitana de Medellín`, `Área metropolitana
+    de Bogotá D.C.`, `Área metropolitana de Lima`, `São Paulo y alrededores` (and search cards can show
+    English ones like "Quito Metropolitan Area"). A profile located at the metro level is rejected by a
+    city-only spec; add the metro label as its own `;` entry if the position should include it.
+  - **Recommendations used to IGNORE a geography change.** `save_recommendations` preferred the
+    `search_location` stashed by the job's newest run, and every recommendations run re-stashes what it
+    used ⇒ a position stayed pinned to its FIRST search's geography forever (the akcr cron would have kept
+    feeding 303 recommendations from 18 countries after the override). It now resolves fresh every run:
+    override → current Odoo `job_location` → the stash only when Odoo comes back empty.
+
+- **(2d-quater) SPOKEN LANGUAGE: every search requires English — 2026-09-09.** Strategy
+  `recruiter_apply_languages` on `[data-test-facet-spoken-languages]`, added as its own step
+  between the location facet and "Run search" (workflow `1bc44128`, now 18 steps). Params
+  `language` / `language_proficiency` / `language_mode`, threaded by
+  `RecruiterPipelineService._language_params()` into the first search, the calibration rerun AND
+  `preview_count` — a rerun that dropped the requirement would have been the same class of bug as
+  the rerun that dropped the geography.
+  - **Automated from a live probe, not from guesses.** The saved snapshots only ever captured
+    this facet COLLAPSED (`aria-expanded="false"`, just the edit button), so the expanded
+    controls existed nowhere offline. `facet-probe.json` (`72a4e33c`, DEV) opens one facet and
+    dumps its controls, dropdown menus and typeahead suggestions without committing anything.
+    First finding: **typing "English" returns "No se ha encontrado ningún idioma"** — the seat is
+    Spanish and wants "Inglés". Second: the proficiency menu is
+    Cualquiera / Básico / Competente / Nivel profesional / **Nivel profesional avanzado** /
+    Nativo o bilingüe, and the mode menu is Puede tener / **Debe tener** / No es necesario que
+    tenga; both are plain `artdeco-dropdown` triggers whose items only exist while the menu is
+    open (which is why the first probe pass came back with empty menus).
+  - **Counts, measured on PROD with the same boolean and the same 5 countries (job 296):**
+    no language `36` → can-have `31` → must-have `31`. One language ⇒ the mode is irrelevant to
+    the result set; it becomes an AND across values only with two or more languages.
+  - **Full production shape verified** (job 297 `preview-count`, run `ac2ee7d5`): 18/18 countries
+    + `Inglés` at `Nivel profesional avanzado` / `Debe tener` → 22 results in 164s.
+  - Recommendations cannot be language-gated (Automated Sourcing rows expose no language) —
+    geography only.
+
 - **(2e/3b) Results-page extract + save — LIVE-VERIFIED 2026-06-09.** Workflow
   `1bc44128-6755-437e-b41c-2cc65d135454` run `017d0562-6fa3-4614-b943-0d739b394fb5`
   extracted **30 unique `/talent/profile/` URLs** from the focused search, proving lazy-list scroll plus pagination
