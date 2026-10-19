@@ -546,8 +546,8 @@ are in memory `project_aws_backend_deploy`.
 > `/opt/sr-dev` (project `sr-dev`, service `backend-dev`, `docker-compose.dev.yml`). Both
 > EIPs sit on that box, so both URLs are unchanged; SSH is always `sr-prod.pem` @
 > `54.211.23.18`. Served by ONE shared multi-backend daemon/seat. Full runbook — layout,
-> per-env IDs, deploying backend/frontend/daemon, DB seeding, gotchas, teardown, the
-> pending rollback-window cleanup — is **`docs/deploy-environments.md`**. Read it before
+> per-env IDs, deploying backend/frontend/daemon, DB seeding, gotchas, teardown — is
+> **`docs/deploy-environments.md`**. Read it before
 > any cross-environment deploy. `deploy/redeploy.sh` needs `TARGET`:
 > `TARGET=dev ./deploy/redeploy.sh` / `TARGET=prod API_KEY=<prod-key> ./deploy/redeploy.sh`.
 
