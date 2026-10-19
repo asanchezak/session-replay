@@ -521,24 +521,27 @@ The backend runs on **AWS** (single EC2 + docker-compose), and everything reache
 at the stable URL **`https://52-5-45-84.sslip.io`**. Infra IDs / secrets / teardown
 are in memory `project_aws_backend_deploy`.
 
-> **TWO environments now exist:** DEV (`52-5-45-84.sslip.io` → qaodoo) and PROD
-> (`54-211-23-18.sslip.io` → morsoft), separate EC2 boxes, served by ONE shared
-> multi-backend daemon/seat. Full runbook — per-env IDs, how to deploy backend/frontend/
-> daemon to each, DB seeding, provisioning a new box, secrets, gotchas, teardown — is
-> **`docs/deploy-environments.md`** (bootstrap script `deploy/ec2-bootstrap.sh`). Read it
-> before any cross-environment deploy. `deploy/redeploy.sh` takes `EIP/DOMAIN/PEM/API_KEY`
-> overrides (default = DEV); prod = `EIP=54.211.23.18 DOMAIN=54-211-23-18.sslip.io
-> PEM=deploy/sr-prod.pem API_KEY=<prod-key> ./deploy/redeploy.sh`.
+> **TWO environments, ONE box (since 2026-10-19):** DEV (`52-5-45-84.sslip.io` → qaodoo)
+> and PROD (`54-211-23-18.sslip.io` → morsoft) are two compose projects on the SAME EC2
+> (`i-05b040cc9eaf73146`): PROD = `/opt/sr` (project `sr`, owns the only Caddy), DEV =
+> `/opt/sr-dev` (project `sr-dev`, service `backend-dev`, `docker-compose.dev.yml`). Both
+> EIPs sit on that box, so both URLs are unchanged; SSH is always `sr-prod.pem` @
+> `54.211.23.18`. Served by ONE shared multi-backend daemon/seat. Full runbook — layout,
+> per-env IDs, deploying backend/frontend/daemon, DB seeding, gotchas, teardown, the
+> pending rollback-window cleanup — is **`docs/deploy-environments.md`**. Read it before
+> any cross-environment deploy. `deploy/redeploy.sh` needs `TARGET`:
+> `TARGET=dev ./deploy/redeploy.sh` / `TARGET=prod API_KEY=<prod-key> ./deploy/redeploy.sh`.
 
 **Standing rule: after ANY change, redeploy so every part stays up to date** — the
 backend on AWS AND the clients that point at it (extension, daemon on Fernanda's host,
 frontend). Don't leave the box running stale code.
 
 Per change:
-- **Backend (`backend/` or `deploy/`)** → `./deploy/redeploy.sh` (one command: packages
-  source, ships to the EC2, rebuilds the image, restarts the `backend` container, checks
-  health). Manual equivalent: `scp` source to `/opt/sr/backend`, then on the box
-  `cd /opt/sr/deploy && sudo docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build backend`.
+- **Backend (`backend/` or `deploy/`)** → `TARGET=dev|prod ./deploy/redeploy.sh` (one command:
+  packages source, ships to that env's dir on the box, rebuilds + restarts ONLY that env's
+  backend container, checks health). Manual equivalent (PROD): `scp` source to `/opt/sr/backend`,
+  then `cd /opt/sr/deploy && sudo docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build backend`;
+  DEV: `/opt/sr-dev`, `-f docker-compose.dev.yml`, service `backend-dev`.
 - **Extension (`extension/`)** → rebuild pointed at AWS, then reload on each browser host:
   `VITE_API_BASE_URL=https://52-5-45-84.sslip.io/v1 VITE_API_KEY=<gateway-key> npm run build`
   → copy `dist/` to the host → reload unpacked.
@@ -559,7 +562,7 @@ Per change:
 consistent schema (it can't be rebuilt from `create_all`/`alembic` — see the memory;
 recreate only via a `pg_dump` restore). Redeploys reuse the volume.
 
-Secrets never in git: `deploy/.env.prod` (on the box) + `deploy/sr-ec2.pem` are
+Secrets never in git: `deploy/.env.prod` (on the box) + `deploy/*.pem` are
 gitignored. The gateway `API_KEY` must match across backend `.env.prod`, the
 extension/frontend builds, and the daemon's `daemon-task.ps1`. (Future: a GitHub
 Action on push could automate the backend redeploy; today it's `redeploy.sh`.)
