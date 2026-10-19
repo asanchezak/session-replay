@@ -1183,13 +1183,14 @@ class RecruiterPipelineService:
     @staticmethod
     def _location_label(spec: str) -> str:
         """Human-readable form of a location spec for Odoo/chatter: the first spelling
-        of each entry, comma-joined ("Costa Rica;Brazil|Brasil" → "Costa Rica, Brazil")."""
+        of each entry, "; "-joined ("Costa Rica;Brazil|Brasil" → "Costa Rica; Brazil").
+        Not commas: city-level places carry their own ("Lima, Perú; Heredia, Costa Rica")."""
         out = []
         for entry in str(spec or "").split(";"):
             first = entry.split("|")[0].strip()
             if first:
                 out.append(first)
-        return ", ".join(out)
+        return "; ".join(out)
 
     def _resolve_search_location(self, job_location: str, job_id=None) -> str:
         """Resolve a position's geography to a LinkedIn location facet spec.
@@ -1383,15 +1384,26 @@ class RecruiterPipelineService:
         # leads before they reach Odoo (empty/failed fetch ⇒ no-op).
         matcher = BlacklistMatcher(await self.push.fetch_lead_blacklist(connector_id))
         # Requirement A: candidates → linkedin.lead.
+        # Geography gate: LinkedIn's location facet narrows the search but does not
+        # guarantee it (job 303's city-level facet still returned a São Carlos profile
+        # for São Paulo), so people displayed outside the position's geography never
+        # become leads — and the save step below skips the same rows.
         lead_res = await self.push.push_recruiter_leads(
             run_id=lead_run_id, job_id=job_id, connector_id=connector_id,
             source="boolean_search", blacklist=matcher,
+            allowed_locations=search_location or "",
         )
         candidates = lead_res.get("leads") or []
         blacklisted = lead_res.get("blacklisted") or []
-        if blacklisted:
+        out_of_location = lead_res.get("out_of_location") or []
+        if blacklisted or out_of_location:
             origin = dict(run.origin or {})
-            origin["blacklist_dropped"] = [b.get("name") for b in blacklisted]
+            if blacklisted:
+                origin["blacklist_dropped"] = [b.get("name") for b in blacklisted]
+            if out_of_location:
+                origin["out_of_location_dropped"] = [
+                    {"name": o.get("name"), "location": o.get("location")} for o in out_of_location
+                ]
             run.origin = origin
             flag_modified(run, "origin")
             await self.session.flush()
@@ -1419,6 +1431,8 @@ class RecruiterPipelineService:
         # note when there's nothing to save.
         n_cands = len(candidates)
         found_str = f"found {eff_count} result(s); " if eff_count is not None else ""
+        if out_of_location:
+            found_str += f"{len(out_of_location)} outside the position's locations skipped; "
 
         # Save EVERY extracted candidate to the project: the count saved == the count
         # the search extracted (the extraction is itself bounded by the search
@@ -1450,6 +1464,9 @@ class RecruiterPipelineService:
                     # Lets the save step VERIFY: it navigates to the project's candidate
                     # list at the end (snapshot proof) and reads back the saved count.
                     "project_url": pipeline.get("project_url") or "",
+                    # The save selects rows on the LinkedIn results page by position,
+                    # not by lead — it skips the same out-of-geography rows itself.
+                    "allowed_locations": search_location or "",
                 },
                 pipeline={**pipeline, "bulk_save_target": target_count},
                 connector_id=connector_id,
@@ -2420,19 +2437,30 @@ class RecruiterPipelineService:
         m = _PROJECT_URL_RE.search(project_url)
         # Geography. LinkedIn's Automated Sourcing recommends worldwide no matter what
         # the position says (a `latam` job was handed Meta/Amazon/Microsoft engineers),
-        # so the same facet spec used by the search is threaded to the strategy, which
-        # skips out-of-geography rows BEFORE adding them to the project.
-        job_location = ctx.get("job_location")
-        if job_location is None:
-            try:
-                _, _, job_location = await self._fetch_job_corpus(job_id, connector_id)
-            except Exception:
-                logger.warning("recruiter pipeline: could not read job_location for job %s "
-                               "— recommendations run unfiltered", job_id, exc_info=True)
-                job_location = ""
-        allowed_locations = ctx.get("search_location")
-        if allowed_locations is None:
-            allowed_locations = self._resolve_search_location(job_location or "", job_id)
+        # so the position's facet spec is threaded to the strategy, which skips
+        # out-of-geography rows BEFORE adding them to the project.
+        #
+        # Resolved FRESH on every run — the akcr cron calls this for the life of a
+        # position: the per-position override wins, then the position's CURRENT Odoo
+        # job_location. The spec stashed by an earlier run is only a fallback for an
+        # Odoo read that came back empty. It used to be consulted FIRST, and since
+        # every recommendations run re-stashes what it used, a position stayed pinned
+        # to its first search's geography forever: job 303, narrowed from all of LATAM
+        # to nine cities, would have kept being fed recommendations from 18 countries.
+        override = settings.recruiter_job_locations_map.get(str(job_id), "").strip()
+        try:
+            _, _, job_location = await self._fetch_job_corpus(job_id, connector_id)
+        except Exception:
+            logger.warning("recruiter pipeline: could not read job_location for job %s",
+                           job_id, exc_info=True)
+            job_location = ""
+        if override or job_location:
+            allowed_locations = self._resolve_search_location(job_location, job_id)
+        else:
+            job_location = ctx.get("job_location") or ""
+            allowed_locations = ctx.get("search_location")
+            if allowed_locations is None:
+                allowed_locations = self._resolve_search_location(job_location, job_id)
         logger.info(
             "recruiter pipeline: recommendations for job %s job_location=%r → geography=%r",
             job_id, job_location, allowed_locations or "(no filter)",

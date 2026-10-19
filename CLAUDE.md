@@ -143,6 +143,25 @@ so an empty/malformed value degrades to `{}` instead of refusing to start the co
 `docker exec sr-backend-1 printenv`). The self-service home for this is an `hr.job` field on the
 akcr side; until that ships, changing it means editing `.env.prod` + a redeploy.
 
+**CITY-level geography + the facet is NOT a guarantee (2026-09-25, job 303).** A position can
+require cities (303: "based in Bogotá or Medellín, São Paulo, the GAM, or Lima"): the override
+entries are then the typeahead's own labels (`"Sao Paulo, San Pablo, Brasil;…;Lima, Perú"`, live on
+PROD for 303). Three things learned doing it:
+- **Some labels can't be typed in full** — `Sao Paulo, San Pablo, Brasil` → zero suggestions,
+  `Bogotá, Distrito Capital, Colombia` → only the region (probe `5fea20cf`). The facet strategy now
+  retries with the label's first segment ("Bogotá") and still commits only the exact full label.
+- **LinkedIn's facet leaks**: with 9/9 applied it still returned "San Carlos, San Pablo, Brasil" for
+  São Paulo. So the SEARCH stage is now location-gated like recommendations: the lead push drops
+  out-of-geography people (`backend/services/recruiter_geography.py`, `origin.out_of_location_dropped`)
+  and the results-page save (workflow `7f11deb6`, param `allowed_locations`) never ticks their row —
+  that one matters most, because InMails go to the PROJECT's uncontacted stage, lead or not.
+- **Recommendations were pinned to the FIRST search's geography** (they preferred the stash from the
+  job's newest run, and each rec run re-stashes it) — an override/`job_location` change never reached
+  the akcr cron. They now resolve fresh: override → current Odoo `job_location` → stash as fallback.
+Metro-area geos (`Área metropolitana de Medellín/Bogotá D.C./Lima`, `São Paulo y alrededores`) are
+distinct from the city — add them as their own entries if a position should include them. Details:
+`docs/recruiter-subworkflows.md` (2d-ter-bis).
+
 **Cost budget (measured on the live seat, don't guess):** ~3.9s per place — 12 places = 46s,
 18 places = **71s** — inside the facet step's 95s budget, and a full search run lands at
 ~150-190s against the daemon's **240s whole-run** watchdog (the long boolean alone costs ~43s to
